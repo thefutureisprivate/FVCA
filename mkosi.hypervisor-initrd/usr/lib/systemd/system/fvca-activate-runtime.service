@@ -1,8 +1,8 @@
 [Unit]
 Description=Activate the UKI-authorized FVCA VM runtime
 DefaultDependencies=no
-Requires=sysroot.mount
-After=sysroot.mount
+Requires=sysroot.mount systemd-ask-password-console.path
+After=sysroot.mount systemd-ask-password-console.path
 AssertSecurity=uefi-secureboot
 AssertSecurity=selinux
 
@@ -11,6 +11,6 @@ Type=oneshot
 ExecStartPre=/usr/bin/modprobe --ignore-install kvm_intel nested=0
 ExecStart=/usr/lib/fvca/activate-runtime
 RemainAfterExit=yes
-TimeoutStartSec=30s
+TimeoutStartSec=105s
 StandardOutput=journal+console
 NoNewPrivileges=yes

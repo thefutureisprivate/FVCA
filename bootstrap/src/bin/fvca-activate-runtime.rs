@@ -9,6 +9,9 @@ use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "fvca-activate-runtime/storage.rs"]
+mod storage;
+
 #[global_allocator]
 static ALLOCATOR: System = System;
 
@@ -148,6 +151,7 @@ fn activate() -> io::Result<()> {
         "fvca-vm-runtime", "/sysroot/usr",
     ]))?;
     install_development_probe()?;
+    storage::activate_if_selected()?;
 
     println!("FVCA_VM_RUNTIME_ACTIVE {runtime_hash}");
     Ok(())

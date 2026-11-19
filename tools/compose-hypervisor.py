@@ -4,6 +4,7 @@
 import argparse
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -47,12 +48,27 @@ def verify_initrd(initrd, uname):
         raise ValueError("expected the Hypervisor initramfs with its activation units")
     if f"usr/lib/modules/{uname}/modules.dep" not in paths:
         raise ValueError("the Hypervisor initramfs does not match the core kernel")
-    for name in ("hypervisor.composition", "vm-runtime.p7s"):
+    for name in ("hypervisor.composition", "vm-runtime.p7s", "host-storage"):
         if f"usr/lib/fvca/{name}" in paths:
             raise ValueError("expected an unconfigured Hypervisor initramfs")
 
 
-def authorize_runtime(work, boot_key, boot_certificate, core_hash, runtime_hash):
+def storage_selection(path):
+    content = path.read_bytes()
+    uuid = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+    match = re.fullmatch(
+        rf"FVCA-HOST-STORAGE-1\nunlock=development-passphrase\n"
+        rf"member_a=({uuid})\nmember_b=({uuid})\n"
+        rf"raid=(?:[0-9a-f]{{8}}:){{3}}[0-9a-f]{{8}}\n"
+        rf"luks={uuid}\nfilesystem={uuid}\n",
+        content.decode("ascii"),
+    )
+    if match is None or match[1] == match[2]:
+        raise ValueError("invalid Hypervisor storage selection")
+    return content
+
+
+def composition_archive(work, boot_key, boot_certificate, core_hash, runtime_hash, storage):
     root_hash_file = work / "runtime.roothash"
     root_hash_file.write_text(runtime_hash, encoding="ascii")
     files = work / "usr/lib/fvca"
@@ -68,9 +84,14 @@ def authorize_runtime(work, boot_key, boot_certificate, core_hash, runtime_hash)
     # authorizes its root on the disposable kernel's existing verity keyring.
     run("openssl", "cms", "-sign", "-binary", "-nocerts", "-noattr", "-outform", "DER",
         "-in", root_hash_file, "-signer", boot_certificate, "-inkey", boot_key, "-out", signature)
-    payload = b"usr/lib/fvca/hypervisor.composition\0usr/lib/fvca/vm-runtime.p7s\0"
+    paths = [composition, signature]
+    if storage is not None:
+        selection = files / "host-storage"
+        selection.write_bytes(storage_selection(storage))
+        paths.append(selection)
+    payload = b"".join(bytes(path.relative_to(work)) + b"\0" for path in paths)
     archive = work / "composition.cpio"
-    for path in (composition, signature):
+    for path in paths:
         path.chmod(0o644)
     with archive.open("wb") as output:
         run("cpio", "--quiet", "-o", "-0", "--format=newc", "--reproducible", "--owner=0:0",
@@ -100,7 +121,7 @@ def assemble(args, work):
             stdout=subprocess.DEVNULL)
     uname = metadata[".uname"]["text"]
     verify_initrd(args.initrd, uname)
-    composition = authorize_runtime(work, args.boot_key, args.boot_certificate, core_hash, runtime_hash)
+    composition = composition_archive(work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, args.storage)
 
     uki = work / "hypervisor.efi"
     run("ukify", "build", "--config=/dev/null", f"--linux={work / 'linux'}",
@@ -124,6 +145,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("core", "runtime", "initrd", "boot-certificate", "boot-key", "runtime-certificate", "output"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute(), required=True)
+    parser.add_argument("--storage", type=Path, help="development host storage selection to embed in the signed UKI")
     args = parser.parse_args()
     if args.output.exists():
         parser.error("output disk already exists")

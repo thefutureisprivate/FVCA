@@ -5,3 +5,6 @@ set -euo pipefail
 printf '\nhandle-unknown = deny\n' >> /etc/selinux/semanage.conf
 semodule -n -X 400 -i "$SRCDIR/policy/selinux/fvca_initrd.cil" \
     -i "$SRCDIR/policy/selinux/fvca_libvirt.cil"
+if [[ "${FVCA_HYPERVISOR_STORAGE:-}" == yes ]]; then
+    semodule -n -X 400 -i "$SRCDIR/policy/selinux/fvca_storage.cil"
+fi

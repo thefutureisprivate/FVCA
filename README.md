@@ -98,4 +98,21 @@ python3 tools/compose-hypervisor.py \
 
 Use the QEMU command above with `build/hypervisor-profile/fvca-dev-hypervisor.raw` as the boot disk. Pass the runtime as a second drive with `-drive if=virtio,format=raw,readonly=on,file=build/vm-runtime/vm-runtime.raw`. Use Intel KVM with VMX exposed to the appliance for this test. The appliance disables nested virtualization for its own guests. The initramfs activates the selected signed verity mapping and mounts an overlay made from two read-only layers before switch-root.
 
-The readiness probe runs `qemu-img` from the composed `/usr` and exercises a diskless, networkless q35 VM through the private libvirt socket. It requires an sVirt MCS label, the dedicated QEMU UID, seccomp, no-new-privileges, zero effective capabilities, and a private mount namespace. The console prints `FVCA_LIBVIRT_LIFECYCLE_OK` after the VM starts, suspends, resumes, and stops. Booting a signed Service Guest, encrypted mirrored storage, and production release authorization remain separate qualification targets.
+The readiness probe runs `qemu-img` from the composed `/usr` and exercises a diskless, networkless q35 VM through the private libvirt socket. It requires an sVirt MCS label, the dedicated QEMU UID, seccomp, no-new-privileges, zero effective capabilities, and a private mount namespace. The console prints `FVCA_LIBVIRT_LIFECYCLE_OK` after the VM starts, suspends, resumes, and stops. Booting a signed Service Guest and production release authorization remain separate qualification targets.
+
+## Development Hypervisor storage
+
+The Hypervisor assembler accepts `--storage tests/host-storage.conf` for the disposable storage fixture. The UKI signs both GPT partition identities and the expected native RAID1, LUKS2 and ext4 identities. The initramfs requires both selected partitions on separate disks and disables automatic RAID assembly. It checks the assembled array and the LUKS header before requesting the operator passphrase on the console.
+
+The development image gates readiness on an ext4 mount at `/run/fvca/host-data` with `nodev,nosuid,noexec`. Its root directory must be owned by root with mode `0700`. This volume holds mutable data. The physical TPM and PIN policy, independent boot slots, appliance recovery environment, and authenticated mutable-state protections remain pending.
+
+On a Fedora KVM test machine with `mdadm`, `cryptsetup`, `e2fsprogs` and `cpio` installed, the fixture creates fresh file-backed disks and tests single-member recovery and replacement. Build the Hypervisor as above with the fixture selection added to the assembler command, then run the integration checks against the signed disk and its matching runtime.
+
+```sh
+tests/storage-lab.sh build/host-storage-lab
+python3 tests/check-host-storage.py \
+  --hypervisor build/hypervisor-profile/fvca-dev-hypervisor.raw \
+  --runtime build/vm-runtime/vm-runtime.raw \
+  --variables build/fvca-vars.fd \
+  --lab build/host-storage-lab --output build/host-storage-checks
+```

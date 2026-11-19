@@ -1,0 +1,2 @@
+; Execute the explicitly authorized RAID assembly under Fedora's mdadm domain.
+(allow init_t mdadm_t (process2 (nnp_transition)))
