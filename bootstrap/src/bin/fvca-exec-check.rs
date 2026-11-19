@@ -1,9 +1,13 @@
 //! Exercise execution-policy denials in a disposable signed development image.
 
+use std::alloc::System;
 use std::ffi::{c_int, c_void};
 use std::io::{self, ErrorKind};
 use std::process::{Command, ExitCode};
 use std::ptr;
+
+#[global_allocator]
+static ALLOCATOR: System = System;
 
 // Linux x86-64 mmap ABI. This fixture is compiled only for that target.
 const PROT_READ: c_int = 1;
@@ -60,6 +64,7 @@ fn require_denied<T>(case: &str, result: io::Result<T>) -> io::Result<()> {
 }
 
 fn check() -> io::Result<()> {
+    fvca_allocator_binding::require_allocator()?;
     for (case, flags) in [
         ("anonymous-rx", PROT_READ | PROT_EXEC),
         ("anonymous-rwx", PROT_READ | PROT_WRITE | PROT_EXEC),

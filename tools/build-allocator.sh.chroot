@@ -1,0 +1,41 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+source "$SRCDIR/tools/allocator-source.env"
+source_archive="$SRCDIR/build/allocator-upstream/hardened_malloc-$allocator_version.tar.gz"
+printf '%s  %s\n' "$allocator_sha256" "$source_archive" | sha256sum --check
+
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+tar -xzf "$source_archive" --strip-components=1 -C "$scratch"
+patch --directory="$scratch" --strip=1 --fuzz=0 < "$SRCDIR/tools/allocator-gcc16.patch"
+
+# The upstream default selects the default profile. Its test Makefile rejects an explicit VARIANT.
+env -u VARIANT CFLAGS=-march=x86-64 CXXFLAGS=-march=x86-64 \
+    make -C "$scratch" -j"$(nproc)" CC=gcc CONFIG_NATIVE=false CONFIG_WERROR=true test
+
+library="$scratch/out/libhardened_malloc.so"
+install -Dm755 "$library" "$DESTDIR$allocator_library"
+install -Dm644 "$scratch/LICENSE" "$DESTDIR/usr/share/licenses/hardened_malloc/LICENSE"
+printf '%s\n' "$allocator_library" > "$scratch/ld.so.preload"
+install -Dm644 "$scratch/ld.so.preload" "$DESTDIR/etc/ld.so.preload"
+printf 'vm.max_map_count = 1048576\n' > "$scratch/allocator.sysctl"
+install -Dm644 "$scratch/allocator.sysctl" "$DESTDIR/usr/lib/sysctl.d/60-fvca-allocator.conf"
+
+# Keep the loader's mandatory dependency in both copies of PID 1, including after re-exec.
+systemd=/usr/lib/systemd/systemd
+install -Dm755 "$systemd" "$DESTDIR$systemd"
+patchelf --add-needed "$allocator_library" "$DESTDIR$systemd"
+dependencies=$(patchelf --print-needed "$DESTDIR$systemd")
+test "${dependencies%%$'\n'*}" = "$allocator_library"
+
+{
+    printf 'version=%s\nrevision=%s\nsource_sha256=%s\n' \
+        "$allocator_version" "$allocator_revision" "$allocator_sha256"
+    printf '%s\n' 'profile=default' 'architecture=x86-64' 'CONFIG_NATIVE=false' 'CONFIG_WERROR=true'
+    printf '%s\n' 'patch=04a25bd141efcd2c0d29ef7d868b205a844b3ad2'
+    printf 'library_sha256=%s\n' "$(sha256sum "$library" | cut -d ' ' -f1)"
+    printf 'systemd_sha256=%s\n' "$(sha256sum "$DESTDIR$systemd" | cut -d ' ' -f1)"
+    rpm -q gcc gcc-c++ glibc libstdc++ make patchelf systemd
+} > "$scratch/provenance"
+install -Dm644 "$scratch/provenance" "$DESTDIR/usr/share/fvca/allocator-build.txt"

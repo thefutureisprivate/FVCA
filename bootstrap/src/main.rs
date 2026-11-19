@@ -12,6 +12,10 @@ fn main() -> ExitCode {
         eprintln!("FVCA bootstrap must run as PID 1");
         return ExitCode::FAILURE;
     }
+    if let Err(error) = fvca_allocator_binding::require_allocator() {
+        eprintln!("FVCA bootstrap allocator check failed: {error}");
+        return ExitCode::FAILURE;
+    }
 
     // The kernel and module files are already authenticated by the UKI.
     // systemd requires the kernel's signature check before loading the BPF policy.

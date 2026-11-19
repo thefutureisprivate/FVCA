@@ -2,16 +2,17 @@
 
 The first implementation milestone is a shared x86-64 development boot image for the VM-only Hypervisor and OCI Service Guest described in FVCA design v0.4.3. The Fedora 45 mkosi build produces a disk with a signed Unified Kernel Image (UKI), a read-only EROFS root, a dm-verity hash tree, and a detached root hash signature in its own GPT partition. The UKI embeds the expected root hash and execution policy. A Rust initramfs entrypoint loads dm-verity with signature enforcement before systemd attaches the global BPF execution policy. The kernel verifies the detached signature during root activation. Systemd closes the initramfs trust window after switch-root. [systemd execution policy](https://www.freedesktop.org/software/systemd/man/262/systemd-system.conf.html#RestrictFileSystemAccess=)
 
-The image uses a boot-status target and volatile `/var`. It disables automatic extension and additional GPT partition discovery. Build workers run Fedora's package scripts before removing shells, login tools and maintenance hooks from the base and initramfs. Both trees must pass an audit for prohibited commands, executable scripts, setuid/setgid files and file capabilities. Emergency and rescue targets report `FVCA_BOOT_FAILED` on the console. Execution-policy qualification for role runtimes, extensions and workload roots remains pending, along with SELinux policy, hardened_malloc, TPM attestation, release authorization and persistent storage.
+The image uses a boot-status target and volatile `/var`. It disables automatic extension and additional GPT partition discovery. Build workers run Fedora's package scripts before removing shells, login tools and maintenance hooks from the base and initramfs. Both trees must pass an audit for prohibited commands, executable scripts, setuid/setgid files and file capabilities. Emergency and rescue targets report `FVCA_BOOT_FAILED` on the console. Execution-policy and allocator qualification for role runtimes, extensions and workload roots remain pending, along with SELinux policy, TPM attestation, release authorization and persistent storage.
 
 The design draws on AOS's use of signed UKIs and integrity-protected disk images. [Amutable Foundations technical overview](https://amutable.com/blog/amutable-foundations-technical-overview)
 
 ## Build and verify
 
-Use a Fedora 45 x86-64 build machine or disposable VM. Install `mkosi`, `mkosi-system-deps`, `systemd-ukify`, `sbsigntools`, `mtools`, `openssl`, `util-linux-core`, and `veritysetup` on the builder. The development recipe uses the Fedora release and updates repositories with RPM signature verification. The initramfs build overlay pins the Rust, Cargo and GCC packages and builds the dependency-free bootstrap with `cargo --frozen` and networking disabled. The two package manifests record the resolved OS packages. Release builds will need pinned package inputs throughout.
+Use a Fedora 45 x86-64 build machine or disposable VM. Install `mkosi`, `mkosi-system-deps`, `systemd-ukify`, `sbsigntools`, `mtools`, `openssl`, `util-linux-core`, and `veritysetup` on the builder. The development recipe uses the Fedora release and updates repositories with RPM signature verification. The build overlays pin the Rust, Cargo and GCC packages and build the local Rust crates with `cargo --frozen` and networking disabled. The two package manifests record the resolved OS packages. Release builds will need pinned package inputs throughout.
 
 ```sh
 umask 077
+./tools/fetch-allocator.sh
 mkosi genkey  # First build only. Keep mkosi.key private.
 mkosi build
 (cd build && sha256sum -c fvca-dev-base.SHA256SUMS)
@@ -21,6 +22,8 @@ python3 tools/verify-base.py build/fvca-dev-base.raw mkosi.crt
 The QEMU procedure uses one enrolled development certificate for both signing purposes. Production signer separation remains pending. The off-node verifier accepts a separate root-signing certificate with `--verity-certificate`. It reads the policy in the signed UKI and verifies the detached signature and dm-verity data from the actual disk image. The disk, split UKI, root hash and package manifests are in `build/`.
 
 The package manifests record what the builder installed before file pruning. `python3 tools/audit-os-tree.py PATH` runs the content audit without changing an extracted tree. Preserve file modes and extended attributes when extracting the EROFS root for this check.
+
+Both images build hardened_malloc 14 from a digest-checked source archive, run its upstream tests, and retain the allocator license and build record under `/usr/share`. The build uses the upstream default profile with a fixed `x86-64` compiler target and the upstream GCC 16 header fix. The verified `/etc/ld.so.preload` selects the library for eligible programs. The Rust bootstrap and both copies of systemd have a mandatory loader dependency on the library. The Rust bootstrap and the readiness service check resolved allocator symbols. `vm.max_map_count = 1048576` is the development setting for allocator qualification. [hardened_malloc 14](https://github.com/GrapheneOS/hardened_malloc/releases/tag/14)
 
 ## Boot in QEMU
 
@@ -41,7 +44,7 @@ qemu-system-x86_64 -machine q35,smm=on -accel kvm -cpu host -m 2048 \
   -nographic -nic none -no-reboot
 ```
 
-The serial console prints `FVCA_DEV_BASE_READY` after systemd confirms UEFI Secure Boot is enabled and `/` is EROFS mounted read-only through `/dev/mapper/root`. Press Ctrl+A, then X to exit QEMU.
+The serial console prints `FVCA_DEV_BASE_READY` after systemd confirms UEFI Secure Boot is enabled, `/` is EROFS mounted read-only through `/dev/mapper/root`, and the allocator check verifies symbol binding and exercises a heap allocation. Press Ctrl+A, then X to exit QEMU.
 
 ## Exercise the execution policy
 
@@ -49,7 +52,7 @@ The serial console prints `FVCA_DEV_BASE_READY` after systemd confirms UEFI Secu
 mkosi --profile=exec-check --output-dir=build/exec-check build
 ```
 
-Use the same QEMU command with `build/exec-check/fvca-dev-exec-check.raw` as the boot disk. The development test runs from the verified root after switch-root. It requires permission denials for anonymous RX and RWX mappings, an RW-to-RX transition, and execution of a copied binary from `/run`. The console prints `FVCA_EXEC_CHECK_PASSED` before `FVCA_DEV_BASE_READY` when all checks pass. The probe is built only in the qualification profile.
+Use the same QEMU command with `build/exec-check/fvca-dev-exec-check.raw` as the boot disk. The development test runs from the verified root after switch-root. It checks its allocator binding and requires permission denials for anonymous RX and RWX mappings, an RW-to-RX transition, and execution of a copied binary from `/run`. The console prints `FVCA_EXEC_CHECK_PASSED` before `FVCA_DEV_BASE_READY` when all checks pass. The probe is built only in the qualification profile.
 
 ## Open Build Service
 

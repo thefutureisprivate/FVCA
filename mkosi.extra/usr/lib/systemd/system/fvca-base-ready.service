@@ -5,6 +5,7 @@ AssertSecurity=uefi-secureboot
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/findmnt --mountpoint / --source /dev/mapper/root --types erofs --options ro
+ExecStart=/usr/lib/fvca/allocator-check
 ExecStart=/usr/bin/echo FVCA_DEV_BASE_READY
 StandardOutput=journal+console
 RemainAfterExit=yes
