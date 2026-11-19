@@ -1,0 +1,12 @@
+[Unit]
+Description=Verify Hypervisor runtime execution after switch-root
+Before=fvca-base-ready.service
+OnFailure=emergency.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/findmnt --mountpoint /usr --source fvca-vm-runtime --types overlay --options ro,nodev
+ExecStart=/usr/bin/qemu-img --version
+ExecStart=/usr/bin/echo FVCA_VM_RUNTIME_EXEC_OK
+StandardOutput=journal+console
+NoNewPrivileges=yes

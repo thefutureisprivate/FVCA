@@ -39,6 +39,12 @@ def normalize_build_files(root):
     units = ["emergency.service"]
     if os.path.lexists(root / "etc/initrd-release"):
         units.extend(["fvca-selinux-check.service", "sysroot.mount.d/10-fvca-selinux.conf"])
+        if (root / "usr/lib/fvca/activate-runtime").is_file():
+            units.extend([
+                "fvca-activate-runtime.service",
+                "initrd-parse-etc.service.d/20-fvca-runtime.conf",
+                "initrd-switch-root.target.d/20-fvca-runtime.conf",
+            ])
     else:
         units.extend(["fvca-base-ready.service", "fvca-base.target"])
     for name in units:

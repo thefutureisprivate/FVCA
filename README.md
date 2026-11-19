@@ -62,7 +62,7 @@ Use the same QEMU command with `build/exec-check/fvca-dev-exec-check.raw` as the
 
 ## Hypervisor runtime candidate
 
-The separate mkosi recipe builds `vm-runtime.raw`, a signed EROFS system extension. It contains QEMU, the modular libvirt QEMU, log and lock daemons, the selected OVMF firmware and restic. The build strips Fedora's automatic service hooks and management commands before signing, records the exact core root hash in the extension and checks the shared package versions. Automatic extension discovery is disabled on the development base. Boot-time admission, sVirt confinement, approved VM definitions and encrypted host storage still need qualification.
+The separate mkosi recipe builds `vm-runtime.raw`, a signed EROFS system extension. It contains QEMU, the modular libvirt QEMU, log and lock daemons, the selected OVMF firmware and restic. The build strips Fedora's automatic service hooks and management commands before signing, records the exact core root hash in the extension and checks the shared package versions. Automatic extension discovery is disabled on the development base.
 
 Prepare a fresh base input from the verified development disk, and use a separate development certificate for the runtime. Keep the private key in the ignored build directory.
 
@@ -79,3 +79,20 @@ python3 tools/verify-vm-runtime.py build/vm-runtime/vm-runtime.raw \
 ```
 
 Keep the `.manifest` and checksum files next to both images. Prepare a new build input and rebuild the extension when selecting a different core. [mkosi system extension build guide](https://github.com/systemd/mkosi/blob/v26/docs/sysext.md)
+
+## Boot the composed Hypervisor in QEMU
+
+The Hypervisor profile builds a role-specific initramfs. The assembler verifies the core and the runtime with their respective certificates, then signs a UKI containing the approved core and runtime root hashes. It authorizes the verified runtime hash with the existing development verity key for the disposable VM. The output disk carries the original verified core and a new ESP boot file.
+
+```sh
+mkosi --profile=hypervisor --output-dir=build/hypervisor-profile build
+python3 tools/compose-hypervisor.py \
+  --core build/fvca-dev-base.raw \
+  --runtime build/vm-runtime/vm-runtime.raw \
+  --initrd build/hypervisor-profile/initrd.cpio.zst \
+  --boot-certificate mkosi.crt --boot-key mkosi.key \
+  --runtime-certificate build/vm-runtime-signing.crt \
+  --output build/hypervisor-profile/fvca-dev-hypervisor.raw
+```
+
+Use the QEMU command above with `build/hypervisor-profile/fvca-dev-hypervisor.raw` as the boot disk. Pass the runtime as a second drive with `-drive if=virtio,format=raw,readonly=on,file=build/vm-runtime/vm-runtime.raw`. The initramfs activates the selected signed verity mapping and mounts an overlay made from two read-only layers before switch-root. Readiness requires `qemu-img` to execute from the composed `/usr` after systemd closes the initramfs trust window. The confined libvirt VM lifecycle, encrypted mirrored storage, and production release authorization still need qualification.
