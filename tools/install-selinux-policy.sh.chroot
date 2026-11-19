@@ -16,8 +16,16 @@ trap 'rm -rf -- "$work"' EXIT
         exit 1
     fi
     sed -i '/^(typepermissive systemd_pcrextend_t)$/d' systemd.cil
+    semodule -X 100 -c -E virt
+    permissive='(typepermissive virtqemud_t)'
+    if [[ $(grep -Fxc -- "$permissive" virt.cil) != 2 ]]; then
+        echo 'Expected two permissive QEMU management domain entries in the pinned Fedora policy' >&2
+        exit 1
+    fi
+    sed -i '/^(typepermissive virtqemud_t)$/d' virt.cil
 )
 semodule -n -X 400 -i "$work/systemd.cil" \
+    -i "$work/virt.cil" \
     -i "$SRCDIR/policy/selinux/fvca_initrd.cil" \
     -i "$SRCDIR/policy/selinux/fvca_libvirt.cil" \
     -i "$SRCDIR/policy/selinux/fvca_tpm_event_log.cil"

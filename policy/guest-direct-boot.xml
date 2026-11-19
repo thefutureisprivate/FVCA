@@ -1,5 +1,6 @@
 <domain type='kvm'>
   <name>fvca-service-guest</name>
+  <uuid>e629aa43-af11-47c6-aedc-a2dc47f1cc3a</uuid>
   <memory unit='MiB'>2048</memory>
   <vcpu placement='static'>2</vcpu>
   <os>
@@ -36,7 +37,7 @@
     </disk>
     <disk type='file' device='disk'>
       <driver name='qemu' type='raw' cache='none' io='threads'/>
-      <source file='/run/fvca/host-data/vms/service-guest/data.raw'/>
+      <source file='/run/fvca/guest-state.raw'/>
       <target dev='vdc' bus='virtio'/>
     </disk>
   </devices>

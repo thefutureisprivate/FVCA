@@ -34,7 +34,7 @@ sed -n -e 's/^partition=/guest_partition=/p' -e 's/^filesystem_uuid=/guest_files
 printf '%s' "$(openssl rand -hex 32)" > "$output/storage.key"
 install -m400 "$output/storage.key" "$root/storage.key"
 
-for name in bash btrfs chmod cryptsetup mkfs.btrfs modprobe mount poweroff sfdisk sleep sync umount; do
+for name in bash btrfs chattr chmod cp cryptsetup mkdir mkfs.btrfs modprobe mount mv poweroff rm sfdisk sleep sync umount; do
     binary=$(realpath "$(command -v "$name")")
     install -m755 "$binary" "$root/usr/bin/$name"
     while IFS= read -r dependency; do
@@ -77,8 +77,17 @@ grep -q FVCA_GUEST_BTRFS_LAB_PROVISIONED "$output/guest-wrong-profile.log"
 
 boot provision \
     -drive "if=none,id=a,format=raw,file=$output/member-a.raw" -device virtio-blk-pci,drive=a,serial=fvca-lab-a \
-    -drive "if=none,id=b,format=raw,file=$output/member-b.raw" -device virtio-blk-pci,drive=b,serial=fvca-lab-b
+    -drive "if=none,id=b,format=raw,file=$output/member-b.raw" -device virtio-blk-pci,drive=b,serial=fvca-lab-b \
+    -drive "if=none,id=guest,format=raw,readonly=on,file=$output/guest-data.raw" -device virtio-blk-pci,drive=guest,serial=fvca-lab-guest-seed
 grep -q FVCA_STORAGE_LAB_PROVISIONED "$output/provision.log"
+
+for member in a b; do
+    cp --reflink=auto --sparse=always "$output/member-$member.raw" "$output/nocow-$member.raw"
+done
+boot nocow \
+    -drive "if=none,id=a,format=raw,file=$output/nocow-a.raw" -device virtio-blk-pci,drive=a,serial=fvca-lab-a \
+    -drive "if=none,id=b,format=raw,file=$output/nocow-b.raw" -device virtio-blk-pci,drive=b,serial=fvca-lab-b
+grep -q FVCA_STORAGE_LAB_NOCOW_PROVISIONED "$output/nocow.log"
 
 cp --reflink=auto --sparse=always "$output/member-a.raw" "$output/surviving-member.raw"
 boot replace \

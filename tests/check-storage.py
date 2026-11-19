@@ -35,11 +35,12 @@ def image(path):
 
 
 def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, extra_cmdline=False,
-         attach_runtime=True, timeout=80, direct_cmdline=None):
+         attach_runtime=True, timeout=80, direct_cmdline=None, attach_guest=True):
     cpu = "host,vmx=off" if args.guest else "host"
     machine = "q35,smm=on"
     devices = []
     bundle = getattr(args, "direct_boot", None)
+    nested = getattr(args, "nested_guest", None)
     if bundle is None:
         loader = [
             "-global", "driver=cfi.pflash01,property=secure,value=on",
@@ -58,7 +59,7 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
         devices = ["-device", "virtio-rng-pci"]
     command = [
         "qemu-system-x86_64", *devices, "-machine", machine, "-accel", "kvm", "-cpu", cpu,
-        "-m", "2048", "-smp", "2", *loader,
+        "-m", "4096" if nested is not None else "2048", "-smp", "2", *loader,
         "-drive", f"if=none,id=fvca-boot,format=raw,readonly=on,file={image(args.disk)}",
         "-device", "virtio-blk-pci,drive=fvca-boot,bootindex=1",
     ]
@@ -75,6 +76,11 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
         command += [
             "-drive", f"if=none,id=fvca-runtime,format=raw,readonly=on,file={image(args.runtime)}",
             "-device", "virtio-blk-pci,drive=fvca-runtime",
+        ]
+    if nested is not None and attach_guest:
+        command += [
+            "-drive", f"if=none,id=fvca-guest-release,format=raw,readonly=on,file={image(nested)}",
+            "-device", "virtio-blk-pci,drive=fvca-guest-release",
         ]
     if tpm_socket is not None:
         if "," in str(tpm_socket) or not tpm_socket.is_socket():
@@ -175,6 +181,34 @@ def check_hypervisor(args):
         if prompted != (key is not None) or FAIL not in output or reason not in output or ACTIVE in output or READY in output:
             raise ValueError(f"{name} did not fail closed")
         print(f"{name} passed")
+
+
+def check_nested_guest(args):
+    args.output.mkdir(mode=0o700)
+    lab = args.lab
+    password = (lab / "storage.key").read_bytes()
+    if re.fullmatch(b"[0-9a-f]{64}", password) is None:
+        raise ValueError("unexpected lab passphrase encoding")
+    members = [lab / f"member-{member}.raw" for member in ("a", "b")]
+    guest_ready = b"FVCA_SERVICE_GUEST_READY"
+    prompts, log = boot(args, "guest", password, *members, timeout=155)
+    required = (HOST_PROFILES, ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", guest_ready, READY)
+    if prompts != 2 or log.count(b"FVCA_KVM_GUEST_CONFINED") != 2 or FAIL in log or any(marker not in log for marker in required):
+        raise ValueError("the Hypervisor did not reach readiness with its authorized nested Guest")
+    print("nested-guest passed")
+
+    prompts, log = boot(args, "missing-bundle", password, *members, attach_guest=False)
+    if (prompts != 2 or b"authorized Guest boot bundle partitions are missing" not in log or FAIL not in log
+            or guest_ready in log or READY in log):
+        raise ValueError("the Hypervisor did not fail closed with its selected Guest bundle absent")
+    print("nested-guest-missing-bundle passed")
+
+    nocow = [lab / f"nocow-{member}.raw" for member in ("a", "b")]
+    prompts, log = boot(args, "guest-nocow", password, *nocow)
+    if (prompts != 2 or b"Btrfs inode disables CoW or data checksums" not in log or FAIL not in log
+            or guest_ready in log or READY in log):
+        raise ValueError("the Hypervisor did not reject the Guest's NOCOW disk")
+    print("nested-guest-nocow passed")
 
 
 def check_guest(args):
@@ -356,6 +390,7 @@ if __name__ == "__main__":
     role.add_argument("--guest", action="store_true", help="qualify the Service Guest data disk")
     role.add_argument("--oci-runtime", type=Path, help="signed Service Guest OCI runtime")
     parser.add_argument("--replacement-disk", type=Path, help="Hypervisor boot disk authorizing the lab replacement")
+    parser.add_argument("--nested-guest", type=Path, help="Guest bundle to launch inside the disposable Hypervisor")
     parser.add_argument("--wrong-runtime", type=Path, help="unselected runtime for a Guest rejection test")
     parser.add_argument("--workload", action="store_true", help="qualify workload activation with approved.raw and tampered.raw")
     parser.add_argument("--stalwart-lifecycle", action="store_true", help="check the disposable Stalwart lifecycle fixture")
@@ -368,7 +403,8 @@ if __name__ == "__main__":
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
         from guest_boot_bundle import verify
         try:
-            args.direct_cmdline, args.direct_runtime = verify(args.direct_boot, args.release_certificate)
+            args.direct_cmdline, release = verify(args.direct_boot, args.release_certificate)
+            args.direct_runtime = release["runtime_root"]
         except (OSError, ValueError, subprocess.CalledProcessError) as error:
             parser.exit(1, f"Direct-boot qualification failed before launch: {error}\n")
         args.disk = args.direct_boot / "core.raw"
@@ -389,6 +425,8 @@ if __name__ == "__main__":
         parser.error("the Hypervisor TPM test requires --tpm-state, --pin-file and --firmware")
     if args.replacement_disk is not None and (args.guest or any(tpm_options)):
         parser.error("--replacement-disk requires the Hypervisor development passphrase test")
+    if args.nested_guest is not None and (args.guest or any(tpm_options) or args.replacement_disk is not None):
+        parser.error("--nested-guest requires the Hypervisor development passphrase test")
     try:
         if args.tpm_state is not None:
             check_tpm(args)
@@ -396,6 +434,8 @@ if __name__ == "__main__":
             check_guest_workload(args)
         elif args.guest:
             check_guest(args)
+        elif args.nested_guest is not None:
+            check_nested_guest(args)
         else:
             check_hypervisor(args)
     except (OSError, ValueError) as error:

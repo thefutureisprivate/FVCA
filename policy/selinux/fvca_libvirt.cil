@@ -2,3 +2,14 @@
 (allow init_t virtqemud_t (process2 (nnp_transition)))
 (allow init_t virtlogd_t (process2 (nnp_transition)))
 (allow virtqemud_t svirt_t (process2 (nnp_transition)))
+
+; The private RPC server reads the start time of its init_t peer from procfs.
+(allow virtqemud_t init_t (dir (search)))
+(allow virtqemud_t init_t (file (getattr open read)))
+
+; The fixed init_t launcher reads the machine definition from the verified
+; boot volume. This domain has no write access added to virtual content.
+(allow init_t virt_content_t (file (getattr open read)))
+
+; The modular driver proxies the private sVirt serial console over libvirt.
+(allow virtqemud_t svirt_devpts_t (chr_file (getattr ioctl open read write)))

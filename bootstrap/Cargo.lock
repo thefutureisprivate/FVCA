@@ -7,10 +7,15 @@ name = "fvca-allocator-binding"
 version = "0.1.0"
 
 [[package]]
+name = "fvca-btrfs-boundary"
+version = "0.1.0"
+
+[[package]]
 name = "fvca-initrd-bootstrap"
 version = "0.1.0"
 dependencies = [
  "fvca-allocator-binding",
+ "fvca-btrfs-boundary",
  "fvca-libvirt-boundary",
 ]
 

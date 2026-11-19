@@ -106,7 +106,7 @@ The Hypervisor assembler accepts `--storage tests/host-storage.conf` for the dis
 
 Btrfs mirrors data, metadata and system chunks across the two decrypted devices. The gate checks the actual devices and allocation profiles before enabling read-write access at `/run/fvca/host-data`. The mount uses `nodev,nosuid,noexec`, and the filesystem root must be owned by root with mode `0700`. Ordinary boot requires both authorized members. Physical TPM qualification, policy for degraded boot, the appliance recovery environment, and authenticated mutable-state protections remain pending.
 
-On a Fedora KVM test machine with `cryptsetup`, `btrfs-progs` and `cpio` installed, the fixture creates fresh file-backed disks. It tests single-member recovery without Btrfs log replay and replaces the missing device with a freshly encrypted mapping. A writable degraded mount can allocate SINGLE chunks. The fixture restores those chunks to RAID1 in the isolated repair guest, then verifies every profile and scrubs the restored pool. Build the Hypervisor as above with the fixture selection added to the assembler command, then run the integration checks against the signed disk and its matching runtime. To qualify boot after replacement, compose a second UKI with the fixture's `replacement-storage.conf` and provide its disk as `--replacement-disk`. [Btrfs recovery mount options](https://btrfs.readthedocs.io/en/latest/ch-mount-options.html)
+On a Fedora KVM test machine with `cryptsetup`, `btrfs-progs`, `e2fsprogs` and `cpio` installed, the fixture creates fresh file-backed disks. It tests single-member recovery without Btrfs log replay and replaces the missing device with a freshly encrypted mapping. A writable degraded mount can allocate SINGLE chunks. The fixture restores those chunks to RAID1 in the isolated repair guest, then verifies every profile and scrubs the restored pool. Build the Hypervisor as above with the fixture selection added to the assembler command, then run the integration checks against the signed disk and its matching runtime. To qualify boot after replacement, compose a second UKI with the fixture's `replacement-storage.conf` and provide its disk as `--replacement-disk`. [Btrfs recovery mount options](https://btrfs.readthedocs.io/en/latest/ch-mount-options.html)
 
 ```sh
 tests/storage-lab.sh build/host-storage-lab
@@ -193,7 +193,7 @@ The development boot check initializes Podman with crun, VFS and SELinux, runs c
 
 The direct-boot bundle contains the kernel and initramfs extracted from its signed UKI, the exact command line, the fixed KVM machine definition, and the verified core and OCI runtime disks. A separate release authority signs the file digests and both verity root hashes. The supplied machine definition has read-only release disks, one writable raw data disk, and no mutable firmware or vTPM state. [QEMU direct Linux boot](https://www.qemu.org/docs/master/system/linuxboot.html)
 
-The Guest compares its effective kernel command line to the embedded signed copy. Before starting systemd it checks kernel lockdown and module signature enforcement, enrolls the approved verity certificates, seals their keyring, and disables further module loading. The root verity setup uses the verified signature embedded in the initramfs. The KVM lab verifies the release signature and bound files off-node before launch. Hypervisor admission and launch remain separate qualification work.
+The Guest compares its effective kernel command line to the embedded signed copy. Before starting systemd it checks kernel lockdown and module signature enforcement, enrolls the approved verity certificates, seals their keyring, and disables further module loading. The root verity setup uses the verified signature embedded in the initramfs. The direct KVM lab verifies the release signature and bound files off-node before launch.
 
 With the core, OCI runtime and initramfs built as above, use a separate development release key.
 
@@ -213,6 +213,39 @@ python3 tools/compose-service-guest.py \
 python3 tests/check-storage.py --guest --direct-boot build/service-guest-direct \
   --release-certificate build/guest-release.crt --lab build/host-storage-lab \
   --output build/service-guest-direct-checks
+```
+
+### Launch from the Hypervisor
+
+Pack the Guest release into a read-only verity disk. Hypervisor composition verifies the Guest release with its own pinned signer, verifies the bundle disk under the Host verity authority, and records the exact bundle root and file digests in the signed Hypervisor UKI.
+
+```sh
+python3 tools/pack-guest-boot.py --bundle build/service-guest-direct \
+  --release-certificate build/guest-release.crt \
+  --verity-key mkosi.key --verity-certificate mkosi.crt \
+  --output build/guest-boot.raw
+python3 tools/compose-hypervisor.py \
+  --core build/fvca-dev-base.raw --runtime build/vm-runtime/vm-runtime.raw \
+  --initrd build/hypervisor-profile/initrd.cpio.zst \
+  --boot-certificate mkosi.crt --boot-key mkosi.key \
+  --runtime-certificate build/vm-runtime-signing.crt \
+  --storage tests/host-storage.conf --guest-boot build/guest-boot.raw \
+  --guest-release-certificate build/guest-release.crt \
+  --output build/hypervisor-profile/fvca-dev-hypervisor-with-guest.raw
+```
+
+After unlocking both Host members, the Hypervisor mounts the selected Guest boot disk read-only and checks its authorized bytes before creating the VM through private libvirt. The registered VM uses a single Btrfs subvolume at `/run/fvca/host-data/vms/service-guest` with one private writable `data.raw`. The launcher checks the Btrfs CoW and data-checksum flags on the directory and disk. It exposes one disk attachment and keeps the pool directory private. The runtime checks that the libvirt management domain and the QEMU sVirt domain are enforcing in the loaded SELinux policy.
+
+Graceful Guest shutdown remains pending. The Hypervisor retains the disk attachment if the VM misses the shutdown deadline.
+
+`tests/storage-lab.sh` provisions that layout on disposable disks. On a KVM test machine that exposes Intel VMX to the outer Hypervisor VM, run the nested qualification with `--nested-guest`. The Host reports `FVCA_SERVICE_GUEST_READY` after the Guest reports its direct-boot policy, exact OCI runtime, and verified root readiness.
+
+```sh
+python3 tests/check-storage.py \
+  --disk build/hypervisor-profile/fvca-dev-hypervisor-with-guest.raw \
+  --runtime build/vm-runtime/vm-runtime.raw --variables build/fvca-vars.fd \
+  --lab build/host-storage-lab --nested-guest build/guest-boot.raw \
+  --output build/hypervisor-nested-guest-checks
 ```
 
 ## Off-node Stalwart workload derivation

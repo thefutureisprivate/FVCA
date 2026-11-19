@@ -16,20 +16,30 @@ LIBVIRT_UNITS = {
     for daemon in ("virtqemud", "virtlogd", "virtlockd")
     for kind in ("service", "socket")
 }
+DOMAIN_SCHEMAS = {
+    Path(f"usr/share/libvirt/schemas/{name}.rng")
+    for name in ("basictypes", "cputypes", "domain", "domaincommon", "domainoverrides",
+                 "networkcommon", "nwfilter_params", "privatedata", "storagecommon", "sysinfocommon")
+}
 BASE_INPUT = "vm-runtime-base"
 BASE_BINDING = Path("usr/share/fvca/vm-runtime-base.roothash")
 EXTENSION_RELEASE = Path("usr/lib/extension-release.d/extension-release.vm-runtime")
 REQUIRED_FILES = {
     *(Path("usr/bin") / name for name in EXECUTABLES),
     *LIBVIRT_UNITS,
+    *DOMAIN_SCHEMAS,
     Path("usr/lib/tmpfiles.d/fvca-libvirt.conf"),
     Path("usr/libexec/fvca/qualify-libvirt"),
+    Path("usr/libexec/fvca/launch-guest"),
+    Path("usr/lib/systemd/system/fvca-service-guest.service"),
     Path("usr/libexec/libvirt_iohelper"),
     Path("usr/lib64/libvirt/connection-driver/libvirt_driver_qemu.so"),
     Path("usr/lib64/libvirt/lock-driver/lockd.so"),
     Path("usr/share/libvirt/cpu_map/index.xml"),
     Path("usr/share/edk2/ovmf/OVMF_CODE.secboot.fd"),
     Path("usr/share/edk2/ovmf/OVMF_VARS.fd"),
+    Path("usr/share/seabios/bios-256k.bin"),
+    Path("usr/share/qemu/linuxboot_dma.bin"),
     EXTENSION_RELEASE,
     BASE_BINDING,
 }

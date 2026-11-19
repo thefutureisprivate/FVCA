@@ -2,33 +2,13 @@
 
 use std::alloc::System;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io;
 use std::process::ExitCode;
+
+use fvca_initrd_bootstrap::selinux::require_enforcing_domain;
 
 #[global_allocator]
 static ALLOCATOR: System = System;
-
-fn verify_pcr_domain() -> io::Result<()> {
-    const AVD_FLAGS_PERMISSIVE: u32 = 1;
-    let class = fs::read_to_string("/sys/fs/selinux/class/process/index")?;
-    let request = format!(
-        "system_u:system_r:systemd_pcrextend_t:s0 system_u:system_r:init_t:s0 {}",
-        class.trim_end(),
-    );
-    // The selinuxfs access file returns the kernel's access decision and flags
-    // on the same descriptor that received the request.
-    let mut access = fs::OpenOptions::new().read(true).write(true).open("/sys/fs/selinux/access")?;
-    access.write_all(request.as_bytes())?;
-    let mut response = String::new();
-    access.read_to_string(&mut response)?;
-    let flags = response.split_ascii_whitespace().nth(5)
-        .and_then(|field| u32::from_str_radix(field, 16).ok())
-        .ok_or_else(|| io::Error::other("missing SELinux access decision flags"))?;
-    if flags & AVD_FLAGS_PERMISSIVE != 0 {
-        return Err(io::Error::other("the PCR measurement domain is permissive"));
-    }
-    Ok(())
-}
 
 fn verify_selinux() -> io::Result<()> {
     let enforcing = fs::read_to_string("/sys/fs/selinux/enforce")
@@ -41,7 +21,8 @@ fn verify_selinux() -> io::Result<()> {
     if context.trim_end_matches(['\0', '\n']) != "system_u:system_r:init_t:s0" {
         return Err(io::Error::other(format!("unexpected PID 1 SELinux context: {context:?}")));
     }
-    verify_pcr_domain().map_err(|error| io::Error::other(format!("PCR measurement confinement: {error}")))
+    require_enforcing_domain("system_u:system_r:systemd_pcrextend_t:s0")
+        .map_err(|error| io::Error::other(format!("PCR measurement confinement: {error}")))
 }
 
 fn main() -> ExitCode {

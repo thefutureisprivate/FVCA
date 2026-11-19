@@ -7,6 +7,7 @@ OnFailure=emergency.target
 
 [Service]
 Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
 ExecStart=/usr/bin/findmnt --mountpoint /usr --source fvca-vm-runtime --types overlay --options ro,nodev
 ExecStart=/usr/bin/qemu-img --version
 ExecStart=/usr/libexec/fvca/qualify-libvirt

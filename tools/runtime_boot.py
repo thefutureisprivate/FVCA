@@ -19,6 +19,7 @@ WORKLOAD_TRUST_FILES = ("workload-policy.json", "workload-deployment.der", "work
 BASE_ROOT_OPTIONS = "panic-on-corruption,root-hash-signature=auto"
 DIRECT_ROOT_OPTIONS = "panic-on-corruption,root-hash-signature=/usr/lib/fvca/direct-root.p7s"
 DIRECT_BOOT_FILES = ("direct-boot.cmdline", "direct-verity.der", "direct-root.p7s", "direct-boot-ready")
+GUEST_LAUNCH_FILES = ("guest-launch", "guest-launch.p7s")
 
 
 def run(*args, **kwargs):

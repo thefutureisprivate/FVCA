@@ -10,8 +10,10 @@ import re
 import subprocess
 import tempfile
 
+import guest_boot_bundle
+from image_verity import VERITY_PARTITIONS, read_layout, verify_verity
 from runtime_boot import (
-    DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, WORKLOAD_TRUST_FILES,
+    DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_LAUNCH_FILES, WORKLOAD_TRUST_FILES,
     composition_archive, prepare_core, run, verify_initrd, write_disk,
 )
 from runtime_image import verify as verify_runtime
@@ -84,6 +86,30 @@ def verify_tpm_token(path, expected, pcr_public):
         raise ValueError("the enrolled PCR authority does not match the PCR signing key")
 
 
+def guest_selection(args, work):
+    guest = args.guest_boot
+    certificate = args.guest_release_certificate
+    if guest is None:
+        return ()
+    guest_boot_bundle.require_authority(certificate, None, None,
+                                        guest_boot_bundle.public_key(args.boot_certificate),
+                                        guest_boot_bundle.public_key(args.runtime_certificate))
+    directory = work / "guest"
+    directory.mkdir()
+    size, parts = read_layout(guest, VERITY_PARTITIONS)
+    root = verify_verity(guest, size, parts, args.boot_certificate, directory)
+    tree = directory / "tree"
+    run("fsck.erofs", f"--extract={tree}", "--preserve-perms", directory / "root")
+    if {entry.name for entry in tree.iterdir()} != set(guest_boot_bundle.BUNDLE_FILES):
+        raise ValueError("unexpected Guest boot disk contents")
+    _, release = guest_boot_bundle.verify(tree, certificate)
+    digests = release["files"] | {name: guest_boot_bundle.sha256(tree / name) for name in ("release.json", "release.p7s")}
+    checksums = "".join(f"{digests[name]}  {name}\n" for name in guest_boot_bundle.BUNDLE_FILES)
+    selection = (f"FVCA-GUEST-LAUNCH-1\nbundle={root}\ncore={release['core_root']}\n"
+                 f"runtime={release['runtime_root']}\n{checksums}").encode("ascii")
+    return tuple(zip(GUEST_LAUNCH_FILES, (selection, (directory / "root.p7s").read_bytes()), strict=True))
+
+
 def assemble(args, work):
     storage, digests = storage_selection(args.storage) if args.storage is not None else (None, (None, None))
     tpm = digests[0] is not None
@@ -109,12 +135,14 @@ def assemble(args, work):
     runtime_work.mkdir()
     runtime_hash = verify_runtime(args.runtime, args.runtime_certificate, prepared, runtime_work, vm_runtime)
     forbidden = tuple(f"usr/lib/fvca/{name}" for name in (
-        "hypervisor.composition", "vm-runtime.p7s", "host-storage", *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES,
+        "hypervisor.composition", "vm-runtime.p7s", "host-storage",
+        *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES,
     ))
     verify_initrd(args.initrd, uname, ACTIVATION_FILES, forbidden, "Hypervisor")
+    extra = (("host-storage", storage),) if storage is not None else ()
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
-        extra=(("host-storage", storage),) if storage is not None else (),
+        extra=(*extra, *guest_selection(args, work)),
     )
     cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS))
     disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)
@@ -127,10 +155,16 @@ def main():
     for name in ("core", "runtime", "initrd", "boot-certificate", "boot-key", "runtime-certificate", "output"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute(), required=True)
     parser.add_argument("--storage", type=Path, help="host storage selection to embed in the signed UKI")
+    parser.add_argument("--guest-boot", type=Path, help="verified Guest boot bundle disk to authorize")
+    parser.add_argument("--guest-release-certificate", type=Path, help="trusted Guest release signer")
     parser.add_argument("--pcr-key", type=Path, help="separate RSA private key for the initrd PCR policy")
     for member in ("a", "b"):
         parser.add_argument(f"--tpm-token-{member}", type=Path, help=f"exported LUKS2 token for member {member}")
     args = parser.parse_args()
+    if (args.guest_boot is None) != (args.guest_release_certificate is None) or (
+        args.guest_boot is not None and args.storage is None
+    ):
+        parser.error("Guest boot requires its signed bundle disk, release certificate, and Host storage")
     if args.output.exists():
         parser.error("output disk already exists")
     try:

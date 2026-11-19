@@ -15,7 +15,7 @@ PKG_CONFIG=/usr/bin/pkgconf "../qemu-$qemu_version/configure" \
     --prefix=/usr \
     --sysconfdir=/etc \
     --libdir=/usr/lib64 \
-    --firmwarepath=/usr/share/qemu:/usr/share/seavgabios \
+    --firmwarepath=/usr/share/qemu:/usr/share/seabios:/usr/share/seavgabios \
     --with-pkgversion=FVCA \
     --target-list=x86_64-softmmu \
     --without-default-features \
@@ -43,5 +43,6 @@ fi
 install -Dm755 qemu-system-x86_64 "${DESTDIR}/usr/bin/qemu-system-x86_64"
 strip --strip-unneeded "${DESTDIR}/usr/bin/qemu-system-x86_64"
 install -Dm644 "../qemu-$qemu_version/pc-bios/kvmvapic.bin" "$DESTDIR/usr/share/qemu/kvmvapic.bin"
+install -Dm644 "../qemu-$qemu_version/pc-bios/linuxboot_dma.bin" "$DESTDIR/usr/share/qemu/linuxboot_dma.bin"
 install -Dm644 "../qemu-$qemu_version/COPYING" "$DESTDIR/usr/share/licenses/fvca-qemu/COPYING"
 install -Dm644 "../qemu-$qemu_version/COPYING.LIB" "$DESTDIR/usr/share/licenses/fvca-qemu/COPYING.LIB"

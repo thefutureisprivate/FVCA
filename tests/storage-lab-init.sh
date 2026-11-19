@@ -62,12 +62,21 @@ verify_mirror() {
 provision() {
     require_disk vda fvca-lab-a
     require_disk vdb fvca-lab-b
+    require_disk vdc fvca-lab-guest-seed
     format_member /dev/vda "$member_a" fvca-test-a
     format_member /dev/vdb "$member_b" fvca-test-b
     mkfs.btrfs -q -U "$filesystem_uuid" --data raid1 --metadata raid1 "$a" "$b"
     mount -t btrfs -o "nodev,nosuid,noexec,datacow,datasum,compress=no,skip_balance,device=$b" "$a" /mnt
     verify_mirror
     write_marker
+    mkdir -m0700 /mnt/vms
+    btrfs subvolume create /mnt/vms/service-guest
+    chmod 0700 /mnt/vms/service-guest
+    (
+        umask 077
+        cp --sparse=always --reflink=never /dev/vdc /mnt/vms/service-guest/data.raw
+    )
+    sync
     umount /mnt
     cryptsetup close fvca-test-b
     cryptsetup close fvca-test-a
@@ -125,11 +134,35 @@ provision_guest() {
     echo FVCA_GUEST_BTRFS_LAB_PROVISIONED
 }
 
+provision_nocow() {
+    require_disk vda fvca-lab-a
+    require_disk vdb fvca-lab-b
+    cryptsetup open --type=luks2 --key-file=/storage.key /dev/vda1 fvca-test-a
+    cryptsetup open --type=luks2 --key-file=/storage.key /dev/vdb1 fvca-test-b
+    mount -t btrfs -o "nodev,nosuid,noexec,device=$b" "$a" /mnt
+    [[ $(</mnt/marker) == "$marker" ]]
+    local disk=/mnt/vms/service-guest/data.raw
+    mv "$disk" /mnt/original.raw
+    (
+        umask 077
+        : > "$disk"
+        chattr +C "$disk"
+        cp --sparse=always --reflink=never /mnt/original.raw "$disk"
+    )
+    rm /mnt/original.raw
+    sync
+    umount /mnt
+    cryptsetup close fvca-test-b
+    cryptsetup close fvca-test-a
+    echo FVCA_STORAGE_LAB_NOCOW_PROVISIONED
+}
+
 cmdline=$(</proc/cmdline)
 case "$cmdline" in
     *' fvca.lab=guest') provision_guest dup ;;
     *' fvca.lab=guest-wrong-profile') provision_guest single ;;
     *' fvca.lab=provision') modprobe dm-crypt; provision ;;
+    *' fvca.lab=nocow') modprobe dm-crypt; provision_nocow ;;
     *' fvca.lab=replace') modprobe dm-crypt; replace ;;
     *' fvca.lab=verify') modprobe dm-crypt; recover replacement ;;
     *) false ;;

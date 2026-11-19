@@ -1,7 +1,7 @@
 use std::fs;
 use std::io;
 use std::os::unix::fs::symlink;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -59,7 +59,7 @@ fn runtime_devices(root_hash: &str, name: &str) -> io::Result<(PathBuf, PathBuf)
             return Ok((data, tree));
         }
         if Instant::now() >= deadline {
-            return Err(io::Error::new(io::ErrorKind::NotFound, format!("authorized {name} runtime partitions are missing")));
+            return Err(io::Error::new(io::ErrorKind::NotFound, format!("authorized {name} partitions are missing")));
         }
         thread::sleep(Duration::from_millis(200));
     }
@@ -75,28 +75,42 @@ pub fn install_development_probe(name: &str, content: &str) -> io::Result<()> {
     )
 }
 
-pub fn activate(selected: Runtime) -> io::Result<String> {
-    let (role, runtime, label) = match selected {
-        Runtime::Vm => ("hypervisor", "vm-runtime", "VM"),
-        Runtime::Oci => ("service-guest", "oci-runtime", "OCI"),
-    };
-    let manifest = fs::read_to_string(format!("/usr/lib/fvca/{role}.composition"))?;
-    let (core_hash, runtime_hash) = composition(&manifest, role, runtime)?;
-    require_core(&fs::read_to_string("/proc/cmdline")?, core_hash)?;
-    let (data, tree) = runtime_devices(runtime_hash, label)?;
-
-    let mapping = format!("fvca-{runtime}");
-    let staging = format!("/run/fvca/{runtime}");
-    let signature = format!("/usr/lib/fvca/{runtime}.p7s");
-    fs::create_dir_all(&staging)?;
+pub fn mount_verified(
+    name: &str,
+    label: &str,
+    root: &str,
+    signature: &Path,
+    target: &Path,
+    options: &str,
+) -> io::Result<()> {
+    let (data, tree) = runtime_devices(hash(root)?, label)?;
+    fs::create_dir_all(target)?;
+    let mapping = format!("fvca-{name}");
     run(Command::new("/usr/lib/systemd/systemd-veritysetup")
         .args(["attach", &mapping])
         .arg(data)
         .arg(tree)
-        .args([runtime_hash, &format!("panic-on-corruption,root-hash-signature={signature}")]))?;
-    run(Command::new("/usr/bin/mount").args([
-        "-t", "erofs", "-o", "ro,nodev,nosuid", &format!("/dev/mapper/{mapping}"), &staging,
-    ]))?;
+        .arg(root)
+        .arg(format!("panic-on-corruption,root-hash-signature={}", signature.display())))?;
+    run(Command::new("/usr/bin/mount")
+        .args(["-t", "erofs", "-o", options, &format!("/dev/mapper/{mapping}")])
+        .arg(target))
+}
+
+pub fn activate(selected: Runtime) -> io::Result<String> {
+    let (role, runtime, label) = match selected {
+        Runtime::Vm => ("hypervisor", "vm-runtime", "VM runtime"),
+        Runtime::Oci => ("service-guest", "oci-runtime", "OCI runtime"),
+    };
+    let manifest = fs::read_to_string(format!("/usr/lib/fvca/{role}.composition"))?;
+    let (core_hash, runtime_hash) = composition(&manifest, role, runtime)?;
+    require_core(&fs::read_to_string("/proc/cmdline")?, core_hash)?;
+    let mapping = format!("fvca-{runtime}");
+    let staging = format!("/run/fvca/{runtime}");
+    let signature = format!("/usr/lib/fvca/{runtime}.p7s");
+    mount_verified(
+        runtime, label, runtime_hash, Path::new(&signature), Path::new(&staging), "ro,nodev,nosuid",
+    )?;
 
     let binding = fs::read_to_string(format!("{staging}/usr/share/fvca/{runtime}-base.roothash"))?;
     if binding.strip_suffix('\n') != Some(core_hash) {

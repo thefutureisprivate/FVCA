@@ -13,6 +13,7 @@ from workload_oci import parse_json
 
 MACHINE = Path(__file__).resolve().parents[1] / "policy/guest-direct-boot.xml"
 ASSETS = ("boot.efi", "linux", "initrd", "cmdline", "domain.xml", "core.raw", "runtime.raw")
+BUNDLE_FILES = (*ASSETS, "release.json", "release.p7s")
 SCHEMA = "fvca-service-guest-direct-boot-1"
 
 
@@ -66,7 +67,7 @@ def verify(bundle, certificate):
     expected.find("./os/cmdline").text = cmdline.removesuffix("\n")
     if ET.tostring(domain) != ET.tostring(expected):
         raise ValueError("direct-boot domain differs from the approved machine definition")
-    return cmdline.removesuffix("\n"), release["runtime_root"]
+    return cmdline.removesuffix("\n"), release
 
 
 def publish(args, work, disk, uki, runtime, cmdline, core_hash, runtime_hash):

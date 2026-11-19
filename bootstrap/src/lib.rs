@@ -8,7 +8,11 @@ use std::process::{Command, Stdio};
 
 pub mod btrfs;
 pub mod direct_boot;
+pub mod guest_boot;
 pub mod runtime;
+pub mod selinux;
+#[cfg(feature = "libvirt")]
+pub mod vm_confinement;
 
 pub const WORKLOAD_VERITY_CERTIFICATE: &str = "/usr/lib/fvca/workload-verity.der";
 

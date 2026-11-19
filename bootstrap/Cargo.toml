@@ -7,13 +7,18 @@ publish = false
 
 [dependencies]
 fvca-allocator-binding = { path = "allocator-binding" }
+fvca-btrfs-boundary = { path = "btrfs-boundary", optional = true }
 fvca-libvirt-boundary = { path = "libvirt-boundary", optional = true }
 
 [features]
-libvirt = ["dep:fvca-libvirt-boundary"]
+libvirt = ["dep:fvca-btrfs-boundary", "dep:fvca-libvirt-boundary"]
 
 [[bin]]
 name = "fvca-qualify-libvirt"
+required-features = ["libvirt"]
+
+[[bin]]
+name = "fvca-launch-guest"
 required-features = ["libvirt"]
 
 [profile.release]
