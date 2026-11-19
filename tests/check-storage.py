@@ -24,6 +24,7 @@ DIRECT_MISMATCH = b"direct-boot kernel command line differs from the signed comm
 INIT_EXIT = b"Attempted to kill init! exitcode=0x00000100"
 PCR_CONFINED = b"FVCA_SELINUX_PCR_CONFINED"
 PROMPT = re.compile(rb"Please enter (?:the )?passphrase for disk [^\r\n]{1,250}:|Enter FVCA storage TPM PIN:")
+KERNEL_AUDIT = re.compile(rb"\[ *[0-9]+\.[0-9]+\] audit: type=[0-9]+ audit\([0-9]+\.[0-9]+:[0-9]+\): [^\r\n]*\r?\n")
 OVMF_CODE = Path("/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd")
 
 
@@ -196,13 +197,20 @@ def check_nested_guest(args):
         finished = b"FVCA_NESTED_STOP_VERIFIED"
     if args.nested_guest_capture:
         finished = b"FVCA_STOPPED_CAPTURE_VERIFIED"
+    if args.nested_guest_live_capture:
+        finished = b"FVCA_LIVE_CAPTURE_VERIFIED"
     prompts, log = boot(args, "guest", password, *members, timeout=225 if args.nested_guest_capture else 155,
                         ready_marker=finished)
+    # Kernel audit printing can interrupt a userspace line on the shared console.
+    # Validate the reconstructed markers and retain the original log on disk.
+    log = KERNEL_AUDIT.sub(b"", log)
     required = (HOST_PROFILES, ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", b"FVCA_SERVICE_GUEST_AGENT_READY", guest_ready, READY)
     if args.nested_guest_shutdown:
         required += (b"FVCA_SERVICE_GUEST_STOPPED", finished)
     if args.nested_guest_capture:
         required += (b"FVCA_SERVICE_GUEST_STOPPED", finished)
+    if args.nested_guest_live_capture:
+        required += (finished,)
     guests = re.findall(rb"launch-guest\[[0-9]+\]: FVCA_KVM_GUEST_CONFINED", log)
     probe = re.search(rb"qualify-libvirt\[[0-9]+\]: FVCA_KVM_GUEST_CONFINED", log)
     if (prompts != 2 or len(guests) != (2 if args.nested_guest_capture else 1) or probe is None
@@ -221,6 +229,20 @@ def check_nested_guest(args):
                 log.count(guest_ready) != 2 or log.count(b"FVCA_CAPTURE_GUEST_RESUMED") != 1):
             raise ValueError("stopped capture ordering, finalization recovery or stopped-state preservation failed")
         print("nested-guest-stopped-capture passed")
+    if args.nested_guest_live_capture:
+        capture = b"619e7cf7-3660-452b-bcbb-7de8da0361e1"
+        events = (b"LIVE_GUEST_FROZEN", b"LIVE_DISK_INACTIVE", b"LIVE_SNAPSHOT_CREATED",
+                  b"CAPTURE_SEALED_PENDING_VALIDATION", b"LIVE_VM_RESUMED", b"LIVE_GUEST_THAWED",
+                  b"LIVE_GUEST_RECOVERED")
+        markers = [b"FVCA_" + event + b" " + capture for event in events]
+        positions = [log.find(marker) for marker in markers]
+        complete = tuple(re.finditer(rb"FVCA_CAPTURE_COMPLETE " + capture + rb" ([0-9a-f]{64})", log))
+        if (positions[0] < 0 or any(left >= right for left, right in zip(positions, positions[1:]))
+                or any(log.count(marker) != 1 for marker in markers) or len(complete) != 2
+                or positions[-1] >= complete[0].start() or complete[0][1] != complete[1][1]
+                or log.count(guest_ready) != 1 or b"FVCA_SERVICE_GUEST_STOPPED" in log):
+            raise ValueError("live capture ordering, finalization recovery or running-state preservation failed")
+        print("nested-guest-live-capture passed")
 
     prompts, log = boot(args, "missing-bundle", password, *members, attach_guest=False)
     if (prompts != 2 or b"authorized Guest boot bundle partitions are missing" not in log or FAIL not in log
@@ -421,6 +443,8 @@ if __name__ == "__main__":
                                help="require orderly stop with the disposable qualification initramfs")
     qualification.add_argument("--nested-guest-capture", action="store_true",
                                help="require a stopped capture and restart with the disposable qualification initramfs")
+    qualification.add_argument("--nested-guest-live-capture", action="store_true",
+                               help="require live capture and thaw with the disposable qualification initramfs")
     parser.add_argument("--wrong-runtime", type=Path, help="unselected runtime for a Guest rejection test")
     parser.add_argument("--workload", action="store_true", help="qualify workload activation with approved.raw and tampered.raw")
     parser.add_argument("--stalwart-lifecycle", action="store_true", help="check the disposable Stalwart lifecycle fixture")
@@ -457,7 +481,7 @@ if __name__ == "__main__":
         parser.error("--replacement-disk requires the Hypervisor development passphrase test")
     if args.nested_guest is not None and (args.guest or any(tpm_options) or args.replacement_disk is not None):
         parser.error("--nested-guest requires the Hypervisor development passphrase test")
-    if (args.nested_guest_shutdown or args.nested_guest_capture) and args.nested_guest is None:
+    if (args.nested_guest_shutdown or args.nested_guest_capture or args.nested_guest_live_capture) and args.nested_guest is None:
         parser.error("nested Guest qualification requires --nested-guest")
     try:
         if args.tpm_state is not None:

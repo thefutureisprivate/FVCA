@@ -245,10 +245,15 @@ impl Domain<'_> {
     }
 
     pub fn require_guest_agent(&self) -> io::Result<()> {
-        self.agent_expect(c"{\"execute\":\"guest-ping\"}", c"{\"return\":{}}")
+        self.agent_reply(c"{\"execute\":\"guest-ping\"}", |reply| {
+            if reply != c"{\"return\":{}}" {
+                return Err(io::Error::other("the Service Guest agent returned an unexpected ping response"));
+            }
+            Ok(())
+        })
     }
 
-    fn agent_expect(&self, command: &CStr, expected: &CStr) -> io::Result<()> {
+    fn agent_reply<T>(&self, command: &CStr, read: impl FnOnce(&CStr) -> io::Result<T>) -> io::Result<T> {
         // Callers of the public boundary can only select fixed operations.
         let reply = unsafe {
             virDomainQemuAgentCommand(self.handle.as_ptr(), command.as_ptr(), AGENT_TIMEOUT_SECONDS, 0)
@@ -257,22 +262,24 @@ impl Domain<'_> {
             return Err(io::Error::other("the Service Guest agent did not answer"));
         }
         // Libvirt serializes the owned response as compact JSON.
-        let success = unsafe { CStr::from_ptr(reply) } == expected;
+        let result = read(unsafe { CStr::from_ptr(reply) });
         unsafe { free(reply.cast()) };
-        if !success {
-            return Err(io::Error::other("the Service Guest agent returned an unexpected response"));
-        }
-        Ok(())
+        result
     }
 
-    pub fn require_guest_freeze_state(&self, frozen: bool) -> io::Result<()> {
-        let expected = if frozen { c"{\"return\":\"frozen\"}" } else { c"{\"return\":\"thawed\"}" };
-        self.agent_expect(c"{\"execute\":\"guest-fsfreeze-status\"}", expected)
+    pub fn guest_frozen(&self) -> io::Result<bool> {
+        self.agent_reply(c"{\"execute\":\"guest-fsfreeze-status\"}", |reply| match reply {
+            value if value == c"{\"return\":\"frozen\"}" => Ok(true),
+            value if value == c"{\"return\":\"thawed\"}" => Ok(false),
+            _ => Err(io::Error::other("the Service Guest agent returned an unexpected freeze state")),
+        })
     }
 
     /// Arm independent thaw recovery before calling. A timeout can leave the filesystem frozen.
     pub fn freeze_guest_data(&self) -> io::Result<()> {
-        self.require_guest_freeze_state(false)?;
+        if self.guest_frozen()? {
+            return Err(io::Error::other("the Guest data filesystem is already frozen"));
+        }
         self.set_agent_timeout()?;
         let path = GUEST_DATA.as_ptr();
         // The call borrows a one-element array of mountpoint pointers.
@@ -280,7 +287,10 @@ impl Domain<'_> {
         if count != 1 {
             return Err(io::Error::other(format!("expected one Guest filesystem freeze, got {count}")));
         }
-        self.require_guest_freeze_state(true)
+        if !self.guest_frozen()? {
+            return Err(io::Error::other("the Guest data filesystem is still thawed"));
+        }
+        Ok(())
     }
 
     pub fn thaw_guest_data(&self) -> io::Result<()> {
@@ -290,7 +300,10 @@ impl Domain<'_> {
         if count != 1 {
             return Err(io::Error::other(format!("expected one Guest filesystem thaw, got {count}")));
         }
-        self.require_guest_freeze_state(false)
+        if self.guest_frozen()? {
+            return Err(io::Error::other("the Guest data filesystem is still frozen"));
+        }
+        Ok(())
     }
 
     fn set_agent_timeout(&self) -> io::Result<()> {

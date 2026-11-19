@@ -1,0 +1,7 @@
+[Unit]
+Description=Watch the FVCA Service Guest capture deadline for %i
+
+[Timer]
+OnActiveSec=20s
+AccuracySec=100ms
+RemainAfterElapse=no

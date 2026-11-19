@@ -258,7 +258,13 @@ The coordinator syncs the raw disk, writes the capture plan, and creates a read-
 
 For the nested capture test, prepare the shutdown fixture with the additional `capture` argument and run the nested checks with `--nested-guest-capture`. Use `tests/storage-lab.sh` with the prepared workload disk and a third argument of `2684354560` bytes per disposable mirror member. The test checks capture before restart, recovery of a sealed capture without its final manifest, and capture of a Guest left stopped.
 
-The Rust libvirt boundary can verify that the writable disk is inactive during a manual disk-only snapshot. Live capture still needs a durable capture transaction and independent resume and thaw recovery. Retention, restore, and encrypted S3 backup also remain pending. [libvirt manual storage snapshots](https://libvirt.org/formatsnapshot.html)
+### Live Service Guest captures
+
+Start `fvca-capture-live@CAPTURE_UUID.service` as a privileged Hypervisor operator while the approved Guest is running and thawed. The coordinator checks the authorized release and running VM identity, reserves Btrfs space, and records the capture intent. The signed Guest definition ends the QEMU process on Guest reboot so recovery stays tied to the captured instance. The worker freezes the Guest Btrfs filesystem, pauses the VM through a manual disk-only snapshot, verifies that the writable disk is inactive, and seals a read-only Btrfs capture. The manifest records filesystem consistency.
+
+The worker has a 20-second window. A separate recovery unit resumes the original VM, reactivates the disk through libvirt, thaws the filesystem, and checks the Guest agent. A systemd timer starts recovery at the deadline even if the capture service is still running. Unresolved recovery keeps the Guest operation lease visible at `/run/fvca/guest-live-active`. An operator can retry recovery with `fvca-live-recover@CAPTURE_UUID.service`. A blocked kernel or provider call can delay recovery. [libvirt manual storage snapshots](https://libvirt.org/formatsnapshot.html)
+
+The coordinator validates and hashes the read-only snapshot after recovery. Running the capture service again with the same UUID can finalize an acknowledged seal. The nested test uses `tests/nested-guest-shutdown-initrd.sh` with the `live` argument and `tests/check-storage.py --nested-guest-live-capture` with the same disposable Btrfs lab as the stopped capture test. Retention, restore, and encrypted S3 backup remain pending.
 
 ## Off-node Stalwart workload derivation
 

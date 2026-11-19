@@ -1,0 +1,15 @@
+[Unit]
+Description=Recover the FVCA Service Guest from live capture %i
+After=fvca-virtqemud.service
+AssertSecurity=selinux
+AssertSecurity=uefi-secureboot
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/libexec/fvca/launch-guest --recover-live %i
+TimeoutStartSec=40s
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+StandardOutput=journal+console
+StandardError=journal+console

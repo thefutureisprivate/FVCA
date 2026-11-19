@@ -190,7 +190,9 @@ fn start(connection: &Connection, events: &EventLoop, selection: &guest_boot::Se
     }
     prepare_data().map_err(|error| io::Error::other(format!("Guest data preparation failed: {error}")))?;
     let domain = connection.start_registered(xml)?;
-    if let Err(error) = wait_for_boot(&domain, selection.runtime, events) {
+    if let Err(error) = wait_for_boot(&domain, selection.runtime, events)
+        .and_then(|()| capture::live::record_launch(selection.bundle))
+    {
         if let Err(cleanup) = domain.destroy() {
             eprintln!("FVCA could not stop the failed Guest: {cleanup}");
         }
@@ -246,14 +248,17 @@ fn activate() -> io::Result<()> {
         [] => {
             let _capture = capture::wait_for_lease(Path::new(CAPTURE_LOCK))?;
             let _lease = capture::lease(Path::new(OPERATION_LOCK))?;
+            capture::live::require_idle()?;
             launch()
         }
         [option] if option == "--shutdown" => {
             let _lease = capture::lease(Path::new(OPERATION_LOCK))?;
+            capture::live::require_idle()?;
             shutdown()
         }
         [option] if option == "--release" => {
             let _lease = capture::lease(Path::new(OPERATION_LOCK))?;
+            capture::live::require_idle()?;
             if !Path::new(ALIAS).try_exists()? {
                 return Ok(());
             }
@@ -261,6 +266,9 @@ fn activate() -> io::Result<()> {
         }
         [option, id] if option == "--capture-stopped" => capture::stopped(id, true),
         [option, id, mode] if option == "--capture-stopped" && mode == "--leave-stopped" => capture::stopped(id, false),
+        [option, id] if option == "--capture-live" => capture::live::capture(id),
+        [option, id] if option == "--live-window" => capture::live::capture_window(id),
+        [option, id] if option == "--recover-live" => capture::live::recover(id),
         _ => Err(invalid("unsupported Service Guest operation")),
     }
 }

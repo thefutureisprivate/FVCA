@@ -1,0 +1,20 @@
+[Unit]
+Description=Qualify live capture of the disposable Service Guest
+After=fvca-base-ready.service
+OnFailure=emergency.target
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+TimeoutStartSec=100s
+NoNewPrivileges=yes
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/bin/systemctl start fvca-capture-live@619e7cf7-3660-452b-bcbb-7de8da0361e1.service
+ExecStart=/usr/bin/systemctl --quiet is-active fvca-service-guest.service
+ExecStart=/usr/bin/test ! -e /run/fvca/guest-live-active
+ExecStart=/usr/bin/test -s /run/fvca/host-data/captures/sets/619e7cf7-3660-452b-bcbb-7de8da0361e1/manifest
+ExecStart=/usr/bin/test -s /run/fvca/host-data/captures/sets/619e7cf7-3660-452b-bcbb-7de8da0361e1/snapshot/data.raw
+ExecStart=/usr/bin/rm /run/fvca/host-data/captures/sets/619e7cf7-3660-452b-bcbb-7de8da0361e1/manifest
+ExecStart=/usr/bin/systemctl start fvca-capture-live@619e7cf7-3660-452b-bcbb-7de8da0361e1.service
+ExecStart=/usr/bin/echo FVCA_LIVE_CAPTURE_VERIFIED

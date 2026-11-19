@@ -1,4 +1,4 @@
-//! Persist a complete stopped capture of the fixed, networkless Service Guest.
+//! Persist complete captures of the fixed, networkless Service Guest.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -18,6 +18,59 @@ const CAPTURE_HEADER: &str = "FVCA-STOPPED-CAPTURE-1";
 const UUID_GROUPS: &[usize] = &[8, 4, 4, 4, 12];
 const GUEST_UNIT: &str = "fvca-service-guest.service";
 const O_NOFOLLOW: i32 = 0o400000;
+
+#[path = "live.rs"]
+pub(super) mod live;
+
+#[derive(Clone, Copy)]
+enum Consistency {
+    CleanStopped,
+    Filesystem,
+}
+
+impl Consistency {
+    fn header(self) -> &'static str {
+        match self {
+            Self::CleanStopped => CAPTURE_HEADER,
+            Self::Filesystem => "FVCA-LIVE-CAPTURE-1",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::CleanStopped => "clean-stopped",
+            Self::Filesystem => "filesystem-consistent",
+        }
+    }
+}
+
+struct Store {
+    pool: File,
+    fsid: String,
+    releases: PathBuf,
+    path: PathBuf,
+    consistency: Consistency,
+}
+
+impl Store {
+    fn open(id: &str, consistency: Consistency) -> io::Result<Self> {
+        uuid(id)?;
+        let pool = verify_pool()?;
+        let fsid = btrfs::filesystem_uuid(&pool)?;
+        let base = Path::new(POOL).join("captures");
+        directory(&base)?;
+        let releases = base.join("releases");
+        let sets = base.join("sets");
+        directory(&releases)?;
+        directory(&sets)?;
+        Ok(Self { pool, fsid, releases, path: sets.join(id), consistency })
+    }
+
+    fn prepare(&self, launch: &str, bytes: u64) -> io::Result<()> {
+        escrow(&self.releases, launch, &self.pool, bytes)?;
+        btrfs::require_capture_space(&self.pool, bytes)
+    }
+}
 
 fn lock_file(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new().read(true).write(true).create(true).truncate(false)
@@ -148,41 +201,72 @@ fn verify_escrow(dir: &Path, payload: &str, selection: &guest_boot::Selection<'_
 
 struct Plan<'a> {
     source: &'a str,
+    source_id: u64,
     bytes: u64,
     launch: &'a str,
 }
 
-fn parse_plan<'a>(text: &'a str, id: &str, fsid: &str) -> io::Result<Plan<'a>> {
+fn parse_plan<'a>(text: &'a str, id: &str, store: &Store) -> io::Result<Plan<'a>> {
     let launch_header = "FVCA-GUEST-LAUNCH-1\n";
     let start = text.find(launch_header).ok_or_else(|| invalid("capture record lacks its authorized launch selection"))?;
     let (prefix, launch) = text.split_at(start);
     guest_boot::parse(launch)?;
     let mut lines = prefix.lines();
-    for expected in [CAPTURE_HEADER.to_owned(), format!("capture_id={id}"), format!("vm_uuid={}", UUID.to_str().unwrap()),
-        "requested_consistency=clean-stopped".to_owned(), "achieved_consistency=clean-stopped".to_owned(),
-        format!("filesystem_uuid={fsid}"), "identity_policy=single-instance".to_owned(),
+    let name = store.consistency.name();
+    for expected in [store.consistency.header().to_owned(), format!("capture_id={id}"), format!("vm_uuid={}", UUID.to_str().unwrap()),
+        format!("requested_consistency={name}"), format!("achieved_consistency={name}"),
+        format!("filesystem_uuid={}", store.fsid), "identity_policy=single-instance".to_owned(),
         "persistent_firmware=none".to_owned(), "persistent_vtpm=none".to_owned(),
         "external_storage=none".to_owned(), "workload_state=contained-in-data.raw".to_owned(),
         "member=data.raw,raw,vdc".to_owned()] {
         if lines.next() != Some(expected.as_str()) {
-            return Err(invalid("unexpected stopped capture fields"));
+            return Err(invalid("unexpected capture fields"));
         }
     }
     let mut take = |key| lines.next().and_then(|line| line.strip_prefix(key))
-        .ok_or_else(|| invalid("incomplete stopped capture metadata"));
+        .ok_or_else(|| invalid("incomplete capture metadata"));
     let source = uuid(take("source_uuid=")?)?;
     let number = |value: &str| value.parse::<u64>().map_err(io::Error::other);
     let root_id = number(take("source_id=")?)?;
     let time = number(take("capture_unix_seconds=")?)?;
     let bytes = number(take("disk_bytes=")?)?;
     if root_id < 256 || time == 0 || bytes == 0 || !bytes.is_multiple_of(512) || lines.next().is_some() {
-        return Err(invalid("invalid stopped capture metadata"));
+        return Err(invalid("invalid capture metadata"));
     }
-    Ok(Plan { source, bytes, launch })
+    Ok(Plan { source, source_id: root_id, bytes, launch })
 }
 
-fn snapshot(dir: &Path, plan: &Plan<'_>) -> io::Result<(Subvolume, PathBuf)> {
-    let path = dir.join("snapshot");
+fn plan_text(store: &Store, id: &str, source: &Subvolume, bytes: u64, launch: &str) -> io::Result<String> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(io::Error::other)?.as_secs();
+    let name = store.consistency.name();
+    Ok(format!("{}\ncapture_id={id}\nvm_uuid={}\nrequested_consistency={name}\n\
+        achieved_consistency={name}\nfilesystem_uuid={}\nidentity_policy=single-instance\n\
+        persistent_firmware=none\npersistent_vtpm=none\nexternal_storage=none\nworkload_state=contained-in-data.raw\n\
+        member=data.raw,raw,vdc\nsource_uuid={}\nsource_id={}\ncapture_unix_seconds={now}\ndisk_bytes={bytes}\n{launch}",
+        store.consistency.header(), UUID.to_str().unwrap(), store.fsid, source.uuid, source.id))
+}
+
+fn attached_disk() -> io::Result<File> {
+    let source = raw_disk_metadata(Path::new(DISK))?;
+    let attachment = raw_disk_metadata(Path::new(ALIAS))?;
+    if source.dev() != attachment.dev() || source.ino() != attachment.ino() {
+        return Err(invalid("the running Guest attachment does not match its raw disk"));
+    }
+    live_disk(Path::new(DISK))
+}
+
+fn live_disk(path: &Path) -> io::Result<File> {
+    let meta = raw_disk_metadata(path)?;
+    if (meta.uid(), meta.gid()) != (107, 107) {
+        return Err(invalid("the live Guest disk must have its sVirt owner"));
+    }
+    let disk = File::open(path)?;
+    btrfs::require_cow_and_checksums(&disk)?;
+    Ok(disk)
+}
+
+fn snapshot(store: &Store, plan: &Plan<'_>) -> io::Result<(Subvolume, PathBuf)> {
+    let path = store.path.join("snapshot");
     let info = btrfs::subvolume(&private_directory(&path)?)?;
     if !info.read_only || info.parent_uuid != plan.source || info.uuid == plan.source {
         return Err(invalid("the Btrfs snapshot does not match the sealed source"));
@@ -194,7 +278,11 @@ fn snapshot(dir: &Path, plan: &Plan<'_>) -> io::Result<(Subvolume, PathBuf)> {
         return Err(invalid("the captured subvolume has unexpected members"));
     }
     let data = path.join("data.raw");
-    if raw_disk(&data)?.metadata()?.len() != plan.bytes {
+    let disk = match store.consistency {
+        Consistency::CleanStopped => raw_disk(&data)?,
+        Consistency::Filesystem => live_disk(&data)?,
+    };
+    if disk.metadata()?.len() != plan.bytes {
         return Err(invalid("the captured raw disk length changed"));
     }
     Ok((info, data))
@@ -204,24 +292,32 @@ fn snapshot_record(snapshot: &Subvolume) -> String {
     format!("snapshot_uuid={}\nsnapshot_id={}\n", snapshot.uuid, snapshot.id)
 }
 
-fn seal(dir: &Path, id: &str, fsid: &str, text: &str) -> io::Result<()> {
-    let (info, _) = snapshot(dir, &parse_plan(text, id, fsid)?)?;
+fn seal(store: &Store, id: &str, text: &str) -> io::Result<()> {
+    let (info, _) = snapshot(store, &parse_plan(text, id, store)?)?;
     let record = format!("CAPTURE_SEALED_PENDING_VALIDATION\n{}{text}", snapshot_record(&info));
-    publish(dir, "sealed", &record)?;
+    publish(&store.path, "sealed", &record)?;
     println!("FVCA_CAPTURE_SEALED_PENDING_VALIDATION {id} {}", info.uuid);
     Ok(())
 }
 
-fn finalize(dir: &Path, releases: &Path, id: &str, fsid: &str) -> io::Result<()> {
+fn finalize(store: &Store, id: &str) -> io::Result<()> {
+    let dir = &store.path;
     let _pin = lease(&dir.join("lock"))?;
     let text = read_record(&dir.join("plan"))?;
-    let plan = parse_plan(&text, id, fsid)?;
-    let (info, data) = snapshot(dir, &plan)?;
+    let plan = parse_plan(&text, id, store)?;
+    let (info, data) = snapshot(store, &plan)?;
     let state = snapshot_record(&info);
     let sealed = format!("CAPTURE_SEALED_PENDING_VALIDATION\n{state}{text}");
-    publish(dir, "sealed", &sealed)?;
+    match store.consistency {
+        Consistency::CleanStopped => publish(dir, "sealed", &sealed)?,
+        Consistency::Filesystem => {
+            if read_record(&dir.join("live-seal-verified"))? != "1\n" || read_record(&dir.join("sealed"))? != sealed {
+                return Err(invalid("the live capture has no matching sealed record"));
+            }
+        }
+    }
     let selection = guest_boot::parse(plan.launch)?;
-    verify_escrow(&releases.join(selection.bundle), plan.launch, &selection)?;
+    verify_escrow(&store.releases.join(selection.bundle), plan.launch, &selection)?;
     let output = Command::new("/usr/bin/sha256sum").env_clear()
         .current_dir(data.parent().expect("captured disk is below its snapshot"))
         .arg("data.raw").output()?;
@@ -231,7 +327,7 @@ fn finalize(dir: &Path, releases: &Path, id: &str, fsid: &str) -> io::Result<()>
     let digest = String::from_utf8(output.stdout).map_err(io::Error::other)?;
     let digest = runtime::hash(digest.strip_suffix("  data.raw\n")
         .ok_or_else(|| invalid("unexpected captured disk digest output"))?)?;
-    if snapshot(dir, &plan)?.0 != info {
+    if snapshot(store, &plan)?.0 != info {
         return Err(invalid("Btrfs snapshot identity changed during finalization"));
     }
     let manifest = format!("CAPTURE_COMPLETE\n{state}disk_sha256={digest}\n{text}");
@@ -241,21 +337,14 @@ fn finalize(dir: &Path, releases: &Path, id: &str, fsid: &str) -> io::Result<()>
 }
 
 pub(super) fn stopped(id: &str, restart: bool) -> io::Result<()> {
-    uuid(id)?;
-    let pool = verify_pool()?;
-    let fsid = btrfs::filesystem_uuid(&pool)?;
-    let base = Path::new(POOL).join("captures");
-    directory(&base)?;
-    let releases = base.join("releases");
-    let sets = base.join("sets");
-    directory(&releases)?;
-    directory(&sets)?;
-    let path = sets.join(id);
     let guard = lease(Path::new(CAPTURE_LOCK))?;
+    live::require_idle()?;
+    let store = Store::open(id, Consistency::CleanStopped)?;
+    let path = &store.path;
     if path.try_exists()? {
-        private_directory(&path)?;
+        private_directory(path)?;
         drop(guard);
-        return finalize(&path, &releases, id, &fsid);
+        return finalize(&store, id);
     }
     let launch = fs::read_to_string(guest_boot::SELECTION)?;
     let selection = guest_boot::parse(&launch)?;
@@ -274,8 +363,7 @@ pub(super) fn stopped(id: &str, restart: bool) -> io::Result<()> {
     } else {
         verify_data()?.1.metadata()?.len()
     };
-    escrow(&releases, &launch, &pool, bytes)?;
-    btrfs::require_capture_space(&pool, bytes)?;
+    store.prepare(&launch, bytes)?;
 
     // Normal systemd stop can take the lifecycle lock while the capture lease
     // holds any new start before it reaches the data attachment.
@@ -295,17 +383,12 @@ pub(super) fn stopped(id: &str, restart: bool) -> io::Result<()> {
             return Err(invalid("the selected raw disk has no matching orderly stop receipt"));
         }
         disk.sync_all()?;
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(io::Error::other)?.as_secs();
-        let text = format!("{CAPTURE_HEADER}\ncapture_id={id}\nvm_uuid={}\nrequested_consistency=clean-stopped\n\
-            achieved_consistency=clean-stopped\nfilesystem_uuid={fsid}\nidentity_policy=single-instance\n\
-            persistent_firmware=none\npersistent_vtpm=none\nexternal_storage=none\nworkload_state=contained-in-data.raw\n\
-            member=data.raw,raw,vdc\nsource_uuid={}\nsource_id={}\ncapture_unix_seconds={now}\ndisk_bytes={bytes}\n{launch}",
-            UUID.to_str().unwrap(), source.uuid, source.id);
-        let dir = directory(&path)?;
-        publish(&path, "plan", &text)?;
+        let text = plan_text(&store, id, &source, bytes, &launch)?;
+        let dir = directory(path)?;
+        publish(path, "plan", &text)?;
         btrfs::snapshot_read_only(&root, &dir, "snapshot")?;
         dir.sync_all()?;
-        seal(&path, id, &fsid, &text)?;
+        seal(&store, id, &text)?;
     }
     drop(guard);
     let recovered = if running && restart {
@@ -316,6 +399,6 @@ pub(super) fn stopped(id: &str, restart: bool) -> io::Result<()> {
     if running && restart && recovered.is_ok() {
         println!("FVCA_CAPTURE_GUEST_RESUMED {id}");
     }
-    finalize(&path, &releases, id, &fsid)?;
+    finalize(&store, id)?;
     recovered
 }

@@ -1,9 +1,9 @@
 #!/usr/bin/bash
-# Add a shell-free shutdown test to a disposable development Hypervisor initramfs.
+# Add a shell-free Guest lifecycle test to a disposable development Hypervisor initramfs.
 set -euo pipefail
 umask 077
 if [[ $# -lt 2 || $# -gt 3 ]]; then
-    echo 'Run tests/nested-guest-shutdown-initrd.sh HYPERVISOR_INITRAMFS NEW_INITRAMFS [shutdown|capture]' >&2
+    echo 'Run tests/nested-guest-shutdown-initrd.sh HYPERVISOR_INITRAMFS NEW_INITRAMFS [shutdown|capture|live]' >&2
     exit 2
 fi
 tests=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -16,6 +16,7 @@ fvca=usr/lib/fvca
 case "${3:-shutdown}" in
     shutdown) unit=fvca-qualify-guest-shutdown.service ;;
     capture) unit=fvca-qualify-stopped-capture.service ;;
+    live) unit=fvca-qualify-live-capture.service ;;
     *) echo 'Unknown nested Guest qualification mode' >&2; exit 2 ;;
 esac
 mkdir -p "$tree/$conf" "$tree/$fvca"

@@ -1,0 +1,17 @@
+[Unit]
+Description=Freeze and seal the FVCA Service Guest capture %i
+AssertSecurity=selinux
+AssertSecurity=uefi-secureboot
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/libexec/fvca/launch-guest --live-window %i
+ExecStopPost=/usr/bin/systemctl start fvca-live-recover@%i.service
+TimeoutStartSec=20s
+TimeoutStartFailureMode=kill
+TimeoutStopSec=45s
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+StandardOutput=journal+console
+StandardError=journal+console
