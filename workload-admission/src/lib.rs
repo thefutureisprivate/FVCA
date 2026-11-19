@@ -2,6 +2,7 @@
 
 mod image;
 mod launch;
+pub mod quadlet;
 mod records;
 
 use std::error::Error;
@@ -85,6 +86,10 @@ impl VerifiedWorkload {
 
     pub fn limits(&self) -> &Limits {
         &self.deployment.limits
+    }
+
+    pub fn expires(&self) -> u64 {
+        self.deployment.expires
     }
 
     pub fn id_map(&self) -> &IdMap {

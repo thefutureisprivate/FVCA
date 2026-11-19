@@ -1,0 +1,27 @@
+[Unit]
+Description=Qualify the authorized Stalwart service in a disposable Guest
+After=fvca-workload-start.service
+Requires=fvca-workload-start.service
+Before=fvca-base-ready.service
+OnFailure=emergency.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=115s
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/bin/podman --remote=false healthcheck run fvca-workload-payload
+ExecStart=/usr/bin/podman --remote=false inspect "--format=FVCA_STALWART_STATE {{.ProcessLabel}} {{.Config.User}} {{.HostConfig.PidsLimit}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.NetworkMode}} {{.State.Health.Status}}" fvca-workload-payload
+ExecStart=/usr/bin/systemctl show --property=MemoryMax,CPUQuotaPerSecUSec,TasksMax fvca-workload-payload.service
+ExecStart=/usr/bin/cat /sys/fs/cgroup/system.slice/fvca-workload-payload.service/memory.max /sys/fs/cgroup/system.slice/fvca-workload-payload.service/cpu.max /sys/fs/cgroup/system.slice/fvca-workload-payload.service/pids.max
+ExecStart=/usr/bin/podman --remote=false exec fvca-workload-payload /usr/bin/touch /var/lib/stalwart/.fvca-lifecycle
+ExecStart=/usr/bin/systemctl restart fvca-workload-payload.service
+ExecStart=/usr/bin/podman --remote=false exec fvca-workload-payload /usr/bin/test -f /var/lib/stalwart/.fvca-lifecycle
+ExecStart=/usr/bin/podman --remote=false healthcheck run fvca-workload-payload
+ExecStart=/usr/bin/echo FVCA_STALWART_RESTART_HEALTH_AND_DATA
+ExecStart=/usr/bin/systemctl stop fvca-workload-payload.service
+ExecStart=/usr/bin/systemctl show --property=ActiveState fvca-workload-payload.service
+ExecStart=/usr/bin/podman --remote=false ps --all --filter name=^fvca-workload-payload$ "--format=FVCA_STALWART_UNEXPECTED_CONTAINER {{.Names}}"
+ExecStart=/usr/bin/echo FVCA_STALWART_LIFECYCLE_COMPLETE

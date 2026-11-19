@@ -59,7 +59,7 @@ def normalize_build_files(root):
     else:
         units.extend(["fvca-base-ready.service", "fvca-base.target"])
         if (root / "usr/lib/fvca/activate-workload").is_file():
-            units.append("fvca-workload-root.service")
+            units.extend(["fvca-workload-root.service", "fvca-workload-start.service"])
     for name in units:
         unit = root / "usr/lib/systemd/system" / name
         if not stat.S_ISREG(unit.lstat().st_mode):

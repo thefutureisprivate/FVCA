@@ -4,3 +4,10 @@
 ; The release activation service reserves a loop index before exposing a signed image region.
 (allow init_t loop_control_device_t (chr_file (getattr open read ioctl)))
 (allowx init_t loop_control_device_t (ioctl chr_file (0x4c82)))
+
+; Give the generated fragment the unit type needed for systemd's SELinux service checks.
+(typetransition init_t init_var_run_t file "fvca-workload-payload.service" systemd_unit_file_t)
+(filecon "/run/fvca/workload-image/fvca-workload-payload\.service" file
+    (system_u object_r systemd_unit_file_t ((s0) (s0))))
+(filecon "/run/systemd/system/fvca-workload-payload\.service" file
+    (system_u object_r systemd_unit_file_t ((s0) (s0))))

@@ -29,7 +29,7 @@ def image(path):
 
 
 def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, extra_cmdline=False,
-         attach_runtime=True):
+         attach_runtime=True, timeout=80):
     cpu = "host,vmx=off" if args.guest else "host"
     machine = "q35,smm=on"
     devices = []
@@ -73,7 +73,7 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
     prompted = False
     submitted = False
     failed_boot = False
-    deadline = time.monotonic() + 80
+    deadline = time.monotonic() + timeout
     log = args.output / f"{name}.log"
     try:
         with log.open("wb", buffering=0) as progress, \
@@ -190,19 +190,44 @@ def check_guest(args):
 def check_guest_workload(args):
     args.output.mkdir(mode=0o700)
     active = b"FVCA_WORKLOAD_ROOT_ACTIVE"
+    selection = Path(__file__).with_name("guest-storage.conf").read_text(encoding="ascii")
+    filesystem = next(line.partition("=")[2] for line in selection.splitlines() if line.startswith("filesystem_uuid="))
+    mount = f"first mount of filesystem {filesystem}".encode("ascii")
     for name, failure in (
         ("approved", None),
         ("tampered", b"workload artifact does not match the signed bytes"),
     ):
-        prompted, output = boot(args, name, None, args.lab / f"{name}.raw")
-        if prompted or b"FVCA_GUEST_DATA_ACTIVE" not in output or b"FVCA_WORKLOAD_KEYRING_SEALED" not in output:
+        deadline = 220 if args.stalwart_lifecycle else 125
+        prompted, output = boot(args, name, None, args.lab / f"{name}.raw", timeout=deadline)
+        # The kernel and service streams can interleave on the serial console.
+        if prompted or not (mount in output or b"FVCA_GUEST_DATA_ACTIVE" in output) or b"FVCA_WORKLOAD_KEYRING_SEALED" not in output:
             raise ValueError(f"{name} did not reach the workload admission boundary")
         if failure is None:
-            if active not in output or READY not in output or FAIL in output:
-                raise ValueError("the authorized workload root did not mount in the signed Guest")
+            if any(marker not in output for marker in (active, b"FVCA_WORKLOAD_STARTED", READY)) or FAIL in output:
+                raise ValueError("the authorized workload did not mount and start in the signed Guest")
+            if args.stalwart_lifecycle:
+                check_stalwart_lifecycle(output)
         elif failure not in output or FAIL not in output or READY in output or active in output:
             raise ValueError("the tampered workload did not fail before activation")
         print(f"workload-{name} passed")
+
+
+def check_stalwart_lifecycle(output):
+    if not re.search(
+        rb"FVCA_STALWART_STATE [a-z_]+:system_r:container_t:s0:c[0-9]+,c[0-9]+ 2000:2000 128 true none healthy",
+        output,
+    ):
+        raise ValueError("Stalwart did not run with the approved identity, confinement and health state")
+    expected = (
+        b"MemoryMax=536870912", b"CPUQuotaPerSecUSec=1s", b"TasksMax=128", b"ActiveState=inactive",
+        b"FVCA_STALWART_RESTART_HEALTH_AND_DATA", b"FVCA_STALWART_LIFECYCLE_COMPLETE",
+    )
+    if not all(marker in output for marker in expected) or b"FVCA_STALWART_UNEXPECTED_CONTAINER" in output:
+        raise ValueError("Stalwart resource limits, restart, persistence or stop did not qualify")
+    values = re.findall(rb"cat\[\d+\]: ([0-9]+(?: [0-9]+)?)\r?\n", output)
+    cpu_limits = [list(map(int, value.split())) for value in values if b" " in value]
+    if b"536870912" not in values or b"128" not in values or not any(0 < quota == period for quota, period in cpu_limits):
+        raise ValueError("the live kernel cgroup does not implement the approved workload budgets")
 
 
 @contextmanager
@@ -279,6 +304,7 @@ if __name__ == "__main__":
     role.add_argument("--oci-runtime", type=Path, help="signed Service Guest OCI runtime")
     parser.add_argument("--wrong-runtime", type=Path, help="unselected runtime for a Guest rejection test")
     parser.add_argument("--workload", action="store_true", help="qualify workload activation with approved.raw and tampered.raw")
+    parser.add_argument("--stalwart-lifecycle", action="store_true", help="check the disposable Stalwart lifecycle fixture")
     for option in ("tpm-state", "pin-file", "firmware"):
         parser.add_argument(f"--{option}", type=Path)
     args = parser.parse_args()
@@ -286,6 +312,8 @@ if __name__ == "__main__":
         parser.error("--wrong-runtime requires --oci-runtime")
     if args.workload and (args.oci_runtime is None or args.wrong_runtime is not None):
         parser.error("--workload requires --oci-runtime and its own Btrfs fixtures")
+    if args.stalwart_lifecycle and not args.workload:
+        parser.error("--stalwart-lifecycle requires --workload")
     if args.oci_runtime is not None:
         args.guest = True
         args.runtime = args.oci_runtime

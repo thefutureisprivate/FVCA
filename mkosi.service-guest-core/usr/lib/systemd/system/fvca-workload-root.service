@@ -15,6 +15,6 @@ TimeoutStartSec=60s
 TimeoutStopSec=20s
 NoNewPrivileges=yes
 MemoryDenyWriteExecute=yes
-CapabilityBoundingSet=CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_CHOWN
 UMask=0077
 StandardOutput=journal+console

@@ -2,11 +2,13 @@
 
 use std::error::Error;
 use std::fs;
-use std::io;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::io::{self, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, chown};
 use std::path::Path;
 use std::process::{Command, ExitCode};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use fvca_workload_admission::quadlet::{self, Definition, PAYLOAD, ROOT, SERVICE};
 use fvca_workload_admission::{Scope, Trust, read_bounded, verify};
 use openssl::x509::X509;
 
@@ -15,10 +17,15 @@ const BUNDLE: &str = "/run/fvca/guest-data/workload";
 const TRUST: &str = "/run/fvca/workload-trust";
 const DIRECTORY: &str = "/run/fvca/workload-image";
 const SIGNATURE: &str = "/run/fvca/workload-image/root.p7s";
-const ROOT: &str = "/run/fvca/workload-image/root";
 const MAPPING: &str = "fvca-workload-root";
 const MAPPER: &str = "/dev/mapper/fvca-workload-root";
 const VERITYSETUP: &str = "/usr/lib/systemd/systemd-veritysetup";
+const SYSTEMCTL: &str = "/usr/bin/systemctl";
+const UNIT_PATH: &str = "/run/systemd/system/fvca-workload-payload.service";
+const QUADLET_DIR: &str = "/run/fvca/workload-image/quadlet";
+const GENERATED_UNIT: &str = "/run/fvca/workload-image/quadlet/units/fvca-workload-payload.service";
+const PUBLISHED_UNIT: &str = "/run/fvca/workload-image/fvca-workload-payload.service";
+const OS_UNIT_DEFAULTS: &str = "/usr/lib/systemd/system/service.d/10-timeout-abort.conf";
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -47,6 +54,143 @@ fn private_directory(path: &str) -> io::Result<()> {
     Ok(())
 }
 
+fn make_directory(path: &str) -> io::Result<()> {
+    match fs::DirBuilder::new().mode(0o700).create(path) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => private_directory(path),
+        other => other,
+    }
+}
+
+fn provision_volumes(service: &str, definition: &Definition) -> Result<()> {
+    make_directory(PAYLOAD)?;
+    let base = format!("{PAYLOAD}/{service}");
+    make_directory(&base)?;
+    for volume in &definition.volumes {
+        let path = Path::new(&base).join(&volume.name);
+        match fs::DirBuilder::new().mode(0o700).create(&path) {
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            result => result?,
+        }
+        let state = fs::symlink_metadata(&path)?;
+        if !state.is_dir() || state.mode() & 0o7777 != 0o700 {
+            return Err(io::Error::other("invalid persistent workload volume directory").into());
+        }
+        let ownership = (state.uid(), state.gid());
+        if ownership == (0, 0) && fs::read_dir(&path)?.next().is_none() {
+            chown(&path, Some(volume.uid), Some(volume.gid))?;
+        } else if ownership != (volume.uid, volume.gid) {
+            return Err(io::Error::other(
+                "persistent volume identity does not match the signed mapping",
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn publish_unit(definition: &Definition) -> Result<()> {
+    let input = format!("{QUADLET_DIR}/source");
+    let output = format!("{QUADLET_DIR}/units");
+    for path in [QUADLET_DIR, &input, &output] {
+        fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    fs::write(
+        format!("{input}/{}.container", quadlet::CONTAINER),
+        &definition.source,
+    )?;
+    // Explicitly select the private source. The appliance ships no automatic Quadlet generator.
+    let status = Command::new("/usr/libexec/podman/quadlet")
+        .env_clear()
+        .env("QUADLET_UNIT_DIRS", &input)
+        .args(["-no-kmsg-log", &output, &output, &output])
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!("Quadlet exited with {status}")).into());
+    }
+    let compiled = read_bounded(Path::new(GENERATED_UNIT), 4 * 1024 * 1024)?;
+    // Quadlet renames its temporary output. Create the reserved fragment by
+    // name so SELinux gives it the systemd unit type before PID 1 can load it.
+    let mut fragment = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(PUBLISHED_UNIT)?;
+    fragment.write_all(&compiled)?;
+    fragment.set_permissions(fs::Permissions::from_mode(0o644))?;
+    fs::hard_link(PUBLISHED_UNIT, UNIT_PATH).map_err(|error| {
+        io::Error::other(format!(
+            "cannot publish the generated workload unit: {error}"
+        ))
+    })?;
+    Ok(())
+}
+
+fn same_unit() -> io::Result<bool> {
+    let generated = fs::symlink_metadata(PUBLISHED_UNIT)?;
+    let loaded = fs::symlink_metadata(UNIT_PATH)?;
+    Ok(generated.is_file()
+        && loaded.is_file()
+        && (generated.dev(), generated.ino()) == (loaded.dev(), loaded.ino()))
+}
+
+fn start_workload() -> Result<()> {
+    if !same_unit()? {
+        return Err(io::Error::other(
+            "the published workload service differs from the generated service",
+        )
+        .into());
+    }
+    run(Command::new(SYSTEMCTL).arg("daemon-reload"))?;
+    let result = Command::new(SYSTEMCTL)
+        .env_clear()
+        .args(["show", "--property=FragmentPath,DropInPaths", SERVICE])
+        .output()?;
+    if !result.status.success() {
+        return Err(io::Error::other(format!(
+            "could not inspect the loaded workload service: {}",
+            String::from_utf8_lossy(&result.stderr).trim()
+        ))
+        .into());
+    }
+    let output = String::from_utf8(result.stdout)?;
+    let fragment = format!("FragmentPath={UNIT_PATH}");
+    let mut overrides = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("DropInPaths="));
+    if !output.lines().any(|line| line == fragment)
+        || !matches!(overrides.next(), Some("" | OS_UNIT_DEFAULTS))
+        || overrides.next().is_some()
+    {
+        return Err(io::Error::other(
+            "workload service was overridden outside the verified policy",
+        )
+        .into());
+    }
+    run(Command::new(SYSTEMCTL).args(["start", SERVICE]))?;
+    run(Command::new(SYSTEMCTL).args(["is-active", "--quiet", SERVICE]))?;
+    println!("FVCA_WORKLOAD_STARTED");
+    Ok(())
+}
+
+fn check_start(expires: &str) -> Result<()> {
+    let expires = expires.parse::<u64>()?;
+    if SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() >= expires {
+        return Err(io::Error::other("workload deployment has expired").into());
+    }
+    run(Command::new("/usr/bin/findmnt")
+        .args([
+            "--mountpoint",
+            ROOT,
+            "--types",
+            "erofs",
+            "--source",
+            MAPPER,
+            "--options",
+            "ro,nodev,nosuid",
+        ])
+        .stdout(std::process::Stdio::null()))?;
+    Ok(())
+}
+
 fn read_trust() -> Result<Trust> {
     private_directory(TRUST)?;
     let directory = Path::new(TRUST);
@@ -71,8 +215,10 @@ fn mount_workload() -> Result<()> {
     private_directory(GUEST_DATA)?;
     private_directory(BUNDLE)?;
     let verified = verify(Path::new(BUNDLE), &read_trust()?)?;
+    let definition = quadlet::render(&verified)?;
     let hash = verified.verity_root_hash().to_owned();
     let service = verified.service().to_owned();
+    provision_volumes(&service, &definition)?;
     let (artifact, image) = verified.into_artifact();
 
     // No kernel partition discovery. Both loops use the verified descriptor and bounded offsets.
@@ -103,6 +249,7 @@ fn mount_workload() -> Result<()> {
         MAPPER,
         ROOT,
     ]))?;
+    publish_unit(&definition)?;
     println!("FVCA_WORKLOAD_ROOT_ACTIVE {service} {hash}");
     Ok(())
 }
@@ -128,6 +275,16 @@ fn unmount_workload() -> Result<()> {
     if Path::new(MAPPER).try_exists()? {
         run(Command::new(VERITYSETUP).args(["detach", MAPPING]))?;
     }
+    match same_unit() {
+        Ok(true) => fs::remove_file(UNIT_PATH)?,
+        Ok(false) => {
+            return Err(io::Error::other("workload service changed after publication").into());
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    remove_missing(fs::remove_dir_all(QUADLET_DIR))?;
+    remove_missing(fs::remove_file(PUBLISHED_UNIT))?;
     remove_missing(fs::remove_file(SIGNATURE))?;
     remove_missing(fs::remove_dir(ROOT))?;
     fs::remove_dir(DIRECTORY)?;
@@ -141,12 +298,14 @@ fn execute() -> Result<()> {
         )
         .into());
     }
-    let mut arguments = std::env::args_os().skip(1);
-    let command = arguments.next().filter(|_| arguments.next().is_none());
-    match command.as_ref().and_then(|value| value.to_str()) {
-        Some("mount") => mount_workload(),
-        Some("unmount") => unmount_workload(),
-        _ => Err(io::Error::other("expected workload mount or unmount").into()),
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    let command: Vec<_> = arguments.iter().map(String::as_str).collect();
+    match command.as_slice() {
+        ["mount"] => mount_workload(),
+        ["unmount"] => unmount_workload(),
+        ["start"] => start_workload(),
+        ["check-start", expires] => check_start(expires),
+        _ => Err(io::Error::other("invalid workload activation operation").into()),
     }
 }
 
