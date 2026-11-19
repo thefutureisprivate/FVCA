@@ -1,0 +1,9 @@
+; Preserve the Fedora agent transition under NoNewPrivileges=yes.
+(allow init_t virt_qemu_ga_t (process2 (nnp_transition)))
+
+; PID 1 checks status permission before returning the authorized poweroff target.
+(allow virt_qemu_ga_t power_unit_file_t (service (status)))
+
+; Systemd creates the private agent state directory on volatile /run.
+(filecon "/run/qemu-guest-agent(/.*)?" any
+    (system_u object_r virt_qemu_ga_var_run_t ((s0) (s0))))

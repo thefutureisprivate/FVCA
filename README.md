@@ -236,7 +236,7 @@ python3 tools/compose-hypervisor.py \
 
 After unlocking both Host members, the Hypervisor mounts the selected Guest boot disk read-only and checks its authorized bytes before creating the VM through private libvirt. The registered VM uses a single Btrfs subvolume at `/run/fvca/host-data/vms/service-guest` with one private writable `data.raw`. The launcher checks the Btrfs CoW and data-checksum flags on the directory and disk. It exposes one disk attachment and keeps the pool directory private. The runtime checks that the libvirt management domain and the QEMU sVirt domain are enforcing in the loaded SELinux policy.
 
-Graceful Guest shutdown remains pending. The Hypervisor retains the disk attachment if the VM misses the shutdown deadline.
+The Hypervisor verifies that the Guest agent answers a ping before reporting readiness. The agent runs in the Guest's SELinux policy on a fixed virtio-serial channel. Its verified configuration allows synchronization, ping, and shutdown RPCs. Shutdown requires a normal libvirt lifecycle event and confirmation that QEMU exited. The Hypervisor retains the disk attachment while the VM may still be using it. [QEMU Guest Agent configuration](https://www.qemu.org/docs/master/interop/qemu-ga.html) · [libvirt domain lifecycle events](https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainEventStoppedDetailType)
 
 `tests/storage-lab.sh` provisions that layout on disposable disks. On a KVM test machine that exposes Intel VMX to the outer Hypervisor VM, run the nested qualification with `--nested-guest`. The Host reports `FVCA_SERVICE_GUEST_READY` after the Guest reports its direct-boot policy, exact OCI runtime, and verified root readiness.
 
@@ -247,6 +247,8 @@ python3 tests/check-storage.py \
   --lab build/host-storage-lab --nested-guest build/guest-boot.raw \
   --output build/hypervisor-nested-guest-checks
 ```
+
+For a disposable shutdown test, use `tests/nested-guest-shutdown-initrd.sh HYPERVISOR_INITRAMFS NEW_INITRAMFS` and pass the resulting archive to `compose-hypervisor.py --initrd`. Run the nested check with `--nested-guest-shutdown`. For a Guest that requires an authorized workload, supply its prepared Guest data disk as the second argument to `tests/storage-lab.sh`. The test waits for the orderly stop and checks that the raw disk attachment was released. Filesystem freeze, snapshot capture, and S3 backup remain pending.
 
 ## Off-node Stalwart workload derivation
 

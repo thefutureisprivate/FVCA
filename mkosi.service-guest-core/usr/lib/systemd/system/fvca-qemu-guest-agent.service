@@ -1,0 +1,28 @@
+[Unit]
+Description=FVCA Service Guest shutdown channel
+BindsTo=dev-virtio\x2dports-org.qemu.guest_agent.0.device
+After=dev-virtio\x2dports-org.qemu.guest_agent.0.device
+AssertPathExists=/run/fvca/direct-boot-ready
+AssertSecurity=selinux
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/qemu-ga --config=/usr/lib/fvca/qemu-guest-agent.conf
+SELinuxContext=system_u:system_r:virt_qemu_ga_t:s0
+RuntimeDirectory=qemu-guest-agent
+RuntimeDirectoryMode=0700
+UMask=0077
+CapabilityBoundingSet=
+DevicePolicy=closed
+DeviceAllow=/dev/virtio-ports/org.qemu.guest_agent.0 rw
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+StandardOutput=journal+console
+StandardError=journal+console

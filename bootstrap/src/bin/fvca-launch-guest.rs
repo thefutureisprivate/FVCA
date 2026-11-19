@@ -7,7 +7,6 @@ use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use fvca_initrd_bootstrap::{guest_boot, invalid, run, vm_confinement};
@@ -110,6 +109,8 @@ fn wait_for_boot(domain: &Domain<'_>, runtime: &str, events: &EventLoop) -> io::
             *found |= tail.windows(marker.len()).any(|bytes| bytes == marker);
         }
         if seen.into_iter().all(|found| found) && domain.state()? == RUNNING {
+            domain.require_guest_agent()?;
+            println!("FVCA_SERVICE_GUEST_AGENT_READY");
             return Ok(());
         }
         if tail.windows(16).any(|bytes| bytes == b"FVCA_BOOT_FAILED") {
@@ -145,18 +146,15 @@ fn launch() -> io::Result<()> {
 }
 
 fn shutdown() -> io::Result<()> {
+    let events = EventLoop::register()?;
     let connection = Connection::connect()?;
     let Some(domain) = connection.lookup(UUID)? else { return Ok(()); };
-    domain.shutdown()?;
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        if !domain.is_active()? {
-            println!("FVCA_SERVICE_GUEST_STOPPED");
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(100));
+    domain.shutdown(&events, Duration::from_secs(28))?;
+    if Path::new(PID).try_exists()? {
+        return Err(invalid("the Service Guest QEMU PID file still exists after shutdown"));
     }
-    Err(io::Error::new(io::ErrorKind::TimedOut, "the Service Guest did not shut down cleanly"))
+    println!("FVCA_SERVICE_GUEST_STOPPED");
+    Ok(())
 }
 
 fn release() -> io::Result<()> {
@@ -164,7 +162,7 @@ fn release() -> io::Result<()> {
         return Ok(());
     }
     let connection = Connection::connect()?;
-    if connection.lookup(UUID)?.is_some() {
+    if connection.lookup(UUID)?.is_some() || Path::new(PID).try_exists()? {
         return Err(invalid("the Service Guest still owns its data attachment"));
     }
     let mounted = Command::new("/usr/bin/findmnt").env_clear()

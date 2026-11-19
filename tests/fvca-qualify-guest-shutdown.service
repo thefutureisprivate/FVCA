@@ -1,0 +1,15 @@
+[Unit]
+Description=Qualify orderly shutdown of the disposable nested Guest
+After=fvca-base-ready.service
+OnFailure=emergency.target
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+TimeoutStartSec=45s
+NoNewPrivileges=yes
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/bin/systemctl stop fvca-service-guest.service
+ExecStart=/usr/bin/test ! -e /run/fvca/guest-state.raw
+ExecStart=/usr/bin/echo FVCA_NESTED_STOP_VERIFIED

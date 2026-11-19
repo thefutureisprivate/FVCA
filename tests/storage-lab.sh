@@ -3,9 +3,25 @@
 set -euo pipefail
 umask 077
 
-if [[ $# != 1 || "$1" == *,* ]]; then
-    echo 'Usage: tests/storage-lab.sh NEW_OUTPUT_DIRECTORY' >&2
+if [[ $# -lt 1 || $# -gt 2 || "$1" == *,* ]]; then
+    echo 'Usage: tests/storage-lab.sh NEW_OUTPUT_DIRECTORY [GUEST_SEED_DISK]' >&2
     exit 2
+fi
+guest_seed=
+member_size=384M
+if [[ $# == 2 ]]; then
+    guest_seed=$(realpath -e -- "$2")
+    if [[ ! -f "$guest_seed" || "$guest_seed" == *,* ]]; then
+        echo 'The Guest seed must be a regular disk image with a comma-free path' >&2
+        exit 2
+    fi
+    seed_bytes=$(stat -c %s -- "$guest_seed")
+    if (( seed_bytes == 0 || seed_bytes % 512 != 0 )); then
+        echo 'The Guest seed must be a nonempty, sector-aligned raw image' >&2
+        exit 2
+    fi
+    # Leave the same Btrfs repair headroom as the empty fixture.
+    member_size=$((seed_bytes + 384 * 1024 * 1024))
 fi
 tests=$(cd -- "$(dirname -- "$0")" && pwd)
 mkdir -- "$1"
@@ -66,8 +82,8 @@ boot() {
     fi
 }
 
-truncate -s 384M "$output/member-a.raw" "$output/member-b.raw" "$output/replacement.raw" \
-    "$output/guest-data.raw" "$output/guest-wrong-profile.raw"
+truncate -s "$member_size" "$output/member-a.raw" "$output/member-b.raw" "$output/replacement.raw"
+truncate -s 384M "$output/guest-data.raw" "$output/guest-wrong-profile.raw"
 boot guest \
     -drive "if=none,id=guest,format=raw,file=$output/guest-data.raw" -device virtio-blk-pci,drive=guest,serial=fvca-lab-guest
 grep -q FVCA_GUEST_BTRFS_LAB_PROVISIONED "$output/guest.log"
@@ -78,7 +94,7 @@ grep -q FVCA_GUEST_BTRFS_LAB_PROVISIONED "$output/guest-wrong-profile.log"
 boot provision \
     -drive "if=none,id=a,format=raw,file=$output/member-a.raw" -device virtio-blk-pci,drive=a,serial=fvca-lab-a \
     -drive "if=none,id=b,format=raw,file=$output/member-b.raw" -device virtio-blk-pci,drive=b,serial=fvca-lab-b \
-    -drive "if=none,id=guest,format=raw,readonly=on,file=$output/guest-data.raw" -device virtio-blk-pci,drive=guest,serial=fvca-lab-guest-seed
+    -drive "if=none,id=guest,format=raw,readonly=on,file=${guest_seed:-$output/guest-data.raw}" -device virtio-blk-pci,drive=guest,serial=fvca-lab-guest-seed
 grep -q FVCA_STORAGE_LAB_PROVISIONED "$output/provision.log"
 
 for member in a b; do

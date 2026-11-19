@@ -33,5 +33,6 @@ if [[ "${FVCA_HYPERVISOR_STORAGE:-}" == yes ]]; then
     semodule -n -X 400 -i "$SRCDIR/policy/selinux/fvca_storage.cil"
 fi
 if [[ "${FVCA_SERVICE_GUEST:-}" == yes ]]; then
-    semodule -n -X 400 -i "$SRCDIR/policy/selinux/fvca_oci.cil"
+    semodule -n -X 400 -i "$SRCDIR/policy/selinux/fvca_oci.cil" \
+        -i "$SRCDIR/policy/selinux/fvca_guest_agent.cil"
 fi

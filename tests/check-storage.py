@@ -35,7 +35,7 @@ def image(path):
 
 
 def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, extra_cmdline=False,
-         attach_runtime=True, timeout=80, direct_cmdline=None, attach_guest=True):
+         attach_runtime=True, timeout=80, direct_cmdline=None, attach_guest=True, ready_marker=READY):
     cpu = "host,vmx=off" if args.guest else "host"
     machine = "q35,smm=on"
     devices = []
@@ -127,7 +127,7 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
                         waiting_for_no_echo = False
                         prompt_start = len(output)
                         qemu.stdin.flush()
-                    if READY in output or (direct_cmdline is not None and (DIRECT_MISMATCH in output or INIT_EXIT in output)):
+                    if ready_marker in output or (direct_cmdline is not None and (DIRECT_MISMATCH in output or INIT_EXIT in output)):
                         break
                     if not failed_boot and FAIL in output:
                         failed_boot = True
@@ -191,11 +191,16 @@ def check_nested_guest(args):
         raise ValueError("unexpected lab passphrase encoding")
     members = [lab / f"member-{member}.raw" for member in ("a", "b")]
     guest_ready = b"FVCA_SERVICE_GUEST_READY"
-    prompts, log = boot(args, "guest", password, *members, timeout=155)
-    required = (HOST_PROFILES, ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", guest_ready, READY)
+    finished = b"FVCA_NESTED_STOP_VERIFIED" if args.nested_guest_shutdown else READY
+    prompts, log = boot(args, "guest", password, *members, timeout=155, ready_marker=finished)
+    required = (HOST_PROFILES, ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", b"FVCA_SERVICE_GUEST_AGENT_READY", guest_ready, READY)
+    if args.nested_guest_shutdown:
+        required += (b"FVCA_SERVICE_GUEST_STOPPED", finished)
     if prompts != 2 or log.count(b"FVCA_KVM_GUEST_CONFINED") != 2 or FAIL in log or any(marker not in log for marker in required):
         raise ValueError("the Hypervisor did not reach readiness with its authorized nested Guest")
     print("nested-guest passed")
+    if args.nested_guest_shutdown:
+        print("nested-guest-shutdown passed")
 
     prompts, log = boot(args, "missing-bundle", password, *members, attach_guest=False)
     if (prompts != 2 or b"authorized Guest boot bundle partitions are missing" not in log or FAIL not in log
@@ -391,6 +396,8 @@ if __name__ == "__main__":
     role.add_argument("--oci-runtime", type=Path, help="signed Service Guest OCI runtime")
     parser.add_argument("--replacement-disk", type=Path, help="Hypervisor boot disk authorizing the lab replacement")
     parser.add_argument("--nested-guest", type=Path, help="Guest bundle to launch inside the disposable Hypervisor")
+    parser.add_argument("--nested-guest-shutdown", action="store_true",
+                        help="require orderly stop with the disposable qualification initramfs")
     parser.add_argument("--wrong-runtime", type=Path, help="unselected runtime for a Guest rejection test")
     parser.add_argument("--workload", action="store_true", help="qualify workload activation with approved.raw and tampered.raw")
     parser.add_argument("--stalwart-lifecycle", action="store_true", help="check the disposable Stalwart lifecycle fixture")
@@ -427,6 +434,8 @@ if __name__ == "__main__":
         parser.error("--replacement-disk requires the Hypervisor development passphrase test")
     if args.nested_guest is not None and (args.guest or any(tpm_options) or args.replacement_disk is not None):
         parser.error("--nested-guest requires the Hypervisor development passphrase test")
+    if args.nested_guest_shutdown and args.nested_guest is None:
+        parser.error("--nested-guest-shutdown requires --nested-guest")
     try:
         if args.tpm_state is not None:
             check_tpm(args)

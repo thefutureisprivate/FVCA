@@ -4,6 +4,9 @@ use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::io;
 use std::marker::PhantomData;
 use std::ptr::{NonNull, null_mut};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::{Duration, Instant};
 
 const LOCAL_QEMU: &CStr = c"qemu+unix:///system?socket=/run/libvirt/virtqemud-sock";
 const START_AUTODESTROY: c_uint = 2;
@@ -11,10 +14,17 @@ const START_PAUSED: c_uint = 1;
 const START_VALIDATE: c_uint = 16;
 const CONSOLE_SAFE: c_uint = 2;
 const STREAM_NONBLOCK: c_uint = 1;
-const SHUTDOWN_ACPI: c_uint = 1;
+const SHUTDOWN_AGENT: c_uint = 2;
 const NO_DOMAIN: c_int = 42;
+const EVENT_LIFECYCLE: c_int = 0;
+const EVENT_STOPPED: c_int = 5;
+const STOPPED_SHUTDOWN: c_int = 0;
+const STOP_PENDING: c_int = -1;
+const AGENT_TIMEOUT_SECONDS: c_int = 5;
 pub const RUNNING: c_int = 1;
 pub const PAUSED: c_int = 3;
+
+type LifecycleCallback = extern "C" fn(*mut c_void, *mut c_void, c_int, c_int, *mut c_void) -> c_int;
 
 #[link(name = "virt")]
 unsafe extern "C" {
@@ -25,6 +35,12 @@ unsafe extern "C" {
     fn virDomainLookupByUUIDString(connection: *mut c_void, uuid: *const c_char) -> *mut c_void;
     fn virDomainIsActive(domain: *mut c_void) -> c_int;
     fn virDomainShutdownFlags(domain: *mut c_void, flags: c_uint) -> c_int;
+    fn virDomainAgentSetResponseTimeout(domain: *mut c_void, timeout: c_int, flags: c_uint) -> c_int;
+    fn virConnectDomainEventRegisterAny(
+        connection: *mut c_void, domain: *mut c_void, event: c_int, callback: LifecycleCallback,
+        opaque: *mut c_void, free: extern "C" fn(*mut c_void),
+    ) -> c_int;
+    fn virConnectDomainEventDeregisterAny(connection: *mut c_void, callback: c_int) -> c_int;
     fn virGetLastErrorCode() -> c_int;
     fn virDomainSuspend(domain: *mut c_void) -> c_int;
     fn virDomainResume(domain: *mut c_void) -> c_int;
@@ -42,6 +58,15 @@ unsafe extern "C" {
     fn virEventRemoveTimeout(timer: c_int) -> c_int;
 }
 
+#[link(name = "virt-qemu")]
+unsafe extern "C" {
+    fn virDomainQemuAgentCommand(domain: *mut c_void, command: *const c_char, timeout: c_int, flags: c_uint) -> *mut c_char;
+}
+
+unsafe extern "C" {
+    fn free(pointer: *mut c_void);
+}
+
 pub struct Connection(NonNull<c_void>);
 pub struct EventLoop(c_int);
 
@@ -53,6 +78,12 @@ pub struct Domain<'connection> {
 pub struct Console<'domain> {
     stream: NonNull<c_void>,
     _domain: PhantomData<&'domain ()>,
+}
+
+struct StopEvent<'connection> {
+    connection: &'connection Connection,
+    callback: c_int,
+    reason: Arc<AtomicI32>,
 }
 
 fn status(code: c_int, operation: &'static str) -> io::Result<()> {
@@ -132,6 +163,44 @@ impl Drop for Connection {
     }
 }
 
+impl StopEvent<'_> {
+    fn watch<'connection>(domain: &Domain<'connection>) -> io::Result<StopEvent<'connection>> {
+        extern "C" fn record(_: *mut c_void, _: *mut c_void, event: c_int, detail: c_int, data: *mut c_void) -> c_int {
+            if event == EVENT_STOPPED {
+                // libvirt retains an Arc reference while callbacks can run.
+                let reason = unsafe { &*data.cast::<AtomicI32>() };
+                reason.store(detail, Ordering::Relaxed);
+            }
+            0
+        }
+        extern "C" fn discard(data: *mut c_void) {
+            // The callback owns the reference transferred by Arc::into_raw.
+            drop(unsafe { Arc::from_raw(data.cast::<AtomicI32>()) });
+        }
+        let reason = Arc::new(AtomicI32::new(STOP_PENDING));
+        let data = Arc::into_raw(Arc::clone(&reason)).cast_mut().cast();
+        // The C API accepts the event-specific callback signature for this event ID.
+        let callback = unsafe {
+            virConnectDomainEventRegisterAny(
+                domain._connection.0.as_ptr(), domain.handle.as_ptr(), EVENT_LIFECYCLE, record, data, discard,
+            )
+        };
+        if callback < 0 {
+            // On registration failure the client retains ownership of the opaque argument.
+            discard(data);
+            return Err(io::Error::other("could not watch the registered VM lifecycle"));
+        }
+        Ok(StopEvent { connection: domain._connection, callback, reason })
+    }
+}
+
+impl Drop for StopEvent<'_> {
+    fn drop(&mut self) {
+        // If deregistration fails, the registration retains its reference until connection cleanup.
+        unsafe { virConnectDomainEventDeregisterAny(self.connection.0.as_ptr(), self.callback) };
+    }
+}
+
 impl Domain<'_> {
     pub fn is_active(&self) -> io::Result<bool> {
         // The handle refers to one domain owned by the live connection.
@@ -154,9 +223,39 @@ impl Domain<'_> {
         Ok(console)
     }
 
-    pub fn shutdown(&self) -> io::Result<()> {
-        // Only the configured power button is available in this Guest definition.
-        status(unsafe { virDomainShutdownFlags(self.handle.as_ptr(), SHUTDOWN_ACPI) }, "could not shut down the Guest")
+    pub fn require_guest_agent(&self) -> io::Result<()> {
+        // This boundary exposes only the fixed ping, never a caller-supplied agent command.
+        let reply = unsafe {
+            virDomainQemuAgentCommand(self.handle.as_ptr(), c"{\"execute\":\"guest-ping\"}".as_ptr(), AGENT_TIMEOUT_SECONDS, 0)
+        };
+        if reply.is_null() {
+            return Err(io::Error::other("the Service Guest agent did not answer"));
+        }
+        // Libvirt serializes the owned response as compact JSON.
+        let success = unsafe { CStr::from_ptr(reply) } == c"{\"return\":{}}";
+        unsafe { free(reply.cast()) };
+        if !success {
+            return Err(io::Error::other("the Service Guest agent did not accept the ping"));
+        }
+        Ok(())
+    }
+
+    pub fn shutdown(&self, events: &EventLoop, timeout: Duration) -> io::Result<()> {
+        let stop = StopEvent::watch(self)?;
+        let deadline = Instant::now() + timeout;
+        status(unsafe { virDomainAgentSetResponseTimeout(self.handle.as_ptr(), AGENT_TIMEOUT_SECONDS, 0) },
+               "could not set the Guest agent response timeout")?;
+        status(unsafe { virDomainShutdownFlags(self.handle.as_ptr(), SHUTDOWN_AGENT) }, "could not request Guest agent shutdown")?;
+        while Instant::now() < deadline {
+            match stop.reason.load(Ordering::Relaxed) {
+                STOP_PENDING => {}
+                STOPPED_SHUTDOWN if !self.is_active()? => return Ok(()),
+                STOPPED_SHUTDOWN => {}
+                reason => return Err(io::Error::other(format!("the Service Guest stopped with libvirt reason {reason}"))),
+            }
+            events.poll()?;
+        }
+        Err(io::Error::new(io::ErrorKind::TimedOut, "libvirt did not confirm an orderly Guest shutdown"))
     }
 
     pub fn state(&self) -> io::Result<c_int> {
