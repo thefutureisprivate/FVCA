@@ -1,0 +1,10 @@
+[package]
+name = "fvca-initrd-bootstrap"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+publish = false
+
+[profile.release]
+panic = "abort"
+strip = "symbols"

@@ -1,4 +1,5 @@
 /build/
+/bootstrap/target/
 /Design/
 /mkosi.local.conf
 /mkosi.key

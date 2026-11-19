@@ -19,6 +19,12 @@ PARTITIONS = {
     "verity": "2c7357ed-ebd2-46d9-aec1-23d437ec2bf5",
     "signature": "41092b05-9fc8-4523-994f-2def0408b176",
 }
+BOOT_OPTIONS = {
+    "dm_verity.require_signatures": "1",
+    "proc_mem.force_override": "never",
+    "systemd.restrict_filesystem_access": "exec",
+    "systemd.verity_root_options": "panic-on-corruption,root-hash-signature=auto",
+}
 
 
 def read_layout(image):
@@ -55,11 +61,13 @@ def verify(image, boot_certificate, verity_certificate, work):
     if sections.get("_profiles"):
         raise ValueError("unexpected UKI profiles")
 
-    hashes = [
-        arg.removeprefix("roothash=")
-        for arg in sections[".cmdline"]["text"].split()
-        if arg.startswith("roothash=")
-    ]
+    arguments = [arg.partition("=") for arg in sections[".cmdline"]["text"].split()]
+    for option, expected in BOOT_OPTIONS.items():
+        values = [value for name, _, value in arguments if name == option]
+        if values != [expected]:
+            raise ValueError(f"the signed UKI must specify exactly one {option}={expected}")
+
+    hashes = [value for name, _, value in arguments if name == "roothash"]
     if len(hashes) != 1 or re.fullmatch(r"[0-9a-f]{64}", hashes[0]) is None:
         raise ValueError("the signed UKI must specify one SHA-256 root hash")
     root_hash = hashes[0]
@@ -84,7 +92,7 @@ def verify(image, boot_certificate, verity_certificate, work):
                     "-content", content, "-nointern", "-certfile", verity_certificate, "-noverify",
                     "-out", "/dev/null"], check=True)
     subprocess.run(["veritysetup", "verify", work / "root", work / "verity", root_hash], check=True)
-    print(f"Verified UKI, DDI signature and dm-verity data for {root_hash}")
+    print(f"Verified UKI execution policy, DDI signature and dm-verity data for {root_hash}")
 
 
 def main():
