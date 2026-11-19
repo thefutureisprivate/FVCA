@@ -3,8 +3,24 @@ set -euo pipefail
 
 # The kernel can be newer than the Fedora policy's class and permission definitions.
 printf '\nhandle-unknown = deny\n' >> /etc/selinux/semanage.conf
-semodule -n -X 400 -i "$SRCDIR/policy/selinux/fvca_initrd.cil" \
-    -i "$SRCDIR/policy/selinux/fvca_libvirt.cil"
+
+# Override the pinned Fedora systemd module and keep its existing transitions.
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+(
+    cd "$work"
+    semodule -X 100 -c -E systemd
+    permissive='(typepermissive systemd_pcrextend_t)'
+    if [[ $(grep -Fxc -- "$permissive" systemd.cil) != 1 ]]; then
+        echo 'Expected one permissive PCR measurement domain in the pinned Fedora policy' >&2
+        exit 1
+    fi
+    sed -i '/^(typepermissive systemd_pcrextend_t)$/d' systemd.cil
+)
+semodule -n -X 400 -i "$work/systemd.cil" \
+    -i "$SRCDIR/policy/selinux/fvca_initrd.cil" \
+    -i "$SRCDIR/policy/selinux/fvca_libvirt.cil" \
+    -i "$SRCDIR/policy/selinux/fvca_tpm_event_log.cil"
 if [[ "${FVCA_HYPERVISOR_STORAGE:-}" == yes ]]; then
     semodule -n -X 400 -i "$SRCDIR/policy/selinux/fvca_storage.cil"
 fi

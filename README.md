@@ -138,6 +138,8 @@ The lab check takes `--firmware` for the measured Secure Boot firmware, `--varia
 
 The Hypervisor initramfs omits systemd's stock NvPCR definitions. The storage PCR authority authorizes only LUKS2 unsealing. Future TPM-backed release state requires its own initialization policy.
 
+The shared SELinux policy switches Fedora's PCR measurement domain to enforcing. Both the initramfs and the core verify the domain against the policy loaded in the kernel. On a measured boot, systemd prepares the root-only, separately labeled log at `/run/log/systemd/tpm2-measure.log` before the first userspace PCR measurements.
+
 ## Development Service Guest storage
 
 The Service Guest uses one ordinary virtual Btrfs data partition. Its signed development UKI contains the selected partition and filesystem UUIDs from `tests/guest-storage.conf`. The boot gate requires that exact single-device filesystem and mounts it at `/run/fvca/guest-data` with `nodev,nosuid,noexec`. The signed EROFS image continues to provide the verified OS root for both roles.

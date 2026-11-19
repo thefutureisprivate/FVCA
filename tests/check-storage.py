@@ -16,6 +16,7 @@ import time
 READY = b"FVCA_DEV_BASE_READY"
 FAIL = b"FVCA_BOOT_FAILED"
 ACTIVE = b"FVCA_HOST_STORAGE_ACTIVE"
+PCR_CONFINED = b"FVCA_SELINUX_PCR_CONFINED"
 PROMPT = re.compile(rb"Please enter (?:the )?passphrase for disk [^\r\n]{1,250}:|Enter FVCA storage TPM PIN:")
 OVMF_CODE = Path("/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd")
 
@@ -131,7 +132,8 @@ def check_hypervisor(args):
         ("rebuilt", lab / "surviving-member.raw", lab / "replacement.raw"),
     ):
         prompted, output = boot(args, name, password, a, b)
-        if not prompted or not all(mark in output for mark in (ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", READY)):
+        if (not prompted or output.count(PCR_CONFINED) < 2
+                or not all(mark in output for mark in (ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", READY))):
             raise ValueError(f"{name} did not boot with the encrypted mirror")
         print(f"{name} passed")
 
@@ -150,7 +152,8 @@ def check_hypervisor(args):
 def check_guest(args):
     args.output.mkdir(mode=0o700)
     prompted, output = boot(args, "guest", None, args.lab / "guest-data.raw")
-    if prompted or b"FVCA_GUEST_DATA_ACTIVE" not in output or READY not in output or FAIL in output:
+    if (prompted or output.count(PCR_CONFINED) < 2 or b"FVCA_GUEST_DATA_ACTIVE" not in output
+            or READY not in output or FAIL in output):
         raise ValueError("the signed Guest did not boot with its Btrfs data partition")
     print("guest passed")
 
@@ -208,7 +211,8 @@ def check_tpm(args):
         if b"passphrase for disk" in log:
             raise ValueError(f"{name} offered a passphrase fallback")
         if name == "approved":
-            if not prompted or not all(mark in log for mark in approvals) or FAIL in log:
+            if (not prompted or log.count(PCR_CONFINED) < 2
+                    or not all(mark in log for mark in approvals) or FAIL in log):
                 raise ValueError("the approved TPM, boot state and operator PIN did not unlock storage")
         elif (not prompted or b'activation failed: "/usr/bin/cryptsetup" exited' not in log or FAIL not in log
               or any(mark in log for mark in approvals)):

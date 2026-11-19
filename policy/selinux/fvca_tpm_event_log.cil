@@ -1,0 +1,10 @@
+; Keep TPM evidence at systemd's standard path with a dedicated file type.
+(type fvca_tpm_event_log_t)
+(typeattributeset file_type (fvca_tpm_event_log_t))
+(roletype object_r fvca_tpm_event_log_t)
+(filecon "/run/log/systemd/tpm2-measure\.log" file (system_u object_r fvca_tpm_event_log_t ((s0) (s0))))
+
+; The early preparation service creates the file before the first measurement.
+(allow systemd_tmpfiles_t fvca_tpm_event_log_t (file (create getattr open setattr write relabelto)))
+(allow systemd_pcrextend_t fvca_tpm_event_log_t (file (getattr open write lock setattr)))
+(allow systemd_pcrextend_t syslogd_t (unix_dgram_socket (sendto)))

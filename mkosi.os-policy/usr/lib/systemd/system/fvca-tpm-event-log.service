@@ -1,0 +1,13 @@
+[Unit]
+Description=Prepare the labeled TPM event log
+DefaultDependencies=no
+Before=systemd-pcrosseparator.service systemd-pcrphase-initrd.service systemd-pcrextend.socket
+Before=shutdown.target initrd-switch-root.target
+Conflicts=shutdown.target
+ConditionSecurity=measured-os
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemd-tmpfiles --create /usr/lib/tmpfiles.d/fvca-tpm-event-log.conf
+RemainAfterExit=yes
+NoNewPrivileges=yes
