@@ -43,7 +43,12 @@ def normalize_build_files(root):
             units.extend([
                 "fvca-activate-runtime.service",
                 "initrd-parse-etc.service.d/20-fvca-runtime.conf",
-                "initrd-switch-root.target.d/20-fvca-runtime.conf",
+                "initrd-switch-root.service.d/20-fvca-runtime.conf",
+            ])
+        if (root / "usr/lib/fvca/activate-guest-data").is_file():
+            units.extend([
+                "fvca-activate-guest-data.service",
+                "initrd-switch-root.service.d/20-fvca-guest-data.conf",
             ])
     else:
         units.extend(["fvca-base-ready.service", "fvca-base.target"])

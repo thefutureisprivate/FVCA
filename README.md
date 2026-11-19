@@ -102,17 +102,31 @@ The readiness probe runs `qemu-img` from the composed `/usr` and exercises a dis
 
 ## Development Hypervisor storage
 
-The Hypervisor assembler accepts `--storage tests/host-storage.conf` for the disposable storage fixture. The UKI signs both GPT partition identities and the expected native RAID1, LUKS2 and ext4 identities. The initramfs requires both selected partitions on separate disks and disables automatic RAID assembly. It checks the assembled array and the LUKS header before requesting the operator passphrase on the console.
+The Hypervisor assembler accepts `--storage tests/host-storage.conf` for the disposable storage fixture. The UKI signs both GPT partition identities and the expected native RAID1, LUKS2 and Btrfs identities. The initramfs requires both selected partitions on separate disks and disables automatic RAID assembly. It checks the assembled array and the LUKS header before requesting the operator passphrase on the console.
 
-The development image gates readiness on an ext4 mount at `/run/fvca/host-data` with `nodev,nosuid,noexec`. Its root directory must be owned by root with mode `0700`. This volume holds mutable data. The physical TPM and PIN policy, independent boot slots, appliance recovery environment, and authenticated mutable-state protections remain pending.
+The development image gates readiness on a single-device Btrfs mount at `/run/fvca/host-data` with `nodev,nosuid,noexec`. RAID1 supplies physical redundancy below LUKS2. The Btrfs root directory must be owned by root with mode `0700`. This volume holds mutable data. The physical TPM and PIN policy, independent boot slots, appliance recovery environment, and authenticated mutable-state protections remain pending.
 
-On a Fedora KVM test machine with `mdadm`, `cryptsetup`, `e2fsprogs` and `cpio` installed, the fixture creates fresh file-backed disks and tests single-member recovery and replacement. Build the Hypervisor as above with the fixture selection added to the assembler command, then run the integration checks against the signed disk and its matching runtime.
+On a Fedora KVM test machine with `mdadm`, `cryptsetup`, `btrfs-progs` and `cpio` installed, the fixture creates fresh file-backed disks and tests single-member recovery and replacement. The recovery mount suppresses Btrfs log replay while inspecting either member. Build the Hypervisor as above with the fixture selection added to the assembler command, then run the integration checks against the signed disk and its matching runtime. [Btrfs recovery mount options](https://btrfs.readthedocs.io/en/latest/ch-mount-options.html)
 
 ```sh
 tests/storage-lab.sh build/host-storage-lab
-python3 tests/check-host-storage.py \
-  --hypervisor build/hypervisor-profile/fvca-dev-hypervisor.raw \
+python3 tests/check-storage.py \
+  --disk build/hypervisor-profile/fvca-dev-hypervisor.raw \
   --runtime build/vm-runtime/vm-runtime.raw \
   --variables build/fvca-vars.fd \
   --lab build/host-storage-lab --output build/host-storage-checks
 ```
+
+## Development Service Guest storage
+
+The Service Guest uses one ordinary virtual Btrfs data partition. Its signed development UKI contains the selected partition and filesystem UUIDs from `tests/guest-storage.conf`. The boot gate requires that exact single-device filesystem and mounts it at `/run/fvca/guest-data` with `nodev,nosuid,noexec`. The signed EROFS image continues to provide the verified OS root for both roles.
+
+```sh
+mkosi --profile=service-guest-storage --output-dir=build/service-guest-storage build
+python3 tests/check-storage.py --guest \
+  --disk build/service-guest-storage/fvca-dev-service-guest.raw \
+  --variables build/fvca-vars.fd --lab build/host-storage-lab \
+  --output build/guest-storage-checks
+```
+
+Boot `build/service-guest-storage/fvca-dev-service-guest.raw` with the common QEMU command and attach the fixture as a second drive with `-drive if=virtio,format=raw,snapshot=on,file=build/host-storage-lab/guest-data.raw`. The console reports `FVCA_GUEST_DATA_ACTIVE` before readiness. The Service Guest OCI runtime and workload qualification are separate work.

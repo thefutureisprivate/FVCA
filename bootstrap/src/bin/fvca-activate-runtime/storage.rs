@@ -1,12 +1,12 @@
 use std::fs;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{find_partition, invalid, run};
+use fvca_initrd_bootstrap::{find_partition, identity, invalid, mount_btrfs, run, sys_block, verify_superblock};
 
 const POLICY: &str = "/usr/lib/fvca/host-storage";
 const ARRAY: &str = "/dev/md0";
@@ -24,26 +24,9 @@ struct Selection<'a> {
     filesystem: &'a str,
 }
 
-fn identity<'a>(line: &'a str, key: &str, groups: &[usize], separator: char) -> io::Result<&'a str> {
-    let value = line.strip_prefix(key).ok_or_else(|| invalid("unexpected host storage field"))?;
-    let mut parts = value.split(separator);
-    for size in groups {
-        let Some(part) = parts.next() else {
-            return Err(invalid("missing storage identity component"));
-        };
-        if part.len() != *size || !part.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
-            return Err(invalid("invalid storage identity"));
-        }
-    }
-    if parts.next().is_some() {
-        return Err(invalid("extra storage identity component"));
-    }
-    Ok(value)
-}
-
 fn selection(text: &str) -> io::Result<Selection<'_>> {
     let fields: Vec<_> = text.split('\n').collect();
-    let ["FVCA-HOST-STORAGE-1", "unlock=development-passphrase", a, b, raid, luks, filesystem, ""] =
+    let ["FVCA-HOST-STORAGE-2", "unlock=development-passphrase", a, b, raid, luks, "filesystem=btrfs", filesystem, ""] =
         fields.as_slice()
     else {
         return Err(invalid("malformed Hypervisor storage selection"));
@@ -59,7 +42,7 @@ fn selection(text: &str) -> io::Result<Selection<'_>> {
         member_b,
         raid: identity(raid, "raid=", &[8, 8, 8, 8], ':')?,
         luks: identity(luks, "luks=", &uuid, '-')?,
-        filesystem: identity(filesystem, "filesystem=", &uuid, '-')?,
+        filesystem: identity(filesystem, "filesystem_uuid=", &uuid, '-')?,
     })
 }
 
@@ -78,11 +61,6 @@ fn members(selection: &Selection<'_>) -> io::Result<(PathBuf, PathBuf)> {
         }
         thread::sleep(Duration::from_millis(200));
     }
-}
-
-fn sys_block(path: &Path) -> io::Result<PathBuf> {
-    let name = path.file_name().ok_or_else(|| invalid("block device has no name"))?;
-    fs::canonicalize(Path::new("/sys/class/block").join(name))
 }
 
 fn parent_device(path: &Path) -> io::Result<PathBuf> {
@@ -115,51 +93,9 @@ fn verify_array(a: &Path, b: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn verify_superblock(path: &str, kind: &str, uuid: &str, version: Option<&str>) -> io::Result<()> {
-    let result = Command::new("/usr/bin/blkid").env_clear()
-        .args(["--probe", "--output", "export", path]).output()?;
-    if !result.status.success() {
-        return Err(invalid("unable to probe the authorized storage superblock"));
-    }
-    let fields = std::str::from_utf8(&result.stdout).map_err(|_| invalid("invalid blkid output"))?;
-    for (key, expected) in [("TYPE", Some(kind)), ("UUID", Some(uuid)), ("VERSION", version)] {
-        if let Some(expected) = expected {
-            let mut values = fields.lines().filter_map(|line| {
-                let (field, value) = line.split_once('=')?;
-                (field == key).then_some(value)
-            });
-            if values.next() != Some(expected) || values.next().is_some() {
-                return Err(invalid("storage superblock does not match the signed selection"));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn mount_data(filesystem: &str) -> io::Result<()> {
-    verify_superblock(VOLUME, "ext4", filesystem, None)?;
-    fs::DirBuilder::new().mode(0o700).create(DATA)?;
-    run(Command::new("/usr/bin/mount").args([
-        "--internal-only", "-t", "ext4", "-o", "rw,nodev,nosuid,noexec", VOLUME, DATA,
-    ]))?;
-    if let Err(error) = require_private_root() {
-        let _ = run(Command::new("/usr/bin/umount").arg(DATA));
-        return Err(error);
-    }
-    Ok(())
-}
-
-fn require_private_root() -> io::Result<()> {
-    let root = fs::metadata(DATA)?;
-    if root.uid() != 0 || root.gid() != 0 || root.permissions().mode() & 0o7777 != 0o700 {
-        return Err(invalid("host data filesystem root must be owned by root:root with mode 0700"));
-    }
-    Ok(())
-}
-
 fn open_data(selection: &Selection<'_>, a: &Path, b: &Path) -> io::Result<()> {
     verify_array(a, b)?;
-    verify_superblock(ARRAY, "crypto_LUKS", selection.luks, Some("2"))?;
+    verify_superblock(Path::new(ARRAY), "crypto_LUKS", selection.luks, Some("2"))?;
     run(Command::new(MDADM).args(["--readwrite", ARRAY]))?;
     let status = Command::new(CRYPTSETUP).env_clear()
         .env("SYSTEMD_CRYPTSETUP_USE_TOKEN_MODULE", "0").args([
@@ -168,7 +104,7 @@ fn open_data(selection: &Selection<'_>, a: &Path, b: &Path) -> io::Result<()> {
     if !status.success() {
         return Err(io::Error::other(format!("development passphrase unlock exited with {status}")));
     }
-    if let Err(error) = mount_data(selection.filesystem) {
+    if let Err(error) = mount_btrfs(Path::new(VOLUME), selection.filesystem, DATA) {
         let _ = run(Command::new(CRYPTSETUP).args(["detach", MAPPER]));
         return Err(error);
     }
@@ -202,6 +138,6 @@ fn bind_readiness_probe() -> io::Result<()> {
     fs::write(format!("{drop_in}/10-storage.conf"), concat!(
         "[Service]\n",
         "ExecStartPre=/usr/bin/findmnt --mountpoint /run/fvca/host-data",
-        " --source /dev/mapper/fvca-host-data --types ext4 --options rw,nodev,nosuid,noexec\n",
+        " --source /dev/mapper/fvca-host-data --types btrfs --options rw,nodev,nosuid,noexec\n",
     ))
 }

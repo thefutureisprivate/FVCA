@@ -29,7 +29,7 @@ ACTIVATION_FILES = (
     "usr/lib/fvca/activate-runtime",
     "usr/lib/systemd/system/fvca-activate-runtime.service",
     "usr/lib/systemd/system/initrd-parse-etc.service.d/20-fvca-runtime.conf",
-    "usr/lib/systemd/system/initrd-switch-root.target.d/20-fvca-runtime.conf",
+    "usr/lib/systemd/system/initrd-switch-root.service.d/20-fvca-runtime.conf",
 )
 
 
@@ -57,10 +57,10 @@ def storage_selection(path):
     content = path.read_bytes()
     uuid = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
     match = re.fullmatch(
-        rf"FVCA-HOST-STORAGE-1\nunlock=development-passphrase\n"
+        rf"FVCA-HOST-STORAGE-2\nunlock=development-passphrase\n"
         rf"member_a=({uuid})\nmember_b=({uuid})\n"
         rf"raid=(?:[0-9a-f]{{8}}:){{3}}[0-9a-f]{{8}}\n"
-        rf"luks={uuid}\nfilesystem={uuid}\n",
+        rf"luks={uuid}\nfilesystem=btrfs\nfilesystem_uuid={uuid}\n",
         content.decode("ascii"),
     )
     if match is None or match[1] == match[2]:

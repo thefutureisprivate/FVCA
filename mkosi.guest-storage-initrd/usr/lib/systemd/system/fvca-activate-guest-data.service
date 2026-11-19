@@ -1,0 +1,16 @@
+[Unit]
+Description=Activate the UKI-authorized Service Guest Btrfs volume
+DefaultDependencies=no
+Requires=sysroot.mount
+After=sysroot.mount
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+OnFailure=emergency.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/fvca/activate-guest-data
+RemainAfterExit=yes
+TimeoutStartSec=20s
+StandardOutput=journal+console
+NoNewPrivileges=yes

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Boot the signed storage-qualified Hypervisor with disposable lab disks."""
+"""Qualify the signed storage boot paths with disposable lab disks."""
 
 import argparse
 import os
@@ -25,21 +25,24 @@ def image(path):
 
 
 def boot(args, name, password, *members):
+    cpu = "host,vmx=off" if args.guest else "host"
     command = [
-        "qemu-system-x86_64", "-machine", "q35,smm=on", "-accel", "kvm", "-cpu", "host",
+        "qemu-system-x86_64", "-machine", "q35,smm=on", "-accel", "kvm", "-cpu", cpu,
         "-m", "2048", "-smp", "2", "-global", "driver=cfi.pflash01,property=secure,value=on",
         "-drive", f"if=pflash,format=raw,readonly=on,file={image(OVMF_CODE)}",
         "-drive", f"if=pflash,format=raw,snapshot=on,file={image(args.variables)}",
-        "-drive", f"if=virtio,format=raw,snapshot=on,file={image(args.hypervisor)}",
-        "-drive", f"if=virtio,format=raw,readonly=on,file={image(args.runtime)}",
+        "-drive", f"if=virtio,format=raw,snapshot=on,file={image(args.disk)}",
         "-display", "none", "-serial", "stdio", "-monitor", "none", "-nic", "none", "-no-reboot",
     ]
+    if args.runtime is not None:
+        command += ["-drive", f"if=virtio,format=raw,readonly=on,file={image(args.runtime)}"]
     for member in members:
         command += ["-drive", f"if=virtio,format=raw,snapshot=on,file={image(member)}"]
 
     output = bytearray()
     prompted = False
     submitted = False
+    failed_boot = False
     deadline = time.monotonic() + 80
     try:
         with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -62,8 +65,11 @@ def boot(args, name, password, *members):
                         qemu.stdin.write(password + b"\r")
                         submitted = True
                         qemu.stdin.flush()
-                    if READY in output or FAIL in output:
+                    if READY in output:
                         break
+                    if not failed_boot and FAIL in output:
+                        failed_boot = True
+                        deadline = min(deadline, time.monotonic() + 8)
             finally:
                 qemu.terminate()
                 try:
@@ -81,7 +87,7 @@ def boot(args, name, password, *members):
     return prompted, output
 
 
-def check(args):
+def check_hypervisor(args):
     lab = args.lab
     password = (lab / "storage.key").read_bytes()
     if re.fullmatch(b"[0-9a-f]{64}", password) is None:
@@ -109,11 +115,32 @@ def check(args):
         print(f"{name} passed")
 
 
+def check_guest(args):
+    args.output.mkdir(mode=0o700)
+    prompted, output = boot(args, "guest", None, args.lab / "guest-data.raw")
+    if prompted or b"FVCA_GUEST_DATA_ACTIVE" not in output or READY not in output or FAIL in output:
+        raise ValueError("the signed Guest did not boot with its Btrfs data partition")
+    print("guest passed")
+
+    prompted, output = boot(args, "guest-missing-disk", None)
+    if (prompted or b"authorized Guest data partition is missing" not in output or FAIL not in output
+            or READY in output or b"FVCA_GUEST_DATA_ACTIVE" in output):
+        raise ValueError("the signed Guest did not fail closed with its data disk absent")
+    print("guest-missing-disk passed")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    for option in ("hypervisor", "runtime", "variables", "lab", "output"):
+    for option in ("disk", "variables", "lab", "output"):
         parser.add_argument(f"--{option}", type=Path, required=True)
+    role = parser.add_mutually_exclusive_group(required=True)
+    role.add_argument("--runtime", type=Path, help="signed Hypervisor runtime")
+    role.add_argument("--guest", action="store_true", help="qualify the Service Guest data disk")
     try:
-        check(parser.parse_args())
+        args = parser.parse_args()
+        if args.guest:
+            check_guest(args)
+        else:
+            check_hypervisor(args)
     except (OSError, ValueError) as error:
         parser.exit(1, f"Host storage qualification failed: {error}\n")

@@ -26,10 +26,12 @@ ln -s usr/lib "$root/lib"
 ln -s usr/lib64 "$root/lib64"
 install -m755 "$tests/storage-lab-init.sh" "$root/init"
 tail -n +3 "$tests/host-storage.conf" > "$root/lab-ids"
+sed -n -e 's/^partition=/guest_partition=/p' -e 's/^filesystem_uuid=/guest_filesystem=/p' \
+    "$tests/guest-storage.conf" > "$root/guest-ids"
 printf '%s' "$(openssl rand -hex 32)" > "$output/storage.key"
 install -m400 "$output/storage.key" "$root/storage.key"
 
-for name in bash chmod cryptsetup mdadm mkfs.ext4 modprobe mount poweroff sfdisk sleep sync umount; do
+for name in bash chmod cryptsetup mdadm mkfs.btrfs modprobe mount poweroff sfdisk sleep sync umount; do
     binary=$(realpath "$(command -v "$name")")
     install -m755 "$binary" "$root/usr/bin/$name"
     while IFS= read -r dependency; do
@@ -61,7 +63,11 @@ boot() {
     fi
 }
 
-truncate -s 256M "$output/member-a.raw" "$output/member-b.raw" "$output/replacement.raw"
+truncate -s 256M "$output/member-a.raw" "$output/member-b.raw" "$output/replacement.raw" "$output/guest-data.raw"
+boot guest \
+    -drive "if=none,id=guest,format=raw,file=$output/guest-data.raw" -device virtio-blk-pci,drive=guest,serial=fvca-lab-guest
+grep -q FVCA_GUEST_BTRFS_LAB_PROVISIONED "$output/guest.log"
+
 boot provision \
     -drive "if=none,id=a,format=raw,file=$output/member-a.raw" -device virtio-blk-pci,drive=a,serial=fvca-lab-a \
     -drive "if=none,id=b,format=raw,file=$output/member-b.raw" -device virtio-blk-pci,drive=b,serial=fvca-lab-b

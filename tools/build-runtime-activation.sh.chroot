@@ -8,7 +8,11 @@ export CARGO_TARGET_DIR="$build_dir/target"
 export RUSTFLAGS="-Dwarnings"
 
 target=x86_64-unknown-linux-gnu
-cargo build --frozen --release --target "$target" --bin fvca-activate-runtime \
+binary=fvca-activate-runtime
+if [[ -n "${FVCA_GUEST_DATA_SELECTION:-}" ]]; then
+    binary=fvca-activate-guest-data
+    install -Dm644 "$SRCDIR/$FVCA_GUEST_DATA_SELECTION" "$DESTDIR/usr/lib/fvca/guest-data"
+fi
+cargo build --frozen --release --target "$target" --bin "$binary" \
     --manifest-path "$SRCDIR/bootstrap/Cargo.toml"
-install -Dm755 "$CARGO_TARGET_DIR/$target/release/fvca-activate-runtime" \
-    "$DESTDIR/usr/lib/fvca/activate-runtime"
+install -Dm755 "$CARGO_TARGET_DIR/$target/release/$binary" "$DESTDIR/usr/lib/fvca/${binary#fvca-}"

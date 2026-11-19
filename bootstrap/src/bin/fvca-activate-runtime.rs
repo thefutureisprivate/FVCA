@@ -5,9 +5,11 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, symlink};
 use std::path::PathBuf;
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use fvca_initrd_bootstrap::{find_partition, invalid, run};
 
 #[path = "fvca-activate-runtime/storage.rs"]
 mod storage;
@@ -20,10 +22,6 @@ const SIGNATURE: &str = "/usr/lib/fvca/vm-runtime.p7s";
 const MAPPING: &str = "fvca-vm-runtime";
 const STAGING: &str = "/run/fvca/vm-runtime";
 const PROBE: &str = include_str!("../../../tests/fvca-vm-runtime-probe.service");
-
-fn invalid(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
-}
 
 fn hash(value: &str) -> io::Result<&str> {
     if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
@@ -59,31 +57,6 @@ fn uuid(hex: &str) -> String {
     format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
 }
 
-fn find_partition(uuid: &str) -> io::Result<Option<PathBuf>> {
-    let output = Command::new("/usr/bin/blkid")
-        .env_clear()
-        .args(["-c", "/dev/null", "-t", &format!("PARTUUID={uuid}"), "-o", "device"])
-        .stderr(Stdio::inherit())
-        .output()?;
-    if output.status.code() == Some(2) {
-        return Ok(None);
-    }
-    if !output.status.success() {
-        return Err(io::Error::other(format!("blkid exited with {}", output.status)));
-    }
-    let list = std::str::from_utf8(&output.stdout).map_err(|_| invalid("invalid partition list"))?;
-    let mut paths = list.lines();
-    let path = paths.next().ok_or_else(|| invalid("empty partition list"))?;
-    if paths.next().is_some() {
-        return Err(invalid("more than one device has the authorized partition UUID"));
-    }
-    let path = PathBuf::from(path);
-    if !path.starts_with("/dev") || !fs::metadata(&path)?.file_type().is_block_device() {
-        return Err(invalid("runtime partition is not a block device"));
-    }
-    Ok(Some(path))
-}
-
 fn runtime_devices(root_hash: &str) -> io::Result<(PathBuf, PathBuf)> {
     let data_uuid = uuid(&root_hash[..32]);
     let tree_uuid = uuid(&root_hash[32..]);
@@ -97,14 +70,6 @@ fn runtime_devices(root_hash: &str) -> io::Result<(PathBuf, PathBuf)> {
         }
         thread::sleep(Duration::from_millis(200));
     }
-}
-
-fn run(command: &mut Command) -> io::Result<()> {
-    let status = command.env_clear().status()?;
-    if !status.success() {
-        return Err(io::Error::other(format!("{:?} exited with {status}", command.get_program())));
-    }
-    Ok(())
 }
 
 fn install_development_probe() -> io::Result<()> {
