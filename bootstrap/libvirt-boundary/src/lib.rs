@@ -245,7 +245,12 @@ impl Domain<'_> {
         let deadline = Instant::now() + timeout;
         status(unsafe { virDomainAgentSetResponseTimeout(self.handle.as_ptr(), AGENT_TIMEOUT_SECONDS, 0) },
                "could not set the Guest agent response timeout")?;
-        status(unsafe { virDomainShutdownFlags(self.handle.as_ptr(), SHUTDOWN_AGENT) }, "could not request Guest agent shutdown")?;
+        // Poweroff can close the Guest's bus before the agent's child receives
+        // its reply. Observe the lifecycle even if delivery was uncertain.
+        let request = status(
+            unsafe { virDomainShutdownFlags(self.handle.as_ptr(), SHUTDOWN_AGENT) },
+            "the Guest agent did not confirm delivery of the shutdown request",
+        );
         while Instant::now() < deadline {
             match stop.reason.load(Ordering::Relaxed) {
                 STOP_PENDING => {}
@@ -255,7 +260,11 @@ impl Domain<'_> {
             }
             events.poll()?;
         }
-        Err(io::Error::new(io::ErrorKind::TimedOut, "libvirt did not confirm an orderly Guest shutdown"))
+        let message = "libvirt did not confirm an orderly Guest shutdown";
+        Err(io::Error::new(io::ErrorKind::TimedOut, match request {
+            Ok(()) => message.to_owned(),
+            Err(error) => format!("{message}: {error}"),
+        }))
     }
 
     pub fn state(&self) -> io::Result<c_int> {
