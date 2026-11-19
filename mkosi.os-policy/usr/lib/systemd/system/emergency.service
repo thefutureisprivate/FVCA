@@ -1,0 +1,12 @@
+[Unit]
+Description=Report FVCA boot failure
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/echo FVCA_BOOT_FAILED
+StandardOutput=journal+console
+NoNewPrivileges=yes
+RemainAfterExit=yes

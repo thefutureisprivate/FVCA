@@ -2,7 +2,7 @@
 
 The first implementation milestone is a shared x86-64 development boot image for the VM-only Hypervisor and OCI Service Guest described in FVCA design v0.4.3. The Fedora 45 mkosi build produces a disk with a signed Unified Kernel Image (UKI), a read-only EROFS root, a dm-verity hash tree, and a detached root hash signature in its own GPT partition. The signed UKI embeds the expected root hash. Systemd uses that hash to activate the root at boot. The off-node verifier also validates the detached signature against a supplied certificate.
 
-The image uses a boot-status target and volatile `/var`. It disables automatic extension and additional GPT partition discovery. The current development image includes Fedora package dependencies such as Bash. Shell-free images, strict W^X and executable provenance, SELinux policy, hardened_malloc, TPM attestation, release authorization, role runtimes and persistent storage are pending implementation or qualification.
+The image uses a boot-status target and volatile `/var`. It disables automatic extension and additional GPT partition discovery. Build workers run Fedora's package scripts before removing shells, login tools and maintenance hooks from the base and initramfs. Both trees must pass an audit for prohibited commands, executable scripts, setuid/setgid files and file capabilities. Emergency and rescue targets report `FVCA_BOOT_FAILED` on the console. Strict W^X and executable provenance, SELinux policy, hardened_malloc, TPM attestation, release authorization, role runtimes and persistent storage are pending implementation or qualification.
 
 The design draws on AOS's use of signed UKIs and integrity-protected disk images. [Amutable Foundations technical overview](https://amutable.com/blog/amutable-foundations-technical-overview)
 
@@ -19,6 +19,8 @@ python3 tools/verify-base.py build/fvca-dev-base.raw mkosi.crt
 ```
 
 The default development certificate serves both signing purposes. Where separate keys are configured in mkosi, pass the matching root-signing certificate with `--verity-certificate`. The verifier reads the UKI and all integrity metadata from the actual disk image. The disk, split UKI, root hash and package manifests are in `build/`.
+
+The package manifests record what the builder installed before file pruning. `python3 tools/audit-os-tree.py PATH` runs the content audit without changing an extracted tree. Preserve file modes and extended attributes when extracting the EROFS root for this check.
 
 ## Boot in QEMU
 
