@@ -59,3 +59,23 @@ Use the same QEMU command with `build/exec-check/fvca-dev-exec-check.raw` as the
 ## Open Build Service
 
 [`obs/project.conf`](obs/project.conf) is the starting configuration for a dedicated native mkosi image repository. OBS still needs a verified worker package set, a source service pinned to a reviewed Git revision, and a staging-signing configuration. Keep production signing separate from OBS candidate builds. The local build uses development keys and keeps them outside Git. [OBS mkosi build documentation](https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-package-formats#sec-obs-mkosi)
+
+## Hypervisor runtime candidate
+
+The separate mkosi recipe builds `vm-runtime.raw`, a signed EROFS system extension. It contains QEMU, the modular libvirt QEMU, log and lock daemons, the selected OVMF firmware and restic. The build strips Fedora's automatic service hooks and management commands before signing, records the exact core root hash in the extension and checks the shared package versions. Automatic extension discovery is disabled on the development base. Boot-time admission, sVirt confinement, approved VM definitions and encrypted host storage still need qualification.
+
+Prepare a fresh base input from the verified development disk, and use a separate development certificate for the runtime. Keep the private key in the ignored build directory.
+
+```sh
+umask 077
+python3 tools/verify-base.py build/fvca-dev-base.raw mkosi.crt \
+  --extract-root build/vm-runtime-base
+openssl req -x509 -newkey rsa:3072 -noenc -days 365 \
+  -subj '/CN=FVCA development VM runtime/' \
+  -keyout build/vm-runtime-signing.key -out build/vm-runtime-signing.crt
+mkosi -C vm-runtime build
+python3 tools/verify-vm-runtime.py build/vm-runtime/vm-runtime.raw \
+  build/vm-runtime-signing.crt build/vm-runtime-base
+```
+
+Keep the `.manifest` and checksum files next to both images. Prepare a new build input and rebuild the extension when selecting a different core. [mkosi system extension build guide](https://github.com/systemd/mkosi/blob/v26/docs/sysext.md)

@@ -1,6 +1,7 @@
 /build/
 /bootstrap/target/
 /Design/
+/tools/__pycache__/
 /mkosi.local.conf
 /mkosi.key
 /mkosi.crt
