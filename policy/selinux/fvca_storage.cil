@@ -1,2 +1,4 @@
 ; Execute the explicitly authorized RAID assembly under Fedora's mdadm domain.
 (allow init_t mdadm_t (process2 (nnp_transition)))
+; Unseal the explicitly selected LUKS2 token in the confined cryptsetup domain.
+(allow lvm_t tpm_device_t (chr_file (getattr open read write ioctl)))

@@ -2,7 +2,7 @@
 Description=Activate the UKI-authorized FVCA VM runtime
 DefaultDependencies=no
 Requires=sysroot.mount systemd-ask-password-console.path
-After=sysroot.mount systemd-ask-password-console.path
+After=sysroot.mount systemd-ask-password-console.path systemd-pcrphase-initrd.service systemd-pcrosseparator.service systemd-tmpfiles-setup.service
 AssertSecurity=uefi-secureboot
 AssertSecurity=selinux
 

@@ -2,7 +2,7 @@
 
 The first implementation milestone is a shared x86-64 development boot image for the VM-only Hypervisor and OCI Service Guest described in FVCA design v0.4.3. The Fedora 45 mkosi build produces a disk with a signed Unified Kernel Image (UKI), a read-only EROFS root, a dm-verity hash tree, and a detached root hash signature in its own GPT partition. The UKI embeds the expected root hash and execution policy. A Rust initramfs entrypoint loads dm-verity with signature enforcement before systemd attaches the global BPF execution policy. The kernel verifies the detached signature during root activation. Systemd closes the initramfs trust window after switch-root. [systemd execution policy](https://www.freedesktop.org/software/systemd/man/262/systemd-system.conf.html#RestrictFileSystemAccess=)
 
-The image uses a boot-status target and volatile `/var`. It disables automatic extension and additional GPT partition discovery. Build workers run Fedora's package scripts before removing shells, login tools and maintenance hooks from the base and initramfs. Both trees must pass an audit for prohibited commands, executable scripts, setuid/setgid files and file capabilities. Emergency and rescue targets report `FVCA_BOOT_FAILED` on the console. The execution policy, SELinux domains and allocator still need qualification for role runtimes, extensions and workload roots. TPM attestation, release authorization and persistent storage remain pending.
+The image uses a boot-status target and volatile `/var`. It disables automatic extension and additional GPT partition discovery. Build workers run Fedora's package scripts before removing shells, login tools and maintenance hooks from the base and initramfs. Both trees must pass an audit for prohibited commands, executable scripts, setuid/setgid files and file capabilities. Emergency and rescue targets report `FVCA_BOOT_FAILED` on the console. Both roles use Btrfs for mutable data. Service Guest runtime and workload qualification, physical TPM qualification, attestation and release authorization remain pending.
 
 The design draws on AOS's use of signed UKIs and integrity-protected disk images. [Amutable Foundations technical overview](https://amutable.com/blog/amutable-foundations-technical-overview)
 
@@ -104,7 +104,7 @@ The readiness probe runs `qemu-img` from the composed `/usr` and exercises a dis
 
 The Hypervisor assembler accepts `--storage tests/host-storage.conf` for the disposable storage fixture. The UKI signs both GPT partition identities and the expected native RAID1, LUKS2 and Btrfs identities. The initramfs requires both selected partitions on separate disks and disables automatic RAID assembly. It checks the assembled array and the LUKS header before requesting the operator passphrase on the console.
 
-The development image gates readiness on a single-device Btrfs mount at `/run/fvca/host-data` with `nodev,nosuid,noexec`. RAID1 supplies physical redundancy below LUKS2. The Btrfs root directory must be owned by root with mode `0700`. This volume holds mutable data. The physical TPM and PIN policy, independent boot slots, appliance recovery environment, and authenticated mutable-state protections remain pending.
+The development image gates readiness on a single-device Btrfs mount at `/run/fvca/host-data` with `nodev,nosuid,noexec`. RAID1 supplies physical redundancy below LUKS2. The Btrfs root directory must be owned by root with mode `0700`. This volume holds mutable data. Physical TPM qualification, independent boot slots, the appliance recovery environment, and authenticated mutable-state protections remain pending.
 
 On a Fedora KVM test machine with `mdadm`, `cryptsetup`, `btrfs-progs` and `cpio` installed, the fixture creates fresh file-backed disks and tests single-member recovery and replacement. The recovery mount suppresses Btrfs log replay while inspecting either member. Build the Hypervisor as above with the fixture selection added to the assembler command, then run the integration checks against the signed disk and its matching runtime. [Btrfs recovery mount options](https://btrfs.readthedocs.io/en/latest/ch-mount-options.html)
 
@@ -116,6 +116,27 @@ python3 tests/check-storage.py \
   --variables build/fvca-vars.fd \
   --lab build/host-storage-lab --output build/host-storage-checks
 ```
+
+### Development TPM and PIN unlock
+
+The TPM storage selection uses `unlock=tpm2-pin` and a final `token=INDEX,SHA256` line containing the SHA-256 of the exact `cryptsetup token export` output. Give the assembler this manifest with `--storage`, the export with `--tpm-token`, and a separate RSA signing key with `--pcr-key`. The assembler checks the enrollment's SHA-256 PCR bank, direct PCRs 7, 12 and 13, signed PCR 11, policy reference `fvca-host-storage`, and Argon2id-protected PIN. It signs PCR 11 only for the `enter-initrd` phase. The signed initramfs checks and opens the same private copy of the LUKS2 header in token-only mode. [systemd-cryptenroll](https://www.freedesktop.org/software/systemd/man/262/systemd-cryptenroll.html)
+
+In the disposable enrollment environment, use the target firmware and its Secure Boot keys. A measured systemd initramfs applies the `os-separator` event automatically. A minimal lab initramfs must apply that same event to PCRs 7, 12 and 13 before enrollment. Preserve the separate recovery credential. [systemd PCR phase and separator](https://www.freedesktop.org/software/systemd/man/262/systemd-pcrphase.service.html)
+
+With the fixture mirror assembled at `/dev/md0`, supply the fixture recovery key and the public half of the separate PCR signing key. The example exports the first token on a fresh fixture.
+
+```sh
+systemd-cryptenroll /dev/md0 --unlock-key-file=storage.key \
+  --tpm2-device=/dev/tpmrm0 --tpm2-with-pin=yes \
+  --tpm2-pcrs=7:sha256+12:sha256+13:sha256 --tpm2-public-key=pcr-public.pem \
+  --tpm2-public-key-pcrs=11 --tpm2-public-key-policyref=fvca-host-storage
+cryptsetup token export --token-id=0 /dev/md0 > token.json
+sha256sum token.json
+```
+
+The lab check takes `--firmware` for the measured Secure Boot firmware, `--variables` for its enrolled variables, `--tpm-state` for the enrolled software TPM, and `--pin-file` for the disposable 24-hex-character PIN. It exercises the signed Hypervisor with the correct PIN, wrong PIN, unrelated TPM, extra measured command line, and absent TPM.
+
+The Hypervisor initramfs omits systemd's stock NvPCR definitions. The storage PCR authority authorizes only LUKS2 unsealing. Future TPM-backed release state requires its own initialization policy.
 
 ## Development Service Guest storage
 
