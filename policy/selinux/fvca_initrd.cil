@@ -1,0 +1,2 @@
+; Preserve the labels assigned to the unpacked initramfs by the bootstrap.
+(fsuse xattr rootfs (system_u object_r fs_t ((s0) (s0))))

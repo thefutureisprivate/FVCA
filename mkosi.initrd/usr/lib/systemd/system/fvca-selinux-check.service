@@ -1,0 +1,11 @@
+[Unit]
+Description=Verify SELinux enforcing mode and the init domain
+DefaultDependencies=no
+AssertSecurity=selinux
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/fvca/selinux-check
+RemainAfterExit=yes
+StandardOutput=journal+console
+NoNewPrivileges=yes

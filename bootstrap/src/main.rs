@@ -1,11 +1,30 @@
 #![forbid(unsafe_code)]
 
 use std::alloc::System;
+use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{self, Command, ExitCode};
 
 #[global_allocator]
 static ALLOCATOR: System = System;
+
+fn label_initramfs() -> io::Result<()> {
+    let status = Command::new("/usr/bin/setfiles")
+        .env_clear()
+        .args([
+            "-mF",
+            "-e", "/dev",
+            "-e", "/proc",
+            "-e", "/sys",
+            "/etc/selinux/targeted/contexts/files/file_contexts",
+            "/",
+        ])
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!("setfiles exited with {status}")));
+    }
+    Ok(())
+}
 
 fn main() -> ExitCode {
     if process::id() != 1 {
@@ -14,6 +33,11 @@ fn main() -> ExitCode {
     }
     if let Err(error) = fvca_allocator_binding::require_allocator() {
         eprintln!("FVCA bootstrap allocator check failed: {error}");
+        return ExitCode::FAILURE;
+    }
+    // CPIO has no xattrs. Label the UKI's initramfs before systemd loads the policy.
+    if let Err(error) = label_initramfs() {
+        eprintln!("FVCA could not label the initramfs: {error}");
         return ExitCode::FAILURE;
     }
 

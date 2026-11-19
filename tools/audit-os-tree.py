@@ -37,7 +37,9 @@ def normalize_build_files(root):
 
     # Unit metadata is public. A private checkout umask must not change its image permissions.
     units = ["emergency.service"]
-    if not os.path.lexists(root / "etc/initrd-release"):
+    if os.path.lexists(root / "etc/initrd-release"):
+        units.extend(["fvca-selinux-check.service", "sysroot.mount.d/10-fvca-selinux.conf"])
+    else:
         units.extend(["fvca-base-ready.service", "fvca-base.target"])
     for name in units:
         unit = root / "usr/lib/systemd/system" / name

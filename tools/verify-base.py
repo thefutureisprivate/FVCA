@@ -21,6 +21,7 @@ PARTITIONS = {
 }
 BOOT_OPTIONS = {
     "dm_verity.require_signatures": "1",
+    "enforcing": "1",
     "proc_mem.force_override": "never",
     "systemd.restrict_filesystem_access": "exec",
     "systemd.verity_root_options": "panic-on-corruption,root-hash-signature=auto",
