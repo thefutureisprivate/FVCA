@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject shared package version drift in the mkosi VM runtime transaction."""
+"""Reject shared package version drift in a mkosi runtime transaction."""
 
 import json
 import os
@@ -16,9 +16,11 @@ def rpm_versions(path):
 
 def main():
     output = Path(os.environ["OUTPUTDIR"])
-    prepared = Path(os.environ["SRCDIR"]) / "build/vm-runtime-base"
+    role = os.environ["FVCA_RUNTIME"]
+    build_inputs = {"vm-runtime": "vm-runtime-base", "oci-runtime": "service-guest-runtime-base"}
+    prepared = Path(os.environ["SRCDIR"]) / "build" / build_inputs[role]
     core = rpm_versions(prepared / "packages.json")
-    runtime = rpm_versions(output / "vm-runtime.manifest")
+    runtime = rpm_versions(output / f"{role}.manifest")
     mismatches = sorted(name for name in core.keys() & runtime.keys() if core[name] != runtime[name])
     if mismatches:
         sys.exit(f"FVCA runtime package version drift: {mismatches}")

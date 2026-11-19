@@ -6,7 +6,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from vm_runtime_image import verify
+from runtime_image import verify
+import vm_runtime
 
 
 def main():
@@ -17,7 +18,7 @@ def main():
     args = parser.parse_args()
     try:
         with tempfile.TemporaryDirectory(prefix="fvca-verify-runtime-") as directory:
-            root_hash = verify(args.image, args.certificate, args.prepared_base, Path(directory))
+            root_hash = verify(args.image, args.certificate, args.prepared_base, Path(directory), vm_runtime)
     except (OSError, ValueError, TypeError, KeyError, RuntimeError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"FVCA runtime verification failed: {error}\n")
     print(f"Verified signed, additive VM runtime {root_hash}")

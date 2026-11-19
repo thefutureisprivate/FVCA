@@ -50,6 +50,12 @@ def normalize_build_files(root):
                 "fvca-activate-guest-data.service",
                 "initrd-switch-root.service.d/20-fvca-guest-data.conf",
             ])
+        if (root / "usr/lib/fvca/activate-oci-runtime").is_file():
+            units.extend([
+                "fvca-activate-oci-runtime.service",
+                "initrd-parse-etc.service.d/21-fvca-oci-runtime.conf",
+                "initrd-switch-root.service.d/21-fvca-oci-runtime.conf",
+            ])
     else:
         units.extend(["fvca-base-ready.service", "fvca-base.target"])
     for name in units:

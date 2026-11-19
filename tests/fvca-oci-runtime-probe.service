@@ -1,0 +1,18 @@
+[Unit]
+Description=Check the development Service Guest OCI runtime binaries
+Before=fvca-base-ready.service
+AssertSecurity=selinux
+
+[Service]
+Type=oneshot
+Environment=QUADLET_UNIT_DIRS=/run/fvca/oci-probe-quadlet
+ExecStart=/usr/bin/findmnt --mountpoint /run/fvca/oci-runtime --source /dev/mapper/fvca-oci-runtime --types erofs --options ro,nodev,nosuid
+ExecStart=/usr/bin/podman --version
+ExecStart=/usr/bin/podman --remote=false info "--format=FVCA_PODMAN_INFO {{.Host.OCIRuntime.Name}} {{.Store.GraphDriverName}} {{.Host.Security.SELinuxEnabled}}"
+ExecStart=/usr/bin/crun --version
+ExecStart=/usr/libexec/podman/quadlet --dryrun
+ExecStart=/usr/bin/echo FVCA_OCI_RUNTIME_EXEC_OK
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+StandardOutput=journal+console

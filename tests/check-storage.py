@@ -28,7 +28,8 @@ def image(path):
     return str(path)
 
 
-def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, extra_cmdline=False):
+def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, extra_cmdline=False,
+         attach_runtime=True):
     cpu = "host,vmx=off" if args.guest else "host"
     machine = "q35,smm=on"
     devices = []
@@ -53,7 +54,7 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
     command += [
         "-display", "none", "-serial", "stdio", "-monitor", "none", "-nic", "none", "-no-reboot",
     ]
-    if args.runtime is not None:
+    if args.runtime is not None and attach_runtime:
         command += [
             "-drive", f"if=none,id=fvca-runtime,format=raw,readonly=on,file={image(args.runtime)}",
             "-device", "virtio-blk-pci,drive=fvca-runtime",
@@ -151,10 +152,16 @@ def check_hypervisor(args):
 
 def check_guest(args):
     args.output.mkdir(mode=0o700)
-    prompted, output = boot(args, "guest", None, args.lab / "guest-data.raw")
+    data = args.lab / "guest-data.raw"
+    prompted, output = boot(args, "guest", None, data)
     if (prompted or output.count(PCR_CONFINED) < 2 or b"FVCA_GUEST_DATA_ACTIVE" not in output
             or READY not in output or FAIL in output):
         raise ValueError("the signed Guest did not boot with its Btrfs data partition")
+    if args.oci_runtime is not None and not all(marker in output for marker in (
+        b"FVCA_OCI_RUNTIME_ACTIVE", b"FVCA_OCI_RUNTIME_EXEC_OK", b"FVCA_PODMAN_INFO crun vfs true",
+        b"--rootfs /run/fvca/oci-probe-root",
+    )):
+        raise ValueError("the signed Guest did not execute its OCI runtime or render the approved Quadlet fixture")
     print("guest passed")
 
     prompted, output = boot(args, "guest-missing-disk", None)
@@ -162,6 +169,22 @@ def check_guest(args):
             or READY in output or b"FVCA_GUEST_DATA_ACTIVE" in output):
         raise ValueError("the signed Guest did not fail closed with its data disk absent")
     print("guest-missing-disk passed")
+
+    if args.oci_runtime is None:
+        return
+    missing = b"authorized OCI runtime partitions are missing"
+    cases = [
+        ("guest-missing-runtime", (), False, missing),
+        ("guest-duplicate-runtime", (args.oci_runtime,), True, b"more than one device has the authorized partition UUID"),
+    ]
+    if args.wrong_runtime is not None:
+        cases.append(("guest-wrong-runtime", (args.wrong_runtime,), False, missing))
+    for name, extras, attach, reason in cases:
+        prompted, output = boot(args, name, None, data, *extras, attach_runtime=attach)
+        if (prompted or FAIL not in output or reason not in output or READY in output
+                or b"FVCA_OCI_RUNTIME_ACTIVE" in output):
+            raise ValueError(f"{name} did not fail closed before runtime activation")
+        print(f"{name} passed")
 
 
 @contextmanager
@@ -235,9 +258,16 @@ if __name__ == "__main__":
     role = parser.add_mutually_exclusive_group(required=True)
     role.add_argument("--runtime", type=Path, help="signed Hypervisor runtime")
     role.add_argument("--guest", action="store_true", help="qualify the Service Guest data disk")
+    role.add_argument("--oci-runtime", type=Path, help="signed Service Guest OCI runtime")
+    parser.add_argument("--wrong-runtime", type=Path, help="unselected runtime for a Guest rejection test")
     for option in ("tpm-state", "pin-file", "firmware"):
         parser.add_argument(f"--{option}", type=Path)
     args = parser.parse_args()
+    if args.wrong_runtime is not None and args.oci_runtime is None:
+        parser.error("--wrong-runtime requires --oci-runtime")
+    if args.oci_runtime is not None:
+        args.guest = True
+        args.runtime = args.oci_runtime
     tpm_options = (args.tpm_state, args.pin_file, args.firmware)
     if any(tpm_options) and (args.guest or not all(tpm_options)):
         parser.error("the Hypervisor TPM test requires --tpm-state, --pin-file and --firmware")

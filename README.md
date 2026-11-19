@@ -152,4 +152,34 @@ python3 tests/check-storage.py --guest \
   --output build/guest-storage-checks
 ```
 
-Boot `build/service-guest-storage/fvca-dev-service-guest.raw` with the common QEMU command and attach the fixture as a second drive with `-drive if=virtio,format=raw,snapshot=on,file=build/host-storage-lab/guest-data.raw`. The console reports `FVCA_GUEST_DATA_ACTIVE` before readiness. The Service Guest OCI runtime and workload qualification are separate work.
+Boot `build/service-guest-storage/fvca-dev-service-guest.raw` with the common QEMU command and attach the fixture as a second drive with `-drive if=virtio,format=raw,snapshot=on,file=build/host-storage-lab/guest-data.raw`. The console reports `FVCA_GUEST_DATA_ACTIVE` before readiness. This storage-only profile also provides the verified core for the composed Service Guest.
+
+## Development Service Guest OCI runtime
+
+The `service-guest-storage` build supplies the Guest core and its container SELinux policy. The separate `oci-runtime.raw` image contains Podman, Quadlet, crun, conmon, Netavark, Aardvark DNS, catatonit and restic. Its allowlist excludes systemd generators, API sockets, service units and host mount configuration. The signed core fixes crun as the runtime, rejects registry pulls and keeps Podman metadata on volatile storage. The Guest mounts its Btrfs data outside the engine's storage.
+
+Build against the exact prepared Guest core. The assembler verifies the separate OCI runtime signer, the core binding and the additive payload before it signs the Guest UKI.
+
+```sh
+umask 077
+python3 tools/verify-base.py build/service-guest-storage/fvca-dev-service-guest.raw mkosi.crt \
+  --extract-root build/service-guest-runtime-base
+openssl req -x509 -newkey rsa:3072 -noenc -days 365 \
+  -subj '/CN=FVCA development OCI runtime/' \
+  -keyout build/oci-runtime-signing.key -out build/oci-runtime-signing.crt
+mkosi -C oci-runtime build
+mkosi --profile=service-guest-runtime --output-dir=build/service-guest-runtime-initrd build
+python3 tools/compose-service-guest.py \
+  --core build/service-guest-storage/fvca-dev-service-guest.raw \
+  --runtime build/oci-runtime/oci-runtime.raw \
+  --initrd build/service-guest-runtime-initrd/initrd.cpio.zst \
+  --boot-certificate mkosi.crt --boot-key mkosi.key \
+  --runtime-certificate build/oci-runtime-signing.crt \
+  --output build/service-guest-runtime-initrd/fvca-dev-service-guest.raw
+python3 tests/check-storage.py \
+  --disk build/service-guest-runtime-initrd/fvca-dev-service-guest.raw \
+  --oci-runtime build/oci-runtime/oci-runtime.raw --variables build/fvca-vars.fd \
+  --lab build/host-storage-lab --output build/service-guest-runtime-checks
+```
+
+The development boot check initializes Podman with crun, VFS and SELinux, runs crun, and renders a fixed Quadlet `Rootfs=` fixture. The integration test requires Btrfs and the selected runtime, and checks rejection of absent and duplicated runtime disks. A separate signed EROFS lab workload exercised start, exec, health checks, restart and stop with an enforcing SELinux container label. Workload admission, network and resource qualification, and Stalwart acceptance remain open. [Podman Quadlet documentation](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html)

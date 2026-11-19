@@ -1,0 +1,8 @@
+[Container]
+Rootfs=/run/fvca/oci-probe-root
+ReadOnly=true
+Network=none
+NoNewPrivileges=true
+DropCapability=all
+User=65534
+Exec=/probe

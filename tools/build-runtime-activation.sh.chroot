@@ -8,11 +8,17 @@ export CARGO_TARGET_DIR="$build_dir/target"
 export RUSTFLAGS="-Dwarnings"
 
 target=x86_64-unknown-linux-gnu
-binary=fvca-activate-runtime
+binaries=(fvca-activate-runtime)
 if [[ -n "${FVCA_GUEST_DATA_SELECTION:-}" ]]; then
-    binary=fvca-activate-guest-data
+    binaries=(fvca-activate-guest-data)
     install -Dm644 "$SRCDIR/$FVCA_GUEST_DATA_SELECTION" "$DESTDIR/usr/lib/fvca/guest-data"
+    if [[ "${FVCA_GUEST_OCI:-}" == yes ]]; then
+        binaries+=(fvca-activate-oci-runtime)
+    fi
 fi
-cargo build --frozen --release --target "$target" --bin "$binary" \
-    --manifest-path "$SRCDIR/bootstrap/Cargo.toml"
-install -Dm755 "$CARGO_TARGET_DIR/$target/release/$binary" "$DESTDIR/usr/lib/fvca/${binary#fvca-}"
+arguments=()
+for binary in "${binaries[@]}"; do arguments+=(--bin "$binary"); done
+cargo build --frozen --release --target "$target" --manifest-path "$SRCDIR/bootstrap/Cargo.toml" "${arguments[@]}"
+for binary in "${binaries[@]}"; do
+    install -Dm755 "$CARGO_TARGET_DIR/$target/release/$binary" "$DESTDIR/usr/lib/fvca/${binary#fvca-}"
+done

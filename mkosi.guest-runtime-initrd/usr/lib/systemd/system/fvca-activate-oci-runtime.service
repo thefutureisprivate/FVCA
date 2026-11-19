@@ -1,0 +1,16 @@
+[Unit]
+Description=Activate the UKI-authorized Service Guest OCI runtime
+DefaultDependencies=no
+Requires=sysroot.mount fvca-activate-guest-data.service
+After=sysroot.mount fvca-activate-guest-data.service
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+OnFailure=emergency.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/fvca/activate-oci-runtime
+RemainAfterExit=yes
+TimeoutStartSec=25s
+StandardOutput=journal+console
+NoNewPrivileges=yes
