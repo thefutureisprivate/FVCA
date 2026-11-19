@@ -233,4 +233,20 @@ python3 tools/authorize-workload.py --policy "$policy" \
   --workload-certificate build/workload.crt --output build/stalwart-authorized
 ```
 
-This off-node flow implements signed-only source admission. Guest-side authorization and revocation enforcement, the optional unsigned permit mode, and full Stalwart service acceptance remain open.
+This off-node flow implements signed-only source admission. The optional unsigned permit mode and full Stalwart service acceptance remain open.
+
+## Guest workload verifier
+
+The Rust verifier checks both CMS signatures against separate signer certificates. It binds the exact deployment, derivation, publisher evidence, launch definition and raw image bytes, then checks both GPT tables and the signed dm-verity root hash. It checks the target Guest and service, validity period, minimum security epoch, revocation list and offline launch profile before handing the verified file descriptor and partition offsets to a caller. Boot integration, protected staging, kernel dm-verity activation, and enforcement of the authorized resource limits remain pending.
+
+The development CLI takes a local policy record, the two public signer certificates and a private staging directory. The policy record contains `guest`, `service`, the reviewed `source_policy` SHA-256 digest from the derivation, `minimum_epoch` and `revoked` as a list of revocation UUIDs. Guest integration must load these inputs from verified configuration and enforce freshness against the controller ledger. Only the staging owner should be able to change the bundle, and verification and activation must hold exclusive access to it.
+
+On Fedora 45 with Rust, Cargo and `openssl-devel`, fetch the locked dependencies before the offline build. The development test uses disposable signer keys, OpenSSL and `sfdisk` to exercise rejection paths.
+
+```sh
+cargo fetch --locked --manifest-path workload-admission/Cargo.toml
+RUSTFLAGS=-Dwarnings cargo build --frozen --manifest-path workload-admission/Cargo.toml
+python3 tests/check-workload-admission.py
+workload-admission/target/debug/fvca-workload-admission \
+  build/guest-workload-policy.json build/deployment.crt build/workload.crt build/stalwart-authorized
+```

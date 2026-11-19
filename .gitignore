@@ -1,5 +1,6 @@
 /build/
 /bootstrap/target/
+/workload-admission/target/
 /Design/
 /tools/__pycache__/
 /mkosi.local.conf

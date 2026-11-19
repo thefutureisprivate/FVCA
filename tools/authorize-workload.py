@@ -165,10 +165,6 @@ def authorize(args, work, output):
         (output / name).write_bytes(oci.read_bytes(replay / name))
     authorization = {
         "schema": "fvca-workload-authorization-v1",
-        **{name: approved[name] for name in (
-            "role", "guest", "service", "source_index", "manifest", "provenance", "launch",
-            "valid_from", "expires", "security_epoch", "revocation_id", "limits", "network", "id_map",
-        )},
         "deployment": deployment_digest, "deployment_certificate": deploy_fingerprint,
         "workload_certificate": root_fingerprint,
         "derivation": oci.sha256(oci.read_bytes(output / "derivation.json")),
@@ -181,7 +177,7 @@ def authorize(args, work, output):
     if int(time.time()) >= approved["expires"]:
         raise ValueError("deployment approval expired before signing")
     sign(record, output / "authorization.p7s", args.workload_key, args.workload_certificate)
-    return authorization
+    return approved, authorization["artifact"]["digest"]
 
 
 def main():
@@ -197,9 +193,9 @@ def main():
         with tempfile.TemporaryDirectory(prefix=".fvca-authorize-", dir=args.output.parent) as directory:
             work = Path(directory)
             output = work / "authorized"
-            authorization = authorize(args, work, output)
+            approved, artifact = authorize(args, work, output)
             publish(output, args.output)
-        print(f"Authorized {authorization['service']} for {authorization['guest']} at {authorization['artifact']['digest']}")
+        print(f"Authorized {approved['service']} for {approved['guest']} at {artifact}")
     except (OSError, ValueError, TypeError, KeyError, IndexError, subprocess.SubprocessError) as error:
         parser.exit(1, f"FVCA workload authorization failed: {error}\n")
 
