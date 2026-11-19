@@ -3,9 +3,10 @@
 use std::alloc::System;
 use std::fs;
 use std::io;
+use std::path::Path;
 use std::process::ExitCode;
 
-use fvca_initrd_bootstrap::invalid;
+use fvca_initrd_bootstrap::{direct_boot, invalid};
 use fvca_initrd_bootstrap::runtime::{self, Runtime};
 
 #[path = "fvca-activate-oci-runtime/workload_trust.rs"]
@@ -31,7 +32,12 @@ fn activate() -> io::Result<()> {
     fs::create_dir_all(quadlets)?;
     fs::write(format!("{quadlets}/fvca-oci-runtime-probe.container"), QUADLET)?;
     runtime::install_development_probe("fvca-oci-runtime-probe.service", PROBE)?;
-    println!("FVCA_OCI_RUNTIME_ACTIVE {runtime_hash}");
+    // Report the bootstrap proof again after the Guest console is established.
+    if Path::new(direct_boot::READY_IN_INITRD).is_file() {
+        println!("FVCA_OCI_RUNTIME_ACTIVE {runtime_hash} FVCA_DIRECT_BOOT_POLICY_ACTIVE");
+    } else {
+        println!("FVCA_OCI_RUNTIME_ACTIVE {runtime_hash}");
+    }
     Ok(())
 }
 
