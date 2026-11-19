@@ -7,3 +7,26 @@
 ; Systemd creates the private agent state directory on volatile /run.
 (filecon "/run/qemu-guest-agent(/.*)?" any
     (system_u object_r virt_qemu_ga_var_run_t ((s0) (s0))))
+
+; Give the Btrfs mount root its own label regardless of its on-disk xattr.
+; The labels on workload directories and files retain their effect.
+(type fvca_guest_data_t)
+(typeattributeset file_type (fvca_guest_data_t))
+(roletype object_r fvca_guest_data_t)
+(allow init_t fs_t (filesystem (relabelfrom)))
+(allow fvca_guest_data_t fs_t (filesystem (associate)))
+(allow init_t fvca_guest_data_t (dir (add_name getattr ioctl open read relabelto remove_name search write)))
+(allow container_runtime_t fvca_guest_data_t (dir (getattr search)))
+; Preserve the provisioning label when the trusted workload creates its state.
+(typetransition init_t fvca_guest_data_t dir "payload" var_lib_t)
+
+; The upstream thaw iterates local mounts. Limit regular-file and directory
+; ioctls to the Guest data mount, and allow only FIFREEZE/FITHAW there.
+(typeattribute fvca_other_guest_mounts)
+(typeattributeset fvca_other_guest_mounts (not fvca_guest_data_t))
+(deny virt_qemu_ga_t fvca_other_guest_mounts (dir (ioctl)))
+(deny virt_qemu_ga_t fvca_other_guest_mounts (file (ioctl)))
+(deny virt_qemu_ga_t fvca_guest_data_t (file (ioctl)))
+(allow virt_qemu_ga_t self (capability (sys_admin)))
+(allow virt_qemu_ga_t fvca_guest_data_t (dir (getattr ioctl open read search)))
+(allowx virt_qemu_ga_t fvca_guest_data_t (ioctl dir (0x5877 0x5878)))

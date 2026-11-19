@@ -19,7 +19,8 @@ LIBVIRT_UNITS = {
 DOMAIN_SCHEMAS = {
     Path(f"usr/share/libvirt/schemas/{name}.rng")
     for name in ("basictypes", "cputypes", "domain", "domaincommon", "domainoverrides",
-                 "networkcommon", "nwfilter_params", "privatedata", "storagecommon", "sysinfocommon")
+                 "domainsnapshot", "inactiveDomain", "networkcommon", "nwfilter_params",
+                 "privatedata", "storagecommon", "sysinfocommon")
 }
 BASE_INPUT = "vm-runtime-base"
 BASE_BINDING = Path("usr/share/fvca/vm-runtime-base.roothash")

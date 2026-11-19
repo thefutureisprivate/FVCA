@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
+mod block_nodes;
+
 const LOCAL_QEMU: &CStr = c"qemu+unix:///system?socket=/run/libvirt/virtqemud-sock";
 const START_AUTODESTROY: c_uint = 2;
 const START_PAUSED: c_uint = 1;
@@ -21,6 +23,20 @@ const EVENT_STOPPED: c_int = 5;
 const STOPPED_SHUTDOWN: c_int = 0;
 const STOP_PENDING: c_int = -1;
 const AGENT_TIMEOUT_SECONDS: c_int = 5;
+const PAUSED_SNAPSHOT: c_int = 9;
+const SNAPSHOT_NO_METADATA: c_uint = 4;
+const SNAPSHOT_DISK_ONLY: c_uint = 16;
+const SNAPSHOT_VALIDATE: c_uint = 512;
+const GUEST_DATA: &CStr = c"/run/fvca/guest-data";
+const MANUAL_SNAPSHOT: &CStr = c"<domainsnapshot>
+  <name>fvca-provider-capture</name>
+  <memory snapshot='no'/>
+  <disks>
+    <disk name='vda' snapshot='no'/>
+    <disk name='vdb' snapshot='no'/>
+    <disk name='vdc' snapshot='manual'/>
+  </disks>
+</domainsnapshot>";
 pub const RUNNING: c_int = 1;
 pub const PAUSED: c_int = 3;
 
@@ -36,6 +52,10 @@ unsafe extern "C" {
     fn virDomainIsActive(domain: *mut c_void) -> c_int;
     fn virDomainShutdownFlags(domain: *mut c_void, flags: c_uint) -> c_int;
     fn virDomainAgentSetResponseTimeout(domain: *mut c_void, timeout: c_int, flags: c_uint) -> c_int;
+    fn virDomainFSFreeze(domain: *mut c_void, paths: *const *const c_char, count: c_uint, flags: c_uint) -> c_int;
+    fn virDomainFSThaw(domain: *mut c_void, paths: *const *const c_char, count: c_uint, flags: c_uint) -> c_int;
+    fn virDomainSnapshotCreateXML(domain: *mut c_void, xml: *const c_char, flags: c_uint) -> *mut c_void;
+    fn virDomainSnapshotFree(snapshot: *mut c_void) -> c_int;
     fn virConnectDomainEventRegisterAny(
         connection: *mut c_void, domain: *mut c_void, event: c_int, callback: LifecycleCallback,
         opaque: *mut c_void, free: extern "C" fn(*mut c_void),
@@ -61,6 +81,7 @@ unsafe extern "C" {
 #[link(name = "virt-qemu")]
 unsafe extern "C" {
     fn virDomainQemuAgentCommand(domain: *mut c_void, command: *const c_char, timeout: c_int, flags: c_uint) -> *mut c_char;
+    fn virDomainQemuMonitorCommand(domain: *mut c_void, command: *const c_char, result: *mut *mut c_char, flags: c_uint) -> c_int;
 }
 
 unsafe extern "C" {
@@ -224,27 +245,102 @@ impl Domain<'_> {
     }
 
     pub fn require_guest_agent(&self) -> io::Result<()> {
-        // This boundary exposes only the fixed ping, never a caller-supplied agent command.
+        self.agent_expect(c"{\"execute\":\"guest-ping\"}", c"{\"return\":{}}")
+    }
+
+    fn agent_expect(&self, command: &CStr, expected: &CStr) -> io::Result<()> {
+        // Callers of the public boundary can only select fixed operations.
         let reply = unsafe {
-            virDomainQemuAgentCommand(self.handle.as_ptr(), c"{\"execute\":\"guest-ping\"}".as_ptr(), AGENT_TIMEOUT_SECONDS, 0)
+            virDomainQemuAgentCommand(self.handle.as_ptr(), command.as_ptr(), AGENT_TIMEOUT_SECONDS, 0)
         };
         if reply.is_null() {
             return Err(io::Error::other("the Service Guest agent did not answer"));
         }
         // Libvirt serializes the owned response as compact JSON.
-        let success = unsafe { CStr::from_ptr(reply) } == c"{\"return\":{}}";
+        let success = unsafe { CStr::from_ptr(reply) } == expected;
         unsafe { free(reply.cast()) };
         if !success {
-            return Err(io::Error::other("the Service Guest agent did not accept the ping"));
+            return Err(io::Error::other("the Service Guest agent returned an unexpected response"));
         }
         Ok(())
+    }
+
+    pub fn require_guest_freeze_state(&self, frozen: bool) -> io::Result<()> {
+        let expected = if frozen { c"{\"return\":\"frozen\"}" } else { c"{\"return\":\"thawed\"}" };
+        self.agent_expect(c"{\"execute\":\"guest-fsfreeze-status\"}", expected)
+    }
+
+    /// Arm independent thaw recovery before calling. A timeout can leave the filesystem frozen.
+    pub fn freeze_guest_data(&self) -> io::Result<()> {
+        self.require_guest_freeze_state(false)?;
+        self.set_agent_timeout()?;
+        let path = GUEST_DATA.as_ptr();
+        // The call borrows a one-element array of mountpoint pointers.
+        let count = unsafe { virDomainFSFreeze(self.handle.as_ptr(), &path, 1, 0) };
+        if count != 1 {
+            return Err(io::Error::other(format!("expected one Guest filesystem freeze, got {count}")));
+        }
+        self.require_guest_freeze_state(true)
+    }
+
+    pub fn thaw_guest_data(&self) -> io::Result<()> {
+        self.set_agent_timeout()?;
+        // QGA thaws its frozen filesystems as a set. Guest policy confines the set.
+        let count = unsafe { virDomainFSThaw(self.handle.as_ptr(), std::ptr::null(), 0, 0) };
+        if count != 1 {
+            return Err(io::Error::other(format!("expected one Guest filesystem thaw, got {count}")));
+        }
+        self.require_guest_freeze_state(false)
+    }
+
+    fn set_agent_timeout(&self) -> io::Result<()> {
+        // This timeout applies to subsequent native libvirt Guest agent calls.
+        status(unsafe { virDomainAgentSetResponseTimeout(self.handle.as_ptr(), AGENT_TIMEOUT_SECONDS, 0) },
+               "could not set the Guest agent response timeout")
+    }
+
+    pub fn require_guest_disk_active(&self, active: bool) -> io::Result<()> {
+        let mut reply = null_mut();
+        let query = c"{\"execute\":\"query-named-block-nodes\",\"arguments\":{\"flat\":true}}";
+        // The trusted local libvirt boundary exposes this fixed read-only query.
+        // Libvirt records custom-monitor taint even for read-only commands.
+        let result = unsafe { virDomainQemuMonitorCommand(self.handle.as_ptr(), query.as_ptr(), &mut reply, 0) };
+        let Some(reply) = NonNull::new(reply) else {
+            return Err(io::Error::other("QEMU did not return its block nodes"));
+        };
+        // libvirt transfers the reply to the caller. The parsed result borrows no reply data.
+        let verified = status(result, "could not query the Guest block nodes")
+            .and_then(|()| block_nodes::verify(unsafe { CStr::from_ptr(reply.as_ptr()) }, active));
+        unsafe { free(reply.as_ptr().cast()) };
+        verified
+    }
+
+    /// Arm independent resume recovery before calling. A failed check can leave the VM paused.
+    pub fn pause_for_guest_disk_capture(&self) -> io::Result<()> {
+        if self.state()? != RUNNING {
+            return Err(io::Error::other("manual disk capture requires a running Service Guest"));
+        }
+        self.require_guest_disk_active(true)?;
+        let flags = SNAPSHOT_DISK_ONLY | SNAPSHOT_NO_METADATA | SNAPSHOT_VALIDATE;
+        // The only writable disk in the verified direct-boot fixture uses manual mode.
+        let snapshot = unsafe { virDomainSnapshotCreateXML(self.handle.as_ptr(), MANUAL_SNAPSHOT.as_ptr(), flags) };
+        let snapshot = NonNull::new(snapshot).ok_or_else(|| io::Error::other("libvirt manual disk snapshot failed"))?;
+        status(unsafe { virDomainSnapshotFree(snapshot.as_ptr()) }, "could not release the manual snapshot handle")?;
+        if !self.paused_for_snapshot()? {
+            return Err(io::Error::other("libvirt did not pause the Service Guest for the manual snapshot"));
+        }
+        self.require_guest_disk_active(false)
+    }
+
+    pub fn paused_for_snapshot(&self) -> io::Result<bool> {
+        let (state, reason) = self.state_with_reason()?;
+        Ok(state == PAUSED && reason == PAUSED_SNAPSHOT)
     }
 
     pub fn shutdown(&self, events: &EventLoop, timeout: Duration) -> io::Result<()> {
         let stop = StopEvent::watch(self)?;
         let deadline = Instant::now() + timeout;
-        status(unsafe { virDomainAgentSetResponseTimeout(self.handle.as_ptr(), AGENT_TIMEOUT_SECONDS, 0) },
-               "could not set the Guest agent response timeout")?;
+        self.set_agent_timeout()?;
         // Poweroff can close the Guest's bus before the agent's child receives
         // its reply. Observe the lifecycle even if delivery was uncertain.
         let request = status(
@@ -268,11 +364,17 @@ impl Domain<'_> {
     }
 
     pub fn state(&self) -> io::Result<c_int> {
-        let mut state = 0;
-        // libvirt writes one C int and accepts a null reason pointer.
-        let result = unsafe { virDomainGetState(self.handle.as_ptr(), &mut state, null_mut(), 0) };
-        status(result, "could not read the VM state")?;
+        let (state, _) = self.state_with_reason()?;
         Ok(state)
+    }
+
+    fn state_with_reason(&self) -> io::Result<(c_int, c_int)> {
+        let mut state = 0;
+        let mut reason = 0;
+        // libvirt writes the state and its reason into these two integers.
+        let result = unsafe { virDomainGetState(self.handle.as_ptr(), &mut state, &mut reason, 0) };
+        status(result, "could not read the VM state")?;
+        Ok((state, reason))
     }
 
     pub fn suspend(&self) -> io::Result<()> {

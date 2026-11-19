@@ -75,7 +75,7 @@ pub fn mount(pool: Pool<'_>, uuid: &str, target: &str) -> io::Result<()> {
     let sysfs = Path::new("/sys/fs/btrfs").join(uuid);
     let selected = sources.iter().skip(1).map(|device| format!(",device={}", device.display())).collect::<String>();
     let label = match pool {
-        Pool::Guest(_) => "",
+        Pool::Guest(_) => ",rootcontext=system_u:object_r:fvca_guest_data_t:s0",
         Pool::Hypervisor(_) => ",defcontext=system_u:object_r:fvca_host_data_t:s0",
     };
 
