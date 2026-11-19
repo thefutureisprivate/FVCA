@@ -183,3 +183,54 @@ python3 tests/check-storage.py \
 ```
 
 The development boot check initializes Podman with crun, VFS and SELinux, runs crun, and renders a fixed Quadlet `Rootfs=` fixture. The integration test requires Btrfs and the selected runtime, and checks rejection of absent and duplicated runtime disks. A separate signed EROFS lab workload exercised start, exec, health checks, restart and stop with an enforcing SELinux container label. Workload admission, network and resource qualification, and Stalwart acceptance remain open. [Podman Quadlet documentation](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html)
+
+## Off-node Stalwart workload derivation
+
+The [Stalwart source policy](policy/workloads/stalwart-v1.1.1.json) pins the repository, publisher workflow identity and issuer, signed OCI index, and selected Linux amd64 manifest. It also fixes the expected numeric identity and the two application volume destinations. Derivation verifies the publisher with Cosign v3.1.4, checks descriptor sizes and hashes, and validates the ordered layers and their expanded diff IDs. The rootless worker receives the checked blobs and conversion tools through a private input mount. It unpacks with pinned `umoci` in a network-disabled container and emits an unsigned EROFS image and verity tree. [Sigstore verification](https://docs.sigstore.dev/cosign/verifying/verify/) · [umoci](https://github.com/opencontainers/umoci)
+
+The deterministic recipe supplies the mount points Podman needs on a read-only root, strips set-ID bits and file capabilities, and records the exact changes. It preserves the OCI entrypoint, command, environment, resolved UID/GID, working directory, stop signal, health command and volume destinations in the launch definition. The source policy authorizes conversion. The deployment record authorizes one Guest and launch definition.
+
+Prepare the exact source and worker on the off-node Fedora builder with rootless Podman, Skopeo, Cosign v3.1.4, `jq`, `sfdisk`, `veritysetup` and OpenSSL installed.
+
+```sh
+umask 077
+mkdir -p build/stalwart-input build/workload-worker-context
+policy=policy/workloads/stalwart-v1.1.1.json
+repo=$(jq -r .repository "$policy")
+index=$(jq -r .index "$policy")
+manifest=$(jq -r .manifest "$policy")
+skopeo inspect --raw "docker://$repo@$index" > build/stalwart-input/publisher-index.json
+skopeo copy --preserve-digests "docker://$repo@$manifest" oci:build/stalwart-input/amd64.oci:source
+podman build --platform linux/amd64 -t localhost/fvca-workload-worker:45 \
+  -f tools/workload-worker.Containerfile build/workload-worker-context
+worker=$(podman image inspect --format '{{.Id}}' localhost/fvca-workload-worker:45)
+worker=sha256:${worker#sha256:}
+python3 tools/derive-workload.py --policy "$policy" \
+  --source-index build/stalwart-input/publisher-index.json --layout build/stalwart-input/amd64.oci \
+  --cosign "$(command -v cosign)" --worker-image "$worker" --output build/stalwart-candidate
+```
+
+Review `derivation.json` and `launch.json`, then have the deployment authority sign the exact deployment document as detached DER CMS. The `fvca-workload-deployment-v1` document contains these fields.
+
+| Fields | Approval scope |
+| --- | --- |
+| `schema`, `role`, `guest`, `service` | Schema version, `service-guest`, assigned Guest identity and service |
+| `source_index`, `manifest`, `provenance`, `launch` | Exact index digest, platform digest, `PUBLISHER_VERIFIED`, and launch digest from the reviewed derivation |
+| `valid_from`, `expires`, `security_epoch`, `revocation_id` | Unix timestamps, positive epoch and revocation UUID |
+| `id_map` | Approved subordinate `uid_base` and `gid_base`, each mapping a `size` of 65536 IDs from container ID zero |
+| `network`, `limits` | `none` for this offline profile, plus `memory_bytes`, `cpu_percent` and `pids` |
+
+The workload-root authority uses a separate key. The authorizer verifies the deployment signature and validity period, verifies the publisher again, and reproduces the candidate byte for byte in a fresh worker before signing the output. The result includes `workload.raw`, the signed authorization and deployment, the launch definition, and the derivation and publisher evidence.
+
+```sh
+openssl cms -sign -binary -nocerts -noattr -outform DER -in build/deployment.json \
+  -signer build/deployment.crt -inkey build/deployment.key -out build/deployment.p7s
+python3 tools/authorize-workload.py --policy "$policy" \
+  --source-index build/stalwart-input/publisher-index.json --layout build/stalwart-input/amd64.oci \
+  --cosign "$(command -v cosign)" --worker-image "$worker" --candidate build/stalwart-candidate \
+  --deployment build/deployment.json --deployment-signature build/deployment.p7s \
+  --deployment-certificate build/deployment.crt --workload-key build/workload.key \
+  --workload-certificate build/workload.crt --output build/stalwart-authorized
+```
+
+This off-node flow implements signed-only source admission. Guest-side authorization and revocation enforcement, the optional unsigned permit mode, and full Stalwart service acceptance remain open.

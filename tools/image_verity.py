@@ -38,6 +38,13 @@ def extract_partition(image, partition, sector_size, destination):
             remaining -= len(data)
 
 
+def verify_cms(content, signature, certificate):
+    # Trust the explicitly supplied signer and ignore certificates embedded by the candidate.
+    subprocess.run(["openssl", "cms", "-verify", "-binary", "-inform", "DER", "-in", signature,
+                    "-content", content, "-nointern", "-certfile", certificate, "-noverify",
+                    "-out", "/dev/null"], check=True)
+
+
 def verify_verity(image, sector_size, partitions, certificate, work, expected_hash=None):
     for name in VERITY_PARTITIONS:
         extract_partition(image, partitions[name], sector_size, work / name)
@@ -58,9 +65,6 @@ def verify_verity(image, sector_size, partitions, certificate, work, expected_ha
     signature.write_bytes(base64.b64decode(signed_root["signature"], validate=True))
     content = work / "roothash"
     content.write_text(root_hash, encoding="ascii")
-    # Trust the explicitly supplied signer and ignore certificates embedded by the candidate.
-    subprocess.run(["openssl", "cms", "-verify", "-binary", "-inform", "DER", "-in", signature,
-                    "-content", content, "-nointern", "-certfile", certificate, "-noverify",
-                    "-out", "/dev/null"], check=True)
+    verify_cms(content, signature, certificate)
     subprocess.run(["veritysetup", "verify", work / "root", work / "verity", root_hash], check=True)
     return root_hash

@@ -1,0 +1,12 @@
+{
+  "schema": "fvca-oci-source-v1",
+  "service": "stalwart",
+  "repository": "docker.io/stalwartlabs/stalwart",
+  "index": "sha256:5ebdf474b237161742fe4309396af4ae8797c938e8e6eb7e2d4837332c4f9851",
+  "manifest": "sha256:544760db45608ef39d969eca7cfc040af771a0825cdf5c673935825abe3fad0f",
+  "certificate_identity": "https://github.com/stalwartlabs/stalwart/.github/workflows/ci.yml@refs/tags/v1.1.1",
+  "certificate_issuer": "https://token.actions.githubusercontent.com",
+  "uid": 2000,
+  "gid": 2000,
+  "volumes": ["/etc/stalwart", "/var/lib/stalwart"]
+}
