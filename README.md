@@ -248,7 +248,15 @@ python3 tests/check-storage.py \
   --output build/hypervisor-nested-guest-checks
 ```
 
-For a disposable shutdown test, use `tests/nested-guest-shutdown-initrd.sh HYPERVISOR_INITRAMFS NEW_INITRAMFS` and pass the resulting archive to `compose-hypervisor.py --initrd`. Run the nested check with `--nested-guest-shutdown`. For a Guest that requires an authorized workload, supply its prepared Guest data disk as the second argument to `tests/storage-lab.sh`. The test waits for the orderly stop and checks that the raw disk attachment was released. Filesystem freeze, snapshot capture, and S3 backup remain pending.
+For a disposable shutdown test, use `tests/nested-guest-shutdown-initrd.sh HYPERVISOR_INITRAMFS NEW_INITRAMFS` and pass the resulting archive to `compose-hypervisor.py --initrd`. Run the nested check with `--nested-guest-shutdown`. For a Guest that requires an authorized workload, supply its prepared Guest data disk as the second argument to `tests/storage-lab.sh`. The test waits for the orderly stop and checks that the raw disk attachment was released.
+
+### Stopped Service Guest captures
+
+Start `fvca-capture-stopped@CAPTURE_UUID.service` as a privileged Hypervisor operator using a fresh capture UUID. The coordinator holds a lease against a new Guest start, checks Btrfs mirror headroom for a full disk rewrite and retained release files, and saves the exact authorized Guest release once per bundle digest. It requests an orderly stop if the Guest is running. A Guest that was already stopped needs a matching receipt from its last verified shutdown.
+
+The coordinator syncs the raw disk, writes the capture plan, and creates a read-only snapshot outside the Guest subvolume. It checks the Btrfs parent and snapshot IDs and publishes the sealed record before restarting a previously running Guest. It hashes the stable snapshot after restart and writes `CAPTURE_COMPLETE` only after validating the captured disk and retained release. The records are under `/run/fvca/host-data/captures/sets/CAPTURE_UUID`. Reusing the same UUID verifies and finalizes an existing snapshot. The capture remains available while the Guest runs.
+
+For the nested capture test, prepare the shutdown fixture with the additional `capture` argument and run the nested checks with `--nested-guest-capture`. Use `tests/storage-lab.sh` with the prepared workload disk and a third argument of `2684354560` bytes per disposable mirror member. The test checks capture before restart, recovery of a sealed capture without its final manifest, and capture of a Guest left stopped. Filesystem freeze, live capture, retention and restore operations, and encrypted S3 backup remain pending.
 
 ## Off-node Stalwart workload derivation
 

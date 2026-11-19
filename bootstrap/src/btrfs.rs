@@ -74,12 +74,16 @@ pub fn mount(pool: Pool<'_>, uuid: &str, target: &str) -> io::Result<()> {
     fs::DirBuilder::new().mode(0o700).create(target)?;
     let sysfs = Path::new("/sys/fs/btrfs").join(uuid);
     let selected = sources.iter().skip(1).map(|device| format!(",device={}", device.display())).collect::<String>();
+    let label = match pool {
+        Pool::Guest(_) => "",
+        Pool::Hypervisor(_) => ",defcontext=system_u:object_r:fvca_host_data_t:s0",
+    };
 
     // Btrfs can replay the tree log even on a read-only mount. Inspect profiles
     // without replay, then mount normally so legitimate pending writes recover.
     for mode in ["ro,rescue=nologreplay", "rw"] {
         run(Command::new(MOUNT).args([
-            "--internal-only", "-t", "btrfs", "-o", &format!("{mode},{OPTIONS}{selected}"),
+            "--internal-only", "-t", "btrfs", "-o", &format!("{mode},{OPTIONS}{selected}{label}"),
         ]).arg(sources[0]).arg(target))?;
         let verified = verify_mount(&sysfs, target, &devices, profiles);
         if verified.is_err() || mode != "rw" {

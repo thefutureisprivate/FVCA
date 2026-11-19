@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 use fvca_initrd_bootstrap::{guest_boot, invalid, run, vm_confinement};
 use fvca_libvirt_boundary::{Connection, Domain, EventLoop, PAUSED, RUNNING};
 
+#[path = "fvca-launch-guest/capture.rs"]
+mod capture;
+
 #[global_allocator]
 static ALLOCATOR: System = System;
 
@@ -21,14 +24,13 @@ const VM_DIRECTORY: &str = "/run/fvca/host-data/vms/service-guest";
 const DISK: &str = "/run/fvca/host-data/vms/service-guest/data.raw";
 const ALIAS: &str = "/run/fvca/guest-state.raw";
 const PID: &str = "/run/libvirt/qemu/fvca-service-guest.pid";
+const RECEIPT: &str = "/run/fvca/guest-clean-stop";
+const OPERATION_LOCK: &str = "/run/fvca/guest-operation.lock";
+const CAPTURE_LOCK: &str = "/run/fvca/guest-capture.lock";
 
-fn verified_definition(selection: &guest_boot::Selection<'_>) -> io::Result<CString> {
-    run(Command::new("/usr/bin/findmnt").args([
-        "--mountpoint", guest_boot::BOOT, "--source", "/dev/mapper/fvca-guest-boot",
-        "--types", "erofs", "--options", "ro,nodev,nosuid,noexec",
-    ]).stdout(Stdio::null()))?;
+fn verify_boot_files(directory: &Path, selection: &guest_boot::Selection<'_>) -> io::Result<()> {
     let mut checksum = Command::new("/usr/bin/sha256sum").env_clear()
-        .current_dir(guest_boot::BOOT)
+        .current_dir(directory)
         .args(["--strict", "--check", "--status", "-"])
         .stdin(Stdio::piped()).spawn()?;
     let written = checksum.stdin.take().expect("checksum input is piped").write_all(selection.checksums.as_bytes());
@@ -37,20 +39,60 @@ fn verified_definition(selection: &guest_boot::Selection<'_>) -> io::Result<CStr
     if !status.success() {
         return Err(invalid("Guest boot files differ from the UKI-authorized selection"));
     }
-    let xml = fs::read(Path::new(guest_boot::BOOT).join("domain.xml"))
+    Ok(())
+}
+
+fn verified_definition(selection: &guest_boot::Selection<'_>) -> io::Result<CString> {
+    run(Command::new("/usr/bin/findmnt").args([
+        "--mountpoint", guest_boot::BOOT, "--source", "/dev/mapper/fvca-guest-boot",
+        "--types", "erofs", "--options", "ro,nodev,nosuid,noexec",
+    ]).stdout(Stdio::null()))?;
+    let boot = Path::new(guest_boot::BOOT);
+    verify_boot_files(boot, selection)?;
+    let xml = fs::read(boot.join("domain.xml"))
         .map_err(|error| io::Error::other(format!("could not read the authorized machine definition: {error}")))?;
     CString::new(xml).map_err(io::Error::other)
 }
 
-fn prepare_data() -> io::Result<()> {
+fn verify_pool() -> io::Result<File> {
     run(Command::new("/usr/bin/findmnt").args([
         "--mountpoint", POOL, "--types", "btrfs", "--options", "rw,nodev,nosuid,noexec",
     ]).stdout(Stdio::null()))?;
-    for path in [POOL, "/run/fvca/host-data/vms", VM_DIRECTORY] {
-        let directory = fs::symlink_metadata(path)?;
-        if !directory.is_dir() || directory.uid() != 0 || directory.gid() != 0 || directory.mode() & 0o7777 != 0o700 {
-            return Err(invalid("the Guest storage directory must be private and owned by root"));
-        }
+    private_directory(Path::new(POOL))
+}
+
+fn private_directory(path: &Path) -> io::Result<File> {
+    let directory = fs::symlink_metadata(path)?;
+    if !directory.is_dir() || directory.uid() != 0 || directory.gid() != 0 || directory.mode() & 0o7777 != 0o700 {
+        return Err(invalid("the Guest storage directory must be private and owned by root"));
+    }
+    File::open(path)
+}
+
+fn raw_disk_metadata(path: &Path) -> io::Result<fs::Metadata> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.mode() & 0o7777 != 0o600
+        || metadata.len() == 0 || !metadata.len().is_multiple_of(512)
+    {
+        return Err(invalid("Guest data must be a private, sector-aligned raw file"));
+    }
+    Ok(metadata)
+}
+
+fn raw_disk(path: &Path) -> io::Result<File> {
+    let metadata = raw_disk_metadata(path)?;
+    if metadata.uid() != 0 || metadata.gid() != 0 {
+        return Err(invalid("the stopped Guest disk must be owned by root"));
+    }
+    let disk = File::open(path)?;
+    fvca_btrfs_boundary::require_cow_and_checksums(&disk)?;
+    Ok(disk)
+}
+
+fn verify_storage_directory() -> io::Result<File> {
+    verify_pool()?;
+    for path in ["/run/fvca/host-data/vms", VM_DIRECTORY] {
+        private_directory(Path::new(path))?;
     }
     let root = File::open(VM_DIRECTORY)?;
     if root.metadata()?.ino() != 256 {
@@ -60,12 +102,6 @@ fn prepare_data() -> io::Result<()> {
     if entries != ["data.raw"] {
         return Err(invalid("unexpected persistent files in the registered Guest subvolume"));
     }
-    let metadata = fs::symlink_metadata(DISK)?;
-    if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != 0 || metadata.gid() != 0
-        || metadata.mode() & 0o7777 != 0o600 || metadata.len() == 0 || !metadata.len().is_multiple_of(512)
-    {
-        return Err(invalid("Guest data must be a private, sector-aligned raw file"));
-    }
     let mount = Command::new("/usr/bin/findmnt").env_clear()
         .args(["--target", DISK, "--noheadings", "--raw", "--output", "TARGET"])
         .output()?;
@@ -73,8 +109,23 @@ fn prepare_data() -> io::Result<()> {
         return Err(invalid("Guest data must reside in the authorized Host pool"));
     }
     fvca_btrfs_boundary::require_cow_and_checksums(&root)?;
-    fvca_btrfs_boundary::require_cow_and_checksums(&File::open(DISK)?)?;
+    Ok(root)
+}
 
+fn verify_data() -> io::Result<(File, File)> {
+    Ok((verify_storage_directory()?, raw_disk(Path::new(DISK))?))
+}
+
+fn invalidate_receipt() -> io::Result<()> {
+    match fs::remove_file(RECEIPT) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+fn prepare_data() -> io::Result<()> {
+    verify_data()?;
+    invalidate_receipt()?;
     // Keep the pool private while giving sVirt one file to label for QEMU.
     run(Command::new("/usr/bin/chcon").args(["system_u:object_r:virt_image_t:s0", DISK]))?;
     OpenOptions::new().write(true).create_new(true).mode(0o600).open(ALIAS)?;
@@ -130,12 +181,16 @@ fn launch() -> io::Result<()> {
     let xml = verified_definition(&selection)?;
     let events = EventLoop::register()?;
     let connection = Connection::connect()?;
+    start(&connection, &events, &selection, &xml)
+}
+
+fn start(connection: &Connection, events: &EventLoop, selection: &guest_boot::Selection<'_>, xml: &CStr) -> io::Result<()> {
     if connection.lookup(UUID)?.is_some() {
         return Err(invalid("the registered Guest already exists"));
     }
     prepare_data().map_err(|error| io::Error::other(format!("Guest data preparation failed: {error}")))?;
-    let domain = connection.start_registered(&xml)?;
-    if let Err(error) = wait_for_boot(&domain, selection.runtime, &events) {
+    let domain = connection.start_registered(xml)?;
+    if let Err(error) = wait_for_boot(&domain, selection.runtime, events) {
         if let Err(cleanup) = domain.destroy() {
             eprintln!("FVCA could not stop the failed Guest: {cleanup}");
         }
@@ -148,20 +203,30 @@ fn launch() -> io::Result<()> {
 fn shutdown() -> io::Result<()> {
     let events = EventLoop::register()?;
     let connection = Connection::connect()?;
-    let Some(domain) = connection.lookup(UUID)? else { return Ok(()); };
-    domain.shutdown(&events, Duration::from_secs(28))?;
+    if stop(&connection, &events)? {
+        run(Command::new("/usr/bin/chcon").args(["--no-dereference", "system_u:object_r:fvca_host_data_t:s0", DISK]))?;
+        let (root, disk) = verify_data()?;
+        disk.sync_all()?;
+        capture::publish(Path::new("/run/fvca"), "guest-clean-stop", &capture::stop_receipt(&root, &disk)?)?;
+    }
+    Ok(())
+}
+
+fn stop(connection: &Connection, events: &EventLoop) -> io::Result<bool> {
+    let Some(domain) = connection.lookup(UUID)? else { return Ok(false); };
+    invalidate_receipt()?;
+    domain.shutdown(events, Duration::from_secs(28))?;
     if Path::new(PID).try_exists()? {
         return Err(invalid("the Service Guest QEMU PID file still exists after shutdown"));
     }
     println!("FVCA_SERVICE_GUEST_STOPPED");
-    Ok(())
+    Ok(true)
 }
 
-fn release() -> io::Result<()> {
+fn release(connection: &Connection) -> io::Result<()> {
     if !Path::new(ALIAS).try_exists()? {
         return Ok(());
     }
-    let connection = Connection::connect()?;
     if connection.lookup(UUID)?.is_some() || Path::new(PID).try_exists()? {
         return Err(invalid("the Service Guest still owns its data attachment"));
     }
@@ -178,9 +243,24 @@ fn release() -> io::Result<()> {
 fn activate() -> io::Result<()> {
     fvca_allocator_binding::require_allocator()?;
     match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
-        [] => launch(),
-        [option] if option == "--shutdown" => shutdown(),
-        [option] if option == "--release" => release(),
+        [] => {
+            let _capture = capture::wait_for_lease(Path::new(CAPTURE_LOCK))?;
+            let _lease = capture::lease(Path::new(OPERATION_LOCK))?;
+            launch()
+        }
+        [option] if option == "--shutdown" => {
+            let _lease = capture::lease(Path::new(OPERATION_LOCK))?;
+            shutdown()
+        }
+        [option] if option == "--release" => {
+            let _lease = capture::lease(Path::new(OPERATION_LOCK))?;
+            if !Path::new(ALIAS).try_exists()? {
+                return Ok(());
+            }
+            release(&Connection::connect()?)
+        }
+        [option, id] if option == "--capture-stopped" => capture::stopped(id, true),
+        [option, id, mode] if option == "--capture-stopped" && mode == "--leave-stopped" => capture::stopped(id, false),
         _ => Err(invalid("unsupported Service Guest operation")),
     }
 }

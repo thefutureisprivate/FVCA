@@ -2,8 +2,8 @@
 # Add a shell-free shutdown test to a disposable development Hypervisor initramfs.
 set -euo pipefail
 umask 077
-if [[ $# != 2 ]]; then
-    echo 'Run tests/nested-guest-shutdown-initrd.sh HYPERVISOR_INITRAMFS NEW_INITRAMFS' >&2
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+    echo 'Run tests/nested-guest-shutdown-initrd.sh HYPERVISOR_INITRAMFS NEW_INITRAMFS [shutdown|capture]' >&2
     exit 2
 fi
 tests=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -13,14 +13,18 @@ tree=$(mktemp -d)
 trap 'rm -rf -- "$tree"' EXIT
 conf=usr/lib/systemd/system/fvca-activate-runtime.service.d
 fvca=usr/lib/fvca
-unit=fvca-qualify-guest-shutdown.service
+case "${3:-shutdown}" in
+    shutdown) unit=fvca-qualify-guest-shutdown.service ;;
+    capture) unit=fvca-qualify-stopped-capture.service ;;
+    *) echo 'Unknown nested Guest qualification mode' >&2; exit 2 ;;
+esac
 mkdir -p "$tree/$conf" "$tree/$fvca"
 install -m644 "$tests/$unit" "$tree/$fvca/$unit"
-cat > "$tree/$conf/90-guest-shutdown.conf" <<'UNIT'
+cat > "$tree/$conf/90-guest-shutdown.conf" <<UNIT
 [Service]
-ExecStartPost=/usr/bin/cp /usr/lib/fvca/fvca-qualify-guest-shutdown.service /run/systemd/system/fvca-qualify-guest-shutdown.service
+ExecStartPost=/usr/bin/cp /usr/lib/fvca/$unit /run/systemd/system/$unit
 ExecStartPost=/usr/bin/mkdir -p /run/systemd/system/fvca-base.target.wants
-ExecStartPost=/usr/bin/ln -s ../fvca-qualify-guest-shutdown.service /run/systemd/system/fvca-base.target.wants/fvca-qualify-guest-shutdown.service
+ExecStartPost=/usr/bin/ln -s ../$unit /run/systemd/system/fvca-base.target.wants/$unit
 UNIT
 chmod 644 "$tree/$conf/90-guest-shutdown.conf"
 archive="$tree/initrd.cpio"

@@ -191,16 +191,36 @@ def check_nested_guest(args):
         raise ValueError("unexpected lab passphrase encoding")
     members = [lab / f"member-{member}.raw" for member in ("a", "b")]
     guest_ready = b"FVCA_SERVICE_GUEST_READY"
-    finished = b"FVCA_NESTED_STOP_VERIFIED" if args.nested_guest_shutdown else READY
-    prompts, log = boot(args, "guest", password, *members, timeout=155, ready_marker=finished)
+    finished = READY
+    if args.nested_guest_shutdown:
+        finished = b"FVCA_NESTED_STOP_VERIFIED"
+    if args.nested_guest_capture:
+        finished = b"FVCA_STOPPED_CAPTURE_VERIFIED"
+    prompts, log = boot(args, "guest", password, *members, timeout=225 if args.nested_guest_capture else 155,
+                        ready_marker=finished)
     required = (HOST_PROFILES, ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", b"FVCA_SERVICE_GUEST_AGENT_READY", guest_ready, READY)
     if args.nested_guest_shutdown:
         required += (b"FVCA_SERVICE_GUEST_STOPPED", finished)
-    if prompts != 2 or log.count(b"FVCA_KVM_GUEST_CONFINED") != 2 or FAIL in log or any(marker not in log for marker in required):
+    if args.nested_guest_capture:
+        required += (b"FVCA_SERVICE_GUEST_STOPPED", finished)
+    guests = re.findall(rb"launch-guest\[[0-9]+\]: FVCA_KVM_GUEST_CONFINED", log)
+    probe = re.search(rb"qualify-libvirt\[[0-9]+\]: FVCA_KVM_GUEST_CONFINED", log)
+    if (prompts != 2 or len(guests) != (2 if args.nested_guest_capture else 1) or probe is None
+            or FAIL in log or any(marker not in log for marker in required)):
         raise ValueError("the Hypervisor did not reach readiness with its authorized nested Guest")
     print("nested-guest passed")
     if args.nested_guest_shutdown:
         print("nested-guest-shutdown passed")
+    if args.nested_guest_capture:
+        seal = log.find(b"FVCA_CAPTURE_SEALED_PENDING_VALIDATION ff6b9317-4240-4635-a6d9-94e557cb83c8 ")
+        resume = log.find(b"FVCA_CAPTURE_GUEST_RESUMED ff6b9317-4240-4635-a6d9-94e557cb83c8")
+        complete = tuple(re.finditer(rb"FVCA_CAPTURE_COMPLETE ff6b9317-4240-4635-a6d9-94e557cb83c8 ([0-9a-f]{64})", log))
+        stopped = re.search(rb"FVCA_CAPTURE_COMPLETE a51a4aa4-20c3-437c-af18-3ebae71123fc [0-9a-f]{64}", log)
+        if (len(complete) != 2 or complete[0][1] != complete[1][1] or stopped is None or
+                not 0 <= seal < resume < complete[0].start() < complete[1].start() < stopped.start() or
+                log.count(guest_ready) != 2 or log.count(b"FVCA_CAPTURE_GUEST_RESUMED") != 1):
+            raise ValueError("stopped capture ordering, finalization recovery or stopped-state preservation failed")
+        print("nested-guest-stopped-capture passed")
 
     prompts, log = boot(args, "missing-bundle", password, *members, attach_guest=False)
     if (prompts != 2 or b"authorized Guest boot bundle partitions are missing" not in log or FAIL not in log
@@ -396,8 +416,11 @@ if __name__ == "__main__":
     role.add_argument("--oci-runtime", type=Path, help="signed Service Guest OCI runtime")
     parser.add_argument("--replacement-disk", type=Path, help="Hypervisor boot disk authorizing the lab replacement")
     parser.add_argument("--nested-guest", type=Path, help="Guest bundle to launch inside the disposable Hypervisor")
-    parser.add_argument("--nested-guest-shutdown", action="store_true",
-                        help="require orderly stop with the disposable qualification initramfs")
+    qualification = parser.add_mutually_exclusive_group()
+    qualification.add_argument("--nested-guest-shutdown", action="store_true",
+                               help="require orderly stop with the disposable qualification initramfs")
+    qualification.add_argument("--nested-guest-capture", action="store_true",
+                               help="require a stopped capture and restart with the disposable qualification initramfs")
     parser.add_argument("--wrong-runtime", type=Path, help="unselected runtime for a Guest rejection test")
     parser.add_argument("--workload", action="store_true", help="qualify workload activation with approved.raw and tampered.raw")
     parser.add_argument("--stalwart-lifecycle", action="store_true", help="check the disposable Stalwart lifecycle fixture")
@@ -434,8 +457,8 @@ if __name__ == "__main__":
         parser.error("--replacement-disk requires the Hypervisor development passphrase test")
     if args.nested_guest is not None and (args.guest or any(tpm_options) or args.replacement_disk is not None):
         parser.error("--nested-guest requires the Hypervisor development passphrase test")
-    if args.nested_guest_shutdown and args.nested_guest is None:
-        parser.error("--nested-guest-shutdown requires --nested-guest")
+    if (args.nested_guest_shutdown or args.nested_guest_capture) and args.nested_guest is None:
+        parser.error("nested Guest qualification requires --nested-guest")
     try:
         if args.tpm_state is not None:
             check_tpm(args)

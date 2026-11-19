@@ -1,0 +1,23 @@
+[Unit]
+Description=Qualify stopped capture and restart of the disposable Guest
+After=fvca-base-ready.service
+OnFailure=emergency.target
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+TimeoutStartSec=240s
+NoNewPrivileges=yes
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/bin/systemctl start fvca-capture-stopped@ff6b9317-4240-4635-a6d9-94e557cb83c8.service
+ExecStart=/usr/bin/systemctl --quiet is-active fvca-service-guest.service
+ExecStart=/usr/bin/test -s /run/fvca/host-data/captures/sets/ff6b9317-4240-4635-a6d9-94e557cb83c8/manifest
+ExecStart=/usr/bin/test -s /run/fvca/host-data/captures/sets/ff6b9317-4240-4635-a6d9-94e557cb83c8/snapshot/data.raw
+ExecStart=/usr/bin/rm /run/fvca/host-data/captures/sets/ff6b9317-4240-4635-a6d9-94e557cb83c8/manifest
+ExecStart=/usr/bin/systemctl start fvca-capture-stopped@ff6b9317-4240-4635-a6d9-94e557cb83c8.service
+ExecStart=/usr/bin/systemctl stop fvca-service-guest.service
+ExecStart=/usr/bin/systemctl start fvca-capture-stopped@a51a4aa4-20c3-437c-af18-3ebae71123fc.service
+ExecStart=/usr/bin/test -s /run/fvca/host-data/captures/sets/a51a4aa4-20c3-437c-af18-3ebae71123fc/manifest
+ExecStart=/usr/bin/test ! -e /run/fvca/guest-state.raw
+ExecStart=/usr/bin/echo FVCA_STOPPED_CAPTURE_VERIFIED

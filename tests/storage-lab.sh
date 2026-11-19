@@ -3,13 +3,13 @@
 set -euo pipefail
 umask 077
 
-if [[ $# -lt 1 || $# -gt 2 || "$1" == *,* ]]; then
-    echo 'Usage: tests/storage-lab.sh NEW_OUTPUT_DIRECTORY [GUEST_SEED_DISK]' >&2
+if [[ $# -lt 1 || $# -gt 3 || "$1" == *,* ]]; then
+    echo 'Usage: tests/storage-lab.sh NEW_OUTPUT_DIRECTORY [GUEST_SEED_DISK [MIRROR_MEMBER_BYTES]]' >&2
     exit 2
 fi
 guest_seed=
-member_size=384M
-if [[ $# == 2 ]]; then
+member_size=$((384 * 1024 * 1024))
+if [[ $# -ge 2 ]]; then
     guest_seed=$(realpath -e -- "$2")
     if [[ ! -f "$guest_seed" || "$guest_seed" == *,* ]]; then
         echo 'The Guest seed must be a regular disk image with a comma-free path' >&2
@@ -21,7 +21,14 @@ if [[ $# == 2 ]]; then
         exit 2
     fi
     # Leave the same Btrfs repair headroom as the empty fixture.
-    member_size=$((seed_bytes + 384 * 1024 * 1024))
+    member_size=$((seed_bytes + member_size))
+fi
+if [[ $# == 3 ]]; then
+    if [[ ! "$3" =~ ^[1-9][0-9]{0,11}$ ]] || (( $3 < member_size || $3 % 512 != 0 )); then
+        echo 'Mirror member size must be sector-aligned bytes with enough headroom for the Guest seed' >&2
+        exit 2
+    fi
+    member_size=$3
 fi
 tests=$(cd -- "$(dirname -- "$0")" && pwd)
 mkdir -- "$1"

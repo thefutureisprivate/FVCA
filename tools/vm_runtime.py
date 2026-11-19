@@ -32,6 +32,7 @@ REQUIRED_FILES = {
     Path("usr/libexec/fvca/qualify-libvirt"),
     Path("usr/libexec/fvca/launch-guest"),
     Path("usr/lib/systemd/system/fvca-service-guest.service"),
+    Path("usr/lib/systemd/system/fvca-capture-stopped@.service"),
     Path("usr/libexec/libvirt_iohelper"),
     Path("usr/lib64/libvirt/connection-driver/libvirt_driver_qemu.so"),
     Path("usr/lib64/libvirt/lock-driver/lockd.so"),

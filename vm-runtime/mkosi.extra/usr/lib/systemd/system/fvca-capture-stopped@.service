@@ -1,0 +1,17 @@
+[Unit]
+Description=Capture the stopped FVCA Service Guest as %i
+Requires=fvca-virtqemud.service
+After=fvca-virtqemud.service
+AssertPathExists=/run/fvca/guest-launch
+AssertSecurity=selinux
+AssertSecurity=uefi-secureboot
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/libexec/fvca/launch-guest --capture-stopped %i
+TimeoutStartSec=1h
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+StandardOutput=journal+console
+StandardError=journal+console

@@ -1,2 +1,13 @@
 ; Unseal the explicitly selected LUKS2 token in the confined cryptsetup domain.
 (allow lvm_t tpm_device_t (chr_file (getattr open read write ioctl)))
+
+; Use a confined default on the verified Host pool. Existing file xattrs,
+; including the dynamic sVirt label on the bound raw disk, retain their effect.
+(type fvca_host_data_t)
+(typeattributeset file_type (fvca_host_data_t))
+(roletype object_r fvca_host_data_t)
+(allow init_t fs_t (filesystem (relabelfrom)))
+(allow fvca_host_data_t fs_t (filesystem (associate)))
+(allow init_t fvca_host_data_t (dir (add_name create getattr ioctl open read remove_name search setattr write)))
+(allow init_t fvca_host_data_t (file (create getattr ioctl lock open read relabelfrom relabelto rename setattr unlink write)))
+(allow init_t virt_image_t (file (relabelfrom relabelto)))
