@@ -1,0 +1,46 @@
+# Fedora Verified Compute Appliance
+
+The first implementation milestone is a shared x86-64 development boot image for the VM-only Hypervisor and OCI Service Guest described in FVCA design v0.4.3. The Fedora 45 mkosi build produces a disk with a signed Unified Kernel Image (UKI), a read-only EROFS root, a dm-verity hash tree, and a detached root hash signature in its own GPT partition. The signed UKI embeds the expected root hash. Systemd uses that hash to activate the root at boot. The off-node verifier also validates the detached signature against a supplied certificate.
+
+The image uses a boot-status target and volatile `/var`. It disables automatic extension and additional GPT partition discovery. The current development image includes Fedora package dependencies such as Bash. Shell-free images, strict W^X and executable provenance, SELinux policy, hardened_malloc, TPM attestation, release authorization, role runtimes and persistent storage are pending implementation or qualification.
+
+The design draws on AOS's use of signed UKIs and integrity-protected disk images. [Amutable Foundations technical overview](https://amutable.com/blog/amutable-foundations-technical-overview)
+
+## Build and verify
+
+Use a Fedora 45 x86-64 build machine or disposable VM. Install `mkosi`, `mkosi-system-deps`, `systemd-ukify`, `sbsigntools`, `mtools`, `openssl`, `util-linux-core`, and `veritysetup` on the builder. The development recipe uses the Fedora release and updates repositories with RPM signature verification. The two package manifests record the resolved packages. Release builds will need pinned package inputs.
+
+```sh
+umask 077
+mkosi genkey  # First build only. Keep mkosi.key private.
+mkosi build
+(cd build && sha256sum -c fvca-dev-base.SHA256SUMS)
+python3 tools/verify-base.py build/fvca-dev-base.raw mkosi.crt
+```
+
+The default development certificate serves both signing purposes. Where separate keys are configured in mkosi, pass the matching root-signing certificate with `--verity-certificate`. The verifier reads the UKI and all integrity metadata from the actual disk image. The disk, split UKI, root hash and package manifests are in `build/`.
+
+## Boot in QEMU
+
+Install `qemu-system-x86-core`, `edk2-ovmf`, and `python3-virt-firmware`. Enroll the development certificate in a disposable OVMF variable store and start the image with disk snapshots and no network adapter. Use `-accel tcg -cpu max` if KVM is unavailable.
+
+```sh
+ovmf=/usr/share/edk2/ovmf
+owner=a5c059a1-94e4-4aa7-87b5-ab155c2bf072
+virt-fw-vars --input "$ovmf/OVMF_VARS.fd" --output build/fvca-vars.fd \
+  --secure-boot --set-pk "$owner" mkosi.crt --add-kek "$owner" mkosi.crt \
+  --add-db "$owner" mkosi.crt
+
+qemu-system-x86_64 -machine q35,smm=on -accel kvm -cpu host -m 2048 \
+  -global driver=cfi.pflash01,property=secure,value=on \
+  -drive if=pflash,format=raw,readonly=on,file="$ovmf/OVMF_CODE.secboot.fd" \
+  -drive if=pflash,format=raw,snapshot=on,file=build/fvca-vars.fd \
+  -drive if=virtio,format=raw,snapshot=on,file=build/fvca-dev-base.raw \
+  -nographic -nic none -no-reboot
+```
+
+The serial console prints `FVCA_DEV_BASE_READY` after systemd confirms UEFI Secure Boot is enabled and `/` is EROFS mounted read-only through `/dev/mapper/root`. Press Ctrl+A, then X to exit QEMU.
+
+## Open Build Service
+
+[`obs/project.conf`](obs/project.conf) is the starting configuration for a dedicated native mkosi image repository. OBS still needs a verified worker package set, a source service pinned to a reviewed Git revision, and a staging-signing configuration. Keep production signing separate from OBS candidate builds. The local build uses development keys and keeps them outside Git. [OBS mkosi build documentation](https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-package-formats#sec-obs-mkosi)
