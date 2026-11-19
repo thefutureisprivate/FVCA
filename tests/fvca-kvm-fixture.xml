@@ -1,0 +1,25 @@
+<domain type='kvm'>
+  <name>fvca-qualification</name>
+  <memory unit='MiB'>256</memory>
+  <vcpu placement='static'>1</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-q35-11.1'>hvm</type>
+    <loader readonly='yes' secure='yes' type='pflash'>/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd</loader>
+    <nvram template='/usr/share/edk2/ovmf/OVMF_VARS.fd'>/var/lib/libvirt/qemu/nvram/fvca-qualification.fd</nvram>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+    <smm state='on'/>
+  </features>
+  <cpu mode='host-passthrough' migratable='off'>
+    <feature policy='disable' name='vmx'/>
+  </cpu>
+  <seclabel type='dynamic' model='selinux' relabel='yes'/>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <controller type='usb' model='none'/>
+    <video><model type='none'/></video>
+    <memballoon model='none'/>
+  </devices>
+</domain>

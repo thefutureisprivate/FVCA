@@ -1,0 +1,4 @@
+; Preserve Fedora's confined transitions when the Hypervisor uses no-new-privileges.
+(allow init_t virtqemud_t (process2 (nnp_transition)))
+(allow init_t virtlogd_t (process2 (nnp_transition)))
+(allow virtqemud_t svirt_t (process2 (nnp_transition)))

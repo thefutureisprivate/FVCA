@@ -1,0 +1,8 @@
+[Unit]
+Description=FVCA private libvirt QEMU socket
+
+[Socket]
+ListenStream=/run/libvirt/virtqemud-sock
+FileDescriptorName=virtqemud.socket
+SocketMode=0600
+RemoveOnStop=yes

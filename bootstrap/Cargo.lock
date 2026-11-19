@@ -11,4 +11,9 @@ name = "fvca-initrd-bootstrap"
 version = "0.1.0"
 dependencies = [
  "fvca-allocator-binding",
+ "fvca-libvirt-boundary",
 ]
+
+[[package]]
+name = "fvca-libvirt-boundary"
+version = "0.1.0"

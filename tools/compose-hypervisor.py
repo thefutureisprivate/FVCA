@@ -14,7 +14,8 @@ from vm_runtime_image import verify as verify_vm_runtime
 TOOLS = Path(__file__).resolve().parent
 PARTITIONS = {"esp": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", **VERITY_PARTITIONS}
 BOOT_EFI = "::/EFI/BOOT/BOOTX64.EFI"
-DISCOVERY_DISABLED = (
+ROLE_BOOT_OPTIONS = (
+    "kvm_intel.nested=0",
     "rd.systemd.sysext=no", "rd.systemd.confext=no", "systemd.sysext=no", "systemd.confext=no",
     "rd.systemd.mask=systemd-sysext.socket", "rd.systemd.mask=systemd-confext.socket",
     "systemd.mask=systemd-sysext.socket", "systemd.mask=systemd-confext.socket",
@@ -104,7 +105,7 @@ def assemble(args, work):
     uki = work / "hypervisor.efi"
     run("ukify", "build", "--config=/dev/null", f"--linux={work / 'linux'}",
         f"--os-release=@{work / 'osrel'}", f"--uname={uname}",
-        f"--cmdline={cmdline} {' '.join(DISCOVERY_DISABLED)}",
+        f"--cmdline={cmdline} {' '.join(ROLE_BOOT_OPTIONS)}",
         f"--initrd={args.initrd}", f"--initrd={composition}",
         f"--secureboot-private-key={args.boot_key}", f"--secureboot-certificate={args.boot_certificate}",
         "--no-sign-kernel", f"--output={uki}")

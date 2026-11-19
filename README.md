@@ -62,12 +62,13 @@ Use the same QEMU command with `build/exec-check/fvca-dev-exec-check.raw` as the
 
 ## Hypervisor runtime candidate
 
-The separate mkosi recipe builds `vm-runtime.raw`, a signed EROFS system extension. It contains QEMU, the modular libvirt QEMU, log and lock daemons, the selected OVMF firmware and restic. The build strips Fedora's automatic service hooks and management commands before signing, records the exact core root hash in the extension and checks the shared package versions. Automatic extension discovery is disabled on the development base.
+The separate mkosi recipe builds `vm-runtime.raw`, a signed EROFS system extension. It contains QEMU, the modular libvirt QEMU, log and lock daemons, the selected OVMF firmware and restic. The VMM is built offline from the pinned upstream QEMU release and the build checks that KVM is its only accelerator. The development appliance uses private UNIX sockets for libvirt and requires SELinux confinement for QEMU processes. The build strips Fedora's automatic service hooks and management commands before signing, records the exact core root hash in the extension and checks the shared package versions. [QEMU release archive and signing key](https://www.qemu.org/download/)
 
 Prepare a fresh base input from the verified development disk, and use a separate development certificate for the runtime. Keep the private key in the ignored build directory.
 
 ```sh
 umask 077
+./tools/fetch-qemu.sh
 python3 tools/verify-base.py build/fvca-dev-base.raw mkosi.crt \
   --extract-root build/vm-runtime-base
 openssl req -x509 -newkey rsa:3072 -noenc -days 365 \
@@ -95,4 +96,6 @@ python3 tools/compose-hypervisor.py \
   --output build/hypervisor-profile/fvca-dev-hypervisor.raw
 ```
 
-Use the QEMU command above with `build/hypervisor-profile/fvca-dev-hypervisor.raw` as the boot disk. Pass the runtime as a second drive with `-drive if=virtio,format=raw,readonly=on,file=build/vm-runtime/vm-runtime.raw`. The initramfs activates the selected signed verity mapping and mounts an overlay made from two read-only layers before switch-root. Readiness requires `qemu-img` to execute from the composed `/usr` after systemd closes the initramfs trust window. The confined libvirt VM lifecycle, encrypted mirrored storage, and production release authorization still need qualification.
+Use the QEMU command above with `build/hypervisor-profile/fvca-dev-hypervisor.raw` as the boot disk. Pass the runtime as a second drive with `-drive if=virtio,format=raw,readonly=on,file=build/vm-runtime/vm-runtime.raw`. Use Intel KVM with VMX exposed to the appliance for this test. The appliance disables nested virtualization for its own guests. The initramfs activates the selected signed verity mapping and mounts an overlay made from two read-only layers before switch-root.
+
+The readiness probe runs `qemu-img` from the composed `/usr` and exercises a diskless, networkless q35 VM through the private libvirt socket. It requires an sVirt MCS label, the dedicated QEMU UID, seccomp, no-new-privileges, zero effective capabilities, and a private mount namespace. The console prints `FVCA_LIBVIRT_LIFECYCLE_OK` after the VM starts, suspends, resumes, and stops. Booting a signed Service Guest, encrypted mirrored storage, and production release authorization remain separate qualification targets.

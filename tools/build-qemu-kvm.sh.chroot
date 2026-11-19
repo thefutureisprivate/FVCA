@@ -1,0 +1,47 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+source "$SRCDIR/tools/qemu-source.env"
+archive="$SRCDIR/build/qemu-source/qemu-$qemu_version.tar.xz"
+printf '%s  %s\n' "$qemu_sha256" "$archive" | sha256sum --check --strict
+
+work="$(mktemp -d)"
+trap 'rm -rf -- "$work"' EXIT
+tar --extract --file "$archive" --directory "$work"
+mkdir "$work/build"
+cd "$work/build"
+
+PKG_CONFIG=/usr/bin/pkgconf "../qemu-$qemu_version/configure" \
+    --prefix=/usr \
+    --sysconfdir=/etc \
+    --libdir=/usr/lib64 \
+    --firmwarepath=/usr/share/qemu:/usr/share/seavgabios \
+    --with-pkgversion=FVCA \
+    --target-list=x86_64-softmmu \
+    --without-default-features \
+    --disable-docs \
+    --disable-download \
+    --disable-tcg \
+    --disable-tools \
+    --enable-kvm \
+    --enable-pie \
+    --enable-pixman \
+    --enable-seccomp \
+    --enable-slirp \
+    --disable-slirp-smbd \
+    --enable-werror \
+    --extra-cflags='-fstack-protector-strong -D_FORTIFY_SOURCE=3 -fstack-clash-protection -fcf-protection=full' \
+    --extra-ldflags='-Wl,-z,relro,-z,now,-z,noexecstack'
+make -j "$(nproc)" qemu-system-x86_64
+
+accelerators="$(./qemu-system-x86_64 -accel help | sed '1d')"
+if [[ "$accelerators" != kvm ]]; then
+    printf 'Expected only KVM acceleration, got %s\n' "$accelerators" >&2
+    exit 1
+fi
+
+install -Dm755 qemu-system-x86_64 "${DESTDIR}/usr/bin/qemu-system-x86_64"
+strip --strip-unneeded "${DESTDIR}/usr/bin/qemu-system-x86_64"
+install -Dm644 "../qemu-$qemu_version/pc-bios/kvmvapic.bin" "$DESTDIR/usr/share/qemu/kvmvapic.bin"
+install -Dm644 "../qemu-$qemu_version/COPYING" "$DESTDIR/usr/share/licenses/fvca-qemu/COPYING"
+install -Dm644 "../qemu-$qemu_version/COPYING.LIB" "$DESTDIR/usr/share/licenses/fvca-qemu/COPYING.LIB"

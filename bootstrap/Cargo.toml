@@ -7,6 +7,14 @@ publish = false
 
 [dependencies]
 fvca-allocator-binding = { path = "allocator-binding" }
+fvca-libvirt-boundary = { path = "libvirt-boundary", optional = true }
+
+[features]
+libvirt = ["dep:fvca-libvirt-boundary"]
+
+[[bin]]
+name = "fvca-qualify-libvirt"
+required-features = ["libvirt"]
 
 [profile.release]
 panic = "abort"

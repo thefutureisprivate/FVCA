@@ -116,6 +116,11 @@ fn install_development_probe() -> io::Result<()> {
 
 fn activate() -> io::Result<()> {
     fvca_allocator_binding::require_allocator()?;
+    if fs::read_to_string("/sys/module/kvm_intel/parameters/nested")?.trim_end() != "N"
+        || !fs::metadata("/dev/kvm")?.file_type().is_char_device()
+    {
+        return Err(invalid("Intel KVM must be available with nested virtualization disabled"));
+    }
     let manifest = fs::read_to_string(COMPOSITION)?;
     let (core_hash, runtime_hash) = composition(&manifest)?;
     require_core(&fs::read_to_string("/proc/cmdline")?, core_hash)?;

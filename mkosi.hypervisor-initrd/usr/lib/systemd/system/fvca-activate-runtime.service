@@ -8,6 +8,7 @@ AssertSecurity=selinux
 
 [Service]
 Type=oneshot
+ExecStartPre=/usr/bin/modprobe --ignore-install kvm_intel nested=0
 ExecStart=/usr/lib/fvca/activate-runtime
 RemainAfterExit=yes
 TimeoutStartSec=30s

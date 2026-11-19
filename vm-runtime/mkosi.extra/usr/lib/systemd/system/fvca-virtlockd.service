@@ -1,0 +1,17 @@
+[Unit]
+Description=FVCA libvirt lock driver
+BindsTo=fvca-virtlockd.socket
+After=fvca-virtlockd.socket
+AssertSecurity=selinux
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/virtlockd
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=full
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native

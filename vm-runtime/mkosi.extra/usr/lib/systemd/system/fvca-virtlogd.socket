@@ -1,0 +1,8 @@
+[Unit]
+Description=FVCA private libvirt log socket
+
+[Socket]
+ListenStream=/run/libvirt/virtlogd-sock
+FileDescriptorName=virtlogd.socket
+SocketMode=0600
+RemoveOnStop=yes

@@ -1,0 +1,17 @@
+[Unit]
+Description=FVCA libvirt log driver
+BindsTo=fvca-virtlogd.socket
+After=fvca-virtlogd.socket
+AssertSecurity=selinux
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/virtlogd
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=full
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native

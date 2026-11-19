@@ -3,4 +3,5 @@ set -euo pipefail
 
 # The kernel can be newer than the Fedora policy's class and permission definitions.
 printf '\nhandle-unknown = deny\n' >> /etc/selinux/semanage.conf
-semodule -n -X 400 -i "$SRCDIR/policy/selinux/fvca_initrd.cil"
+semodule -n -X 400 -i "$SRCDIR/policy/selinux/fvca_initrd.cil" \
+    -i "$SRCDIR/policy/selinux/fvca_libvirt.cil"

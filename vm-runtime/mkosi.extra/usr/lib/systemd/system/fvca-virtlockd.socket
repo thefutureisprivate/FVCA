@@ -1,0 +1,8 @@
+[Unit]
+Description=FVCA private libvirt lock socket
+
+[Socket]
+ListenStream=/run/libvirt/virtlockd-sock
+FileDescriptorName=virtlockd.socket
+SocketMode=0600
+RemoveOnStop=yes

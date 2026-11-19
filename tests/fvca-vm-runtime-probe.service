@@ -1,5 +1,7 @@
 [Unit]
 Description=Verify Hypervisor runtime execution after switch-root
+Requires=fvca-virtqemud.service fvca-virtlogd.service fvca-virtlockd.service
+After=fvca-virtqemud.service fvca-virtlogd.service fvca-virtlockd.service
 Before=fvca-base-ready.service
 OnFailure=emergency.target
 
@@ -7,6 +9,7 @@ OnFailure=emergency.target
 Type=oneshot
 ExecStart=/usr/bin/findmnt --mountpoint /usr --source fvca-vm-runtime --types overlay --options ro,nodev
 ExecStart=/usr/bin/qemu-img --version
+ExecStart=/usr/libexec/fvca/qualify-libvirt
 ExecStart=/usr/bin/echo FVCA_VM_RUNTIME_EXEC_OK
 StandardOutput=journal+console
 NoNewPrivileges=yes

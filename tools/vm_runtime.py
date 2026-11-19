@@ -12,12 +12,22 @@ import sys
 EXECUTABLES = (
     "qemu-img", "qemu-system-x86_64", "restic", "virtlockd", "virtlogd", "virtqemud",
 )
+LIBVIRT_UNITS = {
+    Path(f"usr/lib/systemd/system/fvca-{daemon}.{kind}")
+    for daemon in ("virtqemud", "virtlogd", "virtlockd")
+    for kind in ("service", "socket")
+}
 BASE_BINDING = Path("usr/share/fvca/vm-runtime-base.roothash")
 EXTENSION_RELEASE = Path("usr/lib/extension-release.d/extension-release.vm-runtime")
 REQUIRED_FILES = {
     *(Path("usr/bin") / name for name in EXECUTABLES),
+    *LIBVIRT_UNITS,
+    Path("usr/lib/tmpfiles.d/fvca-libvirt.conf"),
+    Path("usr/libexec/fvca/qualify-libvirt"),
     Path("usr/libexec/libvirt_iohelper"),
     Path("usr/lib64/libvirt/connection-driver/libvirt_driver_qemu.so"),
+    Path("usr/lib64/libvirt/lock-driver/lockd.so"),
+    Path("usr/share/libvirt/cpu_map/index.xml"),
     Path("usr/share/edk2/ovmf/OVMF_CODE.secboot.fd"),
     Path("usr/share/edk2/ovmf/OVMF_VARS.fd"),
     EXTENSION_RELEASE,
@@ -40,6 +50,7 @@ def allowed(path):
         path in REQUIRED_FILES
         or path in FIRMWARE_DATA
         or path.is_relative_to("usr/share/licenses")
+        or (path.parent == Path("usr/share/libvirt/cpu_map") and path.suffix == ".xml")
         or (
             path.parent == Path("usr/lib64")
             and re.fullmatch(r"lib(?!python|nss_)[\w+.-]+\.so(?:\.[0-9]+)*", path.name) is not None

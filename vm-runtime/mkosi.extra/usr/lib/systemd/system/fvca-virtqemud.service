@@ -1,0 +1,15 @@
+[Unit]
+Description=FVCA libvirt QEMU driver
+BindsTo=fvca-virtqemud.socket fvca-virtlogd.socket fvca-virtlockd.socket
+After=fvca-virtqemud.socket fvca-virtlogd.socket fvca-virtlockd.socket
+AssertSecurity=selinux
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/virtqemud --config /etc/libvirt/virtqemud.conf
+Delegate=yes
+KillMode=mixed
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+LimitMEMLOCK=64M
