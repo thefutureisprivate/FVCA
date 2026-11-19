@@ -1,0 +1,12 @@
+[Unit]
+Description=Test FVCA execution policy
+AssertSecurity=uefi-secureboot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/fvca/exec-check
+RuntimeDirectory=fvca-exec-check
+RuntimeDirectoryMode=0700
+StandardOutput=journal+console
+NoNewPrivileges=yes
+RemainAfterExit=yes

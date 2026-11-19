@@ -43,6 +43,14 @@ qemu-system-x86_64 -machine q35,smm=on -accel kvm -cpu host -m 2048 \
 
 The serial console prints `FVCA_DEV_BASE_READY` after systemd confirms UEFI Secure Boot is enabled and `/` is EROFS mounted read-only through `/dev/mapper/root`. Press Ctrl+A, then X to exit QEMU.
 
+## Exercise the execution policy
+
+```sh
+mkosi --profile=exec-check --output-dir=build/exec-check build
+```
+
+Use the same QEMU command with `build/exec-check/fvca-dev-exec-check.raw` as the boot disk. The development test runs from the verified root after switch-root. It requires permission denials for anonymous RX and RWX mappings, an RW-to-RX transition, and execution of a copied binary from `/run`. The console prints `FVCA_EXEC_CHECK_PASSED` before `FVCA_DEV_BASE_READY` when all checks pass. The probe is built only in the qualification profile.
+
 ## Open Build Service
 
 [`obs/project.conf`](obs/project.conf) is the starting configuration for a dedicated native mkosi image repository. OBS still needs a verified worker package set, a source service pinned to a reviewed Git revision, and a staging-signing configuration. Keep production signing separate from OBS candidate builds. The local build uses development keys and keeps them outside Git. [OBS mkosi build documentation](https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-package-formats#sec-obs-mkosi)
