@@ -1,14 +1,15 @@
 #![forbid(unsafe_code)]
 
 use std::alloc::System;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
-use std::path::PathBuf;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fvca_initrd_bootstrap::{btrfs, find_partition, identity, invalid, sys_block};
+use fvca_initrd_bootstrap::{btrfs, direct_boot, find_partition, identity, invalid, sys_block};
 
 #[global_allocator]
 static ALLOCATOR: System = System;
@@ -51,6 +52,9 @@ fn activate() -> io::Result<()> {
         "[Service]\nExecStartPre=/usr/bin/findmnt --mountpoint {DATA} --source PARTUUID={part} --types btrfs --options rw,nodev,nosuid,noexec\n",
     ))?;
     btrfs::mount(btrfs::Pool::Guest(&source), filesystem, DATA)?;
+    if Path::new(direct_boot::READY_IN_INITRD).try_exists()? {
+        OpenOptions::new().write(true).create_new(true).mode(0o600).open(direct_boot::READY_IN_CORE)?;
+    }
     println!("FVCA_GUEST_DATA_ACTIVE");
     Ok(())
 }

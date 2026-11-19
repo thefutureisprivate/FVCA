@@ -189,6 +189,32 @@ python3 tests/check-storage.py \
 
 The development boot check initializes Podman with crun, VFS and SELinux, runs crun, and renders a fixed Quadlet `Rootfs=` fixture. The integration test requires Btrfs and the selected runtime, and checks rejection of absent and duplicated runtime disks. A separate signed EROFS lab workload exercised start, exec, health checks, restart and stop with an enforcing SELinux container label. Workload admission, network and resource qualification, and Stalwart acceptance remain open. [Podman Quadlet documentation](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html)
 
+## Development Service Guest direct boot
+
+The direct-boot bundle contains the kernel and initramfs extracted from its signed UKI, the exact command line, the fixed KVM machine definition, and the verified core and OCI runtime disks. A separate release authority signs the file digests and both verity root hashes. The supplied machine definition has read-only release disks, one writable raw data disk, and no mutable firmware or vTPM state. [QEMU direct Linux boot](https://www.qemu.org/docs/master/system/linuxboot.html)
+
+The Guest compares its effective kernel command line to the embedded signed copy. Before starting systemd it checks kernel lockdown and module signature enforcement, enrolls the approved verity certificates, seals their keyring, and disables further module loading. The root verity setup uses the verified signature embedded in the initramfs. The KVM lab verifies the release signature and bound files off-node before launch. Hypervisor admission and launch remain separate qualification work.
+
+With the core, OCI runtime and initramfs built as above, use a separate development release key.
+
+```sh
+umask 077
+openssl req -x509 -newkey rsa:3072 -noenc -days 30 \
+  -subj '/CN=FVCA development Guest release/' \
+  -keyout build/guest-release.key -out build/guest-release.crt
+python3 tools/compose-service-guest.py \
+  --core build/service-guest-storage/fvca-dev-service-guest.raw \
+  --runtime build/oci-runtime/oci-runtime.raw \
+  --initrd build/service-guest-runtime-initrd/initrd.cpio.zst \
+  --boot-certificate mkosi.crt --boot-key mkosi.key \
+  --runtime-certificate build/oci-runtime-signing.crt \
+  --release-key build/guest-release.key --release-certificate build/guest-release.crt \
+  --direct-boot build/service-guest-direct
+python3 tests/check-storage.py --guest --direct-boot build/service-guest-direct \
+  --release-certificate build/guest-release.crt --lab build/host-storage-lab \
+  --output build/service-guest-direct-checks
+```
+
 ## Off-node Stalwart workload derivation
 
 The [Stalwart source policy](policy/workloads/stalwart-v1.1.1.json) pins the repository, publisher workflow identity and issuer, signed OCI index, and selected Linux amd64 manifest. It also fixes the expected numeric identity and the two application volume destinations. Derivation verifies the publisher with Cosign v3.1.4, checks descriptor sizes and hashes, and validates the ordered layers and their expanded diff IDs. The rootless worker receives the checked blobs and conversion tools through a private input mount. It unpacks with pinned `umoci` in a network-disabled container and emits an unsigned EROFS image and verity tree. [Sigstore verification](https://docs.sigstore.dev/cosign/verifying/verify/) · [umoci](https://github.com/opencontainers/umoci)

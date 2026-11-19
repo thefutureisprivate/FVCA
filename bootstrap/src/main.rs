@@ -7,7 +7,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{self, Command, ExitCode};
 
-use fvca_initrd_bootstrap::{WORKLOAD_VERITY_CERTIFICATE, invalid, run};
+use fvca_initrd_bootstrap::{WORKLOAD_VERITY_CERTIFICATE, direct_boot, invalid, run};
 
 #[global_allocator]
 static ALLOCATOR: System = System;
@@ -31,17 +31,22 @@ fn label_initramfs() -> io::Result<()> {
 }
 
 fn load_verity() -> io::Result<()> {
-    let ring = match fs::symlink_metadata(WORKLOAD_VERITY_CERTIFICATE) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => "keyring_unsealed=0",
+    let direct = direct_boot::prepare()?;
+    let workload = match fs::symlink_metadata(WORKLOAD_VERITY_CERTIFICATE) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
         Ok(metadata) if metadata.is_file() && (1..=16 * 1024).contains(&metadata.len())
             && Path::new("/usr/lib/fvca/service-guest.composition").is_file()
-            && !Path::new("/usr/lib/fvca/hypervisor.composition").exists() => "keyring_unsealed=1",
+            && !Path::new("/usr/lib/fvca/hypervisor.composition").exists() => true,
         Ok(_) => return Err(invalid("invalid UKI workload certificate or boot role")),
         Err(error) => return Err(error),
     };
-    // PID 1 starts before procfs is mounted. Pass both parameters explicitly.
+    let ring = if direct || workload { "keyring_unsealed=1" } else { "keyring_unsealed=0" };
     run(Command::new("/usr/bin/modprobe")
-        .args(["--ignore-install", "dm_verity", "require_signatures=1", ring]))
+        .args(["--ignore-install", "dm_verity", "require_signatures=1", ring]))?;
+    if direct {
+        direct_boot::activate(workload)?;
+    }
+    Ok(())
 }
 
 fn main() -> ExitCode {

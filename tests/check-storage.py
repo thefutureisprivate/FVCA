@@ -9,6 +9,7 @@ import re
 import selectors
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -18,6 +19,9 @@ FAIL = b"FVCA_BOOT_FAILED"
 ACTIVE = b"FVCA_HOST_STORAGE_ACTIVE"
 HOST_PROFILES = b"FVCA_BTRFS_PROFILES raid1 raid1 raid1"
 GUEST_PROFILES = b"FVCA_BTRFS_PROFILES single dup dup"
+DIRECT_ACTIVE = b"FVCA_DIRECT_BOOT_POLICY_ACTIVE"
+DIRECT_MISMATCH = b"direct-boot kernel command line differs from the signed command line"
+INIT_EXIT = b"Attempted to kill init! exitcode=0x00000100"
 PCR_CONFINED = b"FVCA_SELINUX_PCR_CONFINED"
 PROMPT = re.compile(rb"Please enter (?:the )?passphrase for disk [^\r\n]{1,250}:|Enter FVCA storage TPM PIN:")
 OVMF_CODE = Path("/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd")
@@ -31,19 +35,30 @@ def image(path):
 
 
 def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, extra_cmdline=False,
-         attach_runtime=True, timeout=80):
+         attach_runtime=True, timeout=80, direct_cmdline=None):
     cpu = "host,vmx=off" if args.guest else "host"
     machine = "q35,smm=on"
     devices = []
-    if firmware != OVMF_CODE:
+    bundle = getattr(args, "direct_boot", None)
+    if bundle is None:
+        loader = [
+            "-global", "driver=cfi.pflash01,property=secure,value=on",
+            "-drive", f"if=pflash,format=raw,readonly=on,file={image(firmware)}",
+            "-drive", f"if=pflash,format=raw,snapshot=on,file={image(args.variables)}",
+        ]
+    else:
+        machine = "pc-q35-11.1"
+        loader = [
+            "-kernel", image(bundle / "linux"), "-initrd", image(bundle / "initrd"),
+            "-append", args.direct_cmdline if direct_cmdline is None else direct_cmdline,
+        ]
+    if bundle is None and firmware != OVMF_CODE:
         cpu = "Skylake-Client,vmx=on,hle=off,rtm=off"
         machine += ",kernel_irqchip=split"
         devices = ["-device", "virtio-rng-pci"]
     command = [
         "qemu-system-x86_64", *devices, "-machine", machine, "-accel", "kvm", "-cpu", cpu,
-        "-m", "2048", "-smp", "2", "-global", "driver=cfi.pflash01,property=secure,value=on",
-        "-drive", f"if=pflash,format=raw,readonly=on,file={image(firmware)}",
-        "-drive", f"if=pflash,format=raw,snapshot=on,file={image(args.variables)}",
+        "-m", "2048", "-smp", "2", *loader,
         "-drive", f"if=none,id=fvca-boot,format=raw,readonly=on,file={image(args.disk)}",
         "-device", "virtio-blk-pci,drive=fvca-boot,bootindex=1",
     ]
@@ -106,7 +121,7 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
                         waiting_for_no_echo = False
                         prompt_start = len(output)
                         qemu.stdin.flush()
-                    if READY in output:
+                    if READY in output or (direct_cmdline is not None and (DIRECT_MISMATCH in output or INIT_EXIT in output)):
                         break
                     if not failed_boot and FAIL in output:
                         failed_boot = True
@@ -174,6 +189,8 @@ def check_guest(args):
         b"--rootfs /run/fvca/oci-probe-root",
     )):
         raise ValueError("the signed Guest did not execute its OCI runtime or render the approved Quadlet fixture")
+    if args.direct_boot is not None:
+        check_direct_boot(args, output, data)
     print("guest passed")
 
     for name, disks, reason in (
@@ -202,6 +219,20 @@ def check_guest(args):
         print(f"{name} passed")
 
 
+def check_direct_boot(args, output, data):
+    if DIRECT_ACTIVE not in output or f"FVCA_OCI_RUNTIME_ACTIVE {args.direct_runtime}".encode() not in output:
+        raise ValueError("the verified direct-boot policy and bound runtime did not activate")
+    extra = "fvca.test-extra=1"
+    prompts, output = boot(args, "guest-direct-command-line", None, data, timeout=25,
+                           direct_cmdline=f"{args.direct_cmdline} {extra}")
+    # A failing early PID 1 can panic before its complete stderr line drains.
+    # The unchanged control boot already proved that this exact bundle works.
+    rejected = DIRECT_MISMATCH in output or INIT_EXIT in output
+    if prompts or extra.encode() not in output or not rejected or DIRECT_ACTIVE in output or READY in output:
+        raise ValueError("the direct-boot Guest did not reject the unexpected command line")
+    print("guest-direct-command-line passed")
+
+
 def check_guest_workload(args):
     args.output.mkdir(mode=0o700)
     active = b"FVCA_WORKLOAD_ROOT_ACTIVE"
@@ -217,6 +248,8 @@ def check_guest_workload(args):
         # The kernel and service streams can interleave on the serial console.
         if prompted or not (mount in output or b"FVCA_GUEST_DATA_ACTIVE" in output) or b"FVCA_WORKLOAD_KEYRING_SEALED" not in output:
             raise ValueError(f"{name} did not reach the workload admission boundary")
+        if args.direct_boot is not None and DIRECT_ACTIVE not in output:
+            raise ValueError(f"{name} did not activate the signed direct-boot policy")
         if failure is None:
             if any(marker not in output for marker in (active, b"FVCA_WORKLOAD_STARTED", READY)) or FAIL in output:
                 raise ValueError("the authorized workload did not mount and start in the signed Guest")
@@ -311,8 +344,13 @@ def check_tpm(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    for option in ("disk", "variables", "lab", "output"):
+    for option in ("lab", "output"):
         parser.add_argument(f"--{option}", type=Path, required=True)
+    loader = parser.add_mutually_exclusive_group(required=True)
+    loader.add_argument("--disk", type=Path, help="signed UEFI boot disk")
+    loader.add_argument("--direct-boot", type=Path, help="signed direct-boot bundle to qualify")
+    parser.add_argument("--variables", type=Path, help="UEFI variable store for --disk")
+    parser.add_argument("--release-certificate", type=Path, help="trusted release certificate for --direct-boot")
     role = parser.add_mutually_exclusive_group(required=True)
     role.add_argument("--runtime", type=Path, help="signed Hypervisor runtime")
     role.add_argument("--guest", action="store_true", help="qualify the Service Guest data disk")
@@ -324,6 +362,19 @@ if __name__ == "__main__":
     for option in ("tpm-state", "pin-file", "firmware"):
         parser.add_argument(f"--{option}", type=Path)
     args = parser.parse_args()
+    if args.direct_boot is not None:
+        if not args.guest or args.variables is not None or args.release_certificate is None:
+            parser.error("--direct-boot requires --guest and --release-certificate")
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+        from guest_boot_bundle import verify
+        try:
+            args.direct_cmdline, args.direct_runtime = verify(args.direct_boot, args.release_certificate)
+        except (OSError, ValueError, subprocess.CalledProcessError) as error:
+            parser.exit(1, f"Direct-boot qualification failed before launch: {error}\n")
+        args.disk = args.direct_boot / "core.raw"
+        args.oci_runtime = args.direct_boot / "runtime.raw"
+    elif args.variables is None or args.release_certificate is not None:
+        parser.error("--disk requires --variables")
     if args.wrong_runtime is not None and args.oci_runtime is None:
         parser.error("--wrong-runtime requires --oci-runtime")
     if args.workload and (args.oci_runtime is None or args.wrong_runtime is not None):

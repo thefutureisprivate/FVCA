@@ -11,6 +11,7 @@ import sys
 import tempfile
 
 from image_verity import VERITY_PARTITIONS, read_layout, verify_verity
+from runtime_boot import BASE_ROOT_OPTIONS, DIRECT_ROOT_OPTIONS
 
 
 PARTITIONS = {
@@ -22,11 +23,11 @@ BOOT_OPTIONS = {
     "enforcing": "1",
     "proc_mem.force_override": "never",
     "systemd.restrict_filesystem_access": "exec",
-    "systemd.verity_root_options": "panic-on-corruption,root-hash-signature=auto",
+    "systemd.verity_root_options": BASE_ROOT_OPTIONS,
 }
 
 
-def verify(image, boot_certificate, verity_certificate, work):
+def verify(image, boot_certificate, verity_certificate, work, *, direct_boot=False):
     sector_size, partitions = read_layout(image, PARTITIONS)
     uki = work / "boot.efi"
     esp_offset = partitions["esp"]["start"] * sector_size
@@ -37,7 +38,11 @@ def verify(image, boot_certificate, verity_certificate, work):
         raise ValueError("unexpected UKI profiles")
 
     arguments = [arg.partition("=") for arg in sections[".cmdline"]["text"].split()]
-    for option, expected in BOOT_OPTIONS.items():
+    options = BOOT_OPTIONS
+    if direct_boot:
+        options = {**BOOT_OPTIONS, "systemd.verity_root_options": DIRECT_ROOT_OPTIONS,
+                   "module.sig_enforce": "1", "lockdown": "integrity"}
+    for option, expected in options.items():
         values = [value for name, _, value in arguments if name == option]
         if values != [expected]:
             raise ValueError(f"the signed UKI must specify exactly one {option}={expected}")
@@ -56,6 +61,7 @@ def export_tree(root, root_hash, destination, manifest):
     # The extracted copy is a build input. Labels are assigned when formatting the runtime image.
     subprocess.run(["fsck.erofs", f"--extract={destination / 'root'}", "--preserve-perms", root], check=True)
     (destination / "roothash").write_text(f"{root_hash}\n", encoding="ascii")
+    shutil.copyfile(root.parent / "root.p7s", destination / "root.p7s")
     (destination / "packages.json").write_bytes(package_manifest)
 
 
@@ -65,6 +71,7 @@ def main():
     parser.add_argument("boot_certificate", type=Path)
     parser.add_argument("--verity-certificate", type=Path, help="defaults to the boot certificate")
     parser.add_argument("--extract-root", type=Path, help="prepare a new runtime build input directory")
+    parser.add_argument("--direct-boot", action="store_true", help="verify the signed Service Guest direct-boot options")
     args = parser.parse_args()
     required_tools = ["mcopy", "openssl", "sbverify", "sfdisk", "ukify", "veritysetup"]
     if args.extract_root:
@@ -76,7 +83,8 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix="fvca-verify-") as directory:
             work = Path(directory)
-            root_hash = verify(args.image, args.boot_certificate, args.verity_certificate or args.boot_certificate, work)
+            root_hash = verify(args.image, args.boot_certificate, args.verity_certificate or args.boot_certificate,
+                               work, direct_boot=args.direct_boot)
             if args.extract_root:
                 export_tree(work / "root", root_hash, args.extract_root, args.image.with_suffix(".manifest"))
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:

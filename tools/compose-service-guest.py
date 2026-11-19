@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble a Secure Boot Service Guest with its authorized OCI runtime."""
+"""Assemble a signed Service Guest with its authorized OCI runtime."""
 
 import argparse
 from pathlib import Path
@@ -8,11 +8,14 @@ import subprocess
 import tempfile
 from uuid import UUID
 
+import guest_boot_bundle
 import oci_runtime
 import workload_oci
 from runtime_boot import (
-    DISABLE_AUTOMATIC_EXTENSIONS, WORKLOAD_TRUST_FILES, composition_archive, prepare_core, run, verify_initrd, write_disk,
+    BASE_ROOT_OPTIONS, DIRECT_BOOT_FILES, DIRECT_ROOT_OPTIONS, DISABLE_AUTOMATIC_EXTENSIONS, WORKLOAD_TRUST_FILES,
+    composition_archive, prepare_core, run, verify_initrd, write_disk,
 )
+DIRECT_BOOT_OPTIONS = ("module.sig_enforce=1", "lockdown=integrity")
 from runtime_image import verify as verify_runtime
 
 
@@ -34,7 +37,7 @@ ACTIVATION_FILES = (
 )
 FORBIDDEN = tuple(f"usr/lib/fvca/{name}" for name in (
     "activate-runtime", "hypervisor.composition", "host-storage", "vm-runtime.p7s",
-    "service-guest.composition", "oci-runtime.p7s", *WORKLOAD_TRUST_FILES,
+    "service-guest.composition", "oci-runtime.p7s", *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES,
 ))
 
 
@@ -73,36 +76,70 @@ def workload_trust(args, boot_public, runtime_public):
 
 
 def assemble(args, work):
-    boot_key = run("openssl", "x509", "-in", args.boot_certificate, "-pubkey", "-noout", capture_output=True).stdout
-    runtime_key = run("openssl", "x509", "-in", args.runtime_certificate, "-pubkey", "-noout", capture_output=True).stdout
+    boot_key = guest_boot_bundle.public_key(args.boot_certificate)
+    runtime_key = guest_boot_bundle.public_key(args.runtime_certificate)
     if boot_key == runtime_key:
         raise ValueError("Secure Boot and the OCI runtime require separate signing keys")
     trust = workload_trust(args, boot_key, runtime_key)
+    if args.direct_boot is not None:
+        guest_boot_bundle.require_authority(args.release_certificate, args.deployment_certificate,
+                                            args.workload_certificate, boot_key, runtime_key)
 
     prepared, core_hash, offset, cmdline, uname = prepare_core(args, work)
     verify_initrd(args.initrd, uname, ACTIVATION_FILES, FORBIDDEN, "Service Guest")
     runtime_work = work / "runtime"
     runtime_work.mkdir()
-    runtime_hash = verify_runtime(args.runtime, args.runtime_certificate, prepared, runtime_work, oci_runtime)
+    runtime_image = args.runtime
+    if args.direct_boot is not None:
+        runtime_image = runtime_work / "runtime.raw"
+        run("cp", "--reflink=auto", "--sparse=always", "--", args.runtime, runtime_image)
+    runtime_hash = verify_runtime(runtime_image, args.runtime_certificate, prepared, runtime_work, oci_runtime)
+    cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS))
+    if args.direct_boot:
+        parts = cmdline.split(" ")
+        root_option = parts.index(f"systemd.verity_root_options={BASE_ROOT_OPTIONS}")
+        parts[root_option] = f"systemd.verity_root_options={DIRECT_ROOT_OPTIONS}"
+        cmdline = " ".join(parts)
+        cmdline = " ".join((cmdline, *DIRECT_BOOT_OPTIONS))
+        certificate = run("openssl", "x509", "-in", args.boot_certificate, "-outform", "DER",
+                          capture_output=True).stdout
+        trust += (
+            ("direct-boot.cmdline", (cmdline + "\n").encode("ascii")),
+            ("direct-verity.der", certificate),
+            ("direct-root.p7s", (prepared / "root.p7s").read_bytes()),
+        )
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "service-guest", oci_runtime.IMAGE_ID,
         extra=trust,
     )
-    write_disk(args, work, offset, cmdline, uname, composition, ROLE_BOOT_OPTIONS)
+    disk, uki = write_disk(args, work, offset, cmdline, uname, composition, direct_boot=args.direct_boot is not None)
+    if args.direct_boot is None:
+        args.output.hardlink_to(disk)
+    else:
+        guest_boot_bundle.publish(args, work, disk, uki, runtime_image, cmdline, core_hash, runtime_hash)
     print(f"FVCA Service Guest development disk binds core {core_hash} to OCI runtime {runtime_hash}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("core", "runtime", "initrd", "boot-certificate", "boot-key", "runtime-certificate", "output"):
+    for name in ("core", "runtime", "initrd", "boot-certificate", "boot-key", "runtime-certificate"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute(), required=True)
     for name in ("workload-policy", "deployment-certificate", "workload-certificate"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute())
+    output = parser.add_mutually_exclusive_group(required=True)
+    output.add_argument("--output", type=lambda value: Path(value).absolute(), help="UEFI Secure Boot disk")
+    output.add_argument("--direct-boot", type=lambda value: Path(value).absolute(), help="new directory for the direct-boot bundle")
+    for name in ("release-key", "release-certificate"):
+        parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute())
     args = parser.parse_args()
-    if args.output.exists():
-        parser.error("output disk already exists")
+    destination = args.direct_boot if args.direct_boot is not None else args.output
+    if any((value is not None) != (args.direct_boot is not None) for value in
+           (args.release_key, args.release_certificate)):
+        parser.error("direct boot requires a separate release key and certificate")
+    if destination.exists():
+        parser.error("output already exists")
     try:
-        with tempfile.TemporaryDirectory(prefix=".fvca-service-guest-", dir=args.output.parent) as directory:
+        with tempfile.TemporaryDirectory(prefix=".fvca-service-guest-", dir=destination.parent) as directory:
             assemble(args, Path(directory))
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"FVCA Service Guest composition failed: {error}\n")

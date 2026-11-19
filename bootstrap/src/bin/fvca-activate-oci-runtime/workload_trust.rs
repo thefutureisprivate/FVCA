@@ -4,7 +4,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 use std::process::Command;
 
-use fvca_initrd_bootstrap::{WORKLOAD_VERITY_CERTIFICATE, invalid, run};
+use fvca_initrd_bootstrap::{WORKLOAD_VERITY_CERTIFICATE, direct_boot, invalid, run};
 
 const SOURCE: &str = "/usr/lib/fvca";
 const DESTINATION: &str = "/run/fvca/workload-trust";
@@ -27,13 +27,15 @@ pub fn enroll() -> io::Result<()> {
         return Err(invalid("unexpected kernel workload keyring configuration"));
     }
 
-    let added = run(Command::new("/usr/bin/keyctl")
-        .args(["padd", "asymmetric", "", RING])
-        .stdin(certificate));
-    let sealed = run(Command::new("/usr/bin/keyctl").args(["restrict_keyring", RING]));
-    added?;
-    sealed?;
-    run(Command::new("/usr/bin/modprobe").args(["--ignore-install", "loop"]))?;
+    if !Path::new(direct_boot::READY_IN_INITRD).try_exists()? {
+        let added = run(Command::new("/usr/bin/keyctl")
+            .args(["padd", "asymmetric", "", RING])
+            .stdin(certificate));
+        let sealed = run(Command::new("/usr/bin/keyctl").args(["restrict_keyring", RING]));
+        added?;
+        sealed?;
+        run(Command::new("/usr/bin/modprobe").args(["--ignore-install", "loop"]))?;
+    }
 
     let destination = Path::new(DESTINATION);
     fs::DirBuilder::new().mode(0o700).create(destination)?;

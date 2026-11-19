@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub mod btrfs;
+pub mod direct_boot;
 pub mod runtime;
 
 pub const WORKLOAD_VERITY_CERTIFICATE: &str = "/usr/lib/fvca/workload-verity.der";

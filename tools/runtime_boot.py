@@ -16,6 +16,9 @@ DISABLE_AUTOMATIC_EXTENSIONS = (
     "systemd.mask=systemd-sysext.socket", "systemd.mask=systemd-confext.socket",
 )
 WORKLOAD_TRUST_FILES = ("workload-policy.json", "workload-deployment.der", "workload-verity.der")
+BASE_ROOT_OPTIONS = "panic-on-corruption,root-hash-signature=auto"
+DIRECT_ROOT_OPTIONS = "panic-on-corruption,root-hash-signature=/usr/lib/fvca/direct-root.p7s"
+DIRECT_BOOT_FILES = ("direct-boot.cmdline", "direct-verity.der", "direct-root.p7s", "direct-boot-ready")
 
 
 def run(*args, **kwargs):
@@ -88,11 +91,11 @@ def prepare_core(args, work):
     return prepared, core_hash, offset, cmdline, uname
 
 
-def write_disk(args, work, offset, cmdline, uname, composition, boot_options, *, uki_options=()):
+def write_disk(args, work, offset, cmdline, uname, composition, *, uki_options=(), direct_boot=False):
     uki = work / "composed.efi"
     run("ukify", "build", "--config=/dev/null", f"--linux={work / 'linux'}",
         f"--os-release=@{work / 'osrel'}", f"--uname={uname}",
-        f"--cmdline={cmdline} {' '.join(boot_options)}",
+        f"--cmdline={cmdline}",
         f"--initrd={args.initrd}", f"--initrd={composition}",
         f"--secureboot-private-key={args.boot_key}", f"--secureboot-certificate={args.boot_certificate}",
         *uki_options, "--no-sign-kernel", f"--output={uki}")
@@ -101,6 +104,6 @@ def write_disk(args, work, offset, cmdline, uname, composition, boot_options, *,
     run("cp", "--reflink=auto", "--sparse=always", "--", args.core, disk)
     run("mdel", "-i", f"{disk}@@{offset}", BOOT_EFI)
     run("mcopy", "-i", f"{disk}@@{offset}", uki, BOOT_EFI)
-    run("python3", TOOLS / "verify-base.py", disk, args.boot_certificate)
-    # Hard-link into the output location so a concurrent writer cannot be overwritten.
-    args.output.hardlink_to(disk)
+    verify_options = ("--direct-boot",) if direct_boot else ()
+    run("python3", TOOLS / "verify-base.py", disk, args.boot_certificate, *verify_options)
+    return disk, uki

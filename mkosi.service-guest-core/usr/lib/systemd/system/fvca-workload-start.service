@@ -1,7 +1,8 @@
 [Unit]
 Description=Start the authorized Service Guest workload
 ConditionPathIsDirectory=/run/fvca/workload-trust
-AssertSecurity=uefi-secureboot
+AssertSecurity=|uefi-secureboot
+AssertPathExists=|/run/fvca/direct-boot-ready
 AssertSecurity=selinux
 Requires=fvca-workload-root.service
 After=fvca-workload-root.service
