@@ -35,16 +35,21 @@ def storage_selection(path):
     content = path.read_bytes()
     uuid = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
     match = re.fullmatch(
-        rf"FVCA-HOST-STORAGE-2\nunlock=(development-passphrase|tpm2-pin)\n"
-        rf"member_a=({uuid})\nmember_b=({uuid})\n"
-        rf"raid=(?:[0-9a-f]{{8}}:){{3}}[0-9a-f]{{8}}\n"
-        rf"luks={uuid}\nfilesystem=btrfs\nfilesystem_uuid={uuid}\n"
-        rf"(token=(?:[0-9]|[12][0-9]|3[01]),[0-9a-f]{{64}}\n)?",
+        rf"FVCA-HOST-STORAGE-3\nunlock=(development-passphrase|tpm2-pin)\n"
+        rf"member_a=({uuid}),({uuid})\nmember_b=({uuid}),({uuid})\n"
+        rf"filesystem=btrfs\nfilesystem_uuid={uuid}\n"
+        r"(?:token_a=(?:[0-9]|[12][0-9]|3[01]),([0-9a-f]{64})\n"
+        r"token_b=(?:[0-9]|[12][0-9]|3[01]),([0-9a-f]{64})\n)?",
         content.decode("ascii"),
     )
-    if match is None or match[2] == match[3] or (match[1] == "tpm2-pin") != (match[4] is not None):
+    if match is None:
         raise ValueError("invalid Hypervisor storage selection")
-    return content
+    unlock, partition_a, luks_a, partition_b, luks_b, digest_a, digest_b = match.groups()
+    if partition_a == partition_b or luks_a == luks_b:
+        raise ValueError("storage selection must name distinct partitions and LUKS2 volumes")
+    if (unlock == "tpm2-pin") != (digest_a is not None) or (digest_a is not None and digest_a == digest_b):
+        raise ValueError("TPM storage selection requires separate authorization for both tokens")
+    return content, (digest_a, digest_b)
 
 
 def unique_fields(pairs):
@@ -54,9 +59,8 @@ def unique_fields(pairs):
     return fields
 
 
-def verify_tpm_token(path, storage, pcr_public):
+def verify_tpm_token(path, expected, pcr_public):
     raw = path.read_bytes()
-    expected = storage.splitlines()[-1].split(b",", 1)[1].decode("ascii")
     if hashlib.sha256(raw).hexdigest() != expected:
         raise ValueError("exported LUKS2 token does not match the signed storage selection")
     token = json.loads(raw, object_pairs_hook=unique_fields)
@@ -80,10 +84,11 @@ def verify_tpm_token(path, storage, pcr_public):
 
 
 def assemble(args, work):
-    storage = storage_selection(args.storage) if args.storage is not None else None
-    tpm = storage is not None and storage.splitlines()[1] == b"unlock=tpm2-pin"
-    if tpm != (args.pcr_key is not None) or tpm != (args.tpm_token is not None):
-        raise ValueError("TPM storage requires a separate PCR signing key and an exported LUKS2 token")
+    storage, digests = storage_selection(args.storage) if args.storage is not None else (None, (None, None))
+    tpm = digests[0] is not None
+    token_paths = (args.tpm_token_a, args.tpm_token_b)
+    if tpm != (args.pcr_key is not None) or any(tpm != (path is not None) for path in token_paths):
+        raise ValueError("TPM storage requires a separate PCR signing key and both exported LUKS2 tokens")
     pcr_options = []
     if tpm:
         boot_public = run("openssl", "pkey", "-in", args.boot_key, "-pubout", "-outform", "DER",
@@ -92,7 +97,8 @@ def assemble(args, work):
                          capture_output=True).stdout
         if pcr_public == boot_public:
             raise ValueError("PCR policy and Secure Boot must use different signing keys")
-        verify_tpm_token(args.tpm_token, storage, pcr_public)
+        for path, digest in zip(token_paths, digests, strict=True):
+            verify_tpm_token(path, digest, pcr_public)
         pcr_options = [
             f"--pcr-private-key={args.pcr_key}",
             "--pcr-banks=sha256", "--phases=enter-initrd", f"--policyref={PCR_POLICY_REF}",
@@ -119,7 +125,8 @@ def main():
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute(), required=True)
     parser.add_argument("--storage", type=Path, help="host storage selection to embed in the signed UKI")
     parser.add_argument("--pcr-key", type=Path, help="separate RSA private key for the initrd PCR policy")
-    parser.add_argument("--tpm-token", type=Path, help="exported LUKS2 token to check before signing")
+    for member in ("a", "b"):
+        parser.add_argument(f"--tpm-token-{member}", type=Path, help=f"exported LUKS2 token for member {member}")
     args = parser.parse_args()
     if args.output.exists():
         parser.error("output disk already exists")

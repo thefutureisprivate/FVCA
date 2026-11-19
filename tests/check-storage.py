@@ -16,6 +16,8 @@ import time
 READY = b"FVCA_DEV_BASE_READY"
 FAIL = b"FVCA_BOOT_FAILED"
 ACTIVE = b"FVCA_HOST_STORAGE_ACTIVE"
+HOST_PROFILES = b"FVCA_BTRFS_PROFILES raid1 raid1 raid1"
+GUEST_PROFILES = b"FVCA_BTRFS_PROFILES single dup dup"
 PCR_CONFINED = b"FVCA_SELINUX_PCR_CONFINED"
 PROMPT = re.compile(rb"Please enter (?:the )?passphrase for disk [^\r\n]{1,250}:|Enter FVCA storage TPM PIN:")
 OVMF_CODE = Path("/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd")
@@ -70,7 +72,9 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
         command += ["-smbios", "type=11,value=io.systemd.stub.kernel-cmdline-extra=fvca.unapproved-lab-input=1"]
 
     output = bytearray()
-    prompted = False
+    prompts = 0
+    prompt_start = 0
+    waiting_for_no_echo = False
     submitted = False
     failed_boot = False
     deadline = time.monotonic() + timeout
@@ -88,16 +92,19 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
                     output.extend(data)
                     if not submitted:
                         progress.write(data)
-                    recent = output[-4096:]
-                    if not prompted and PROMPT.search(recent) and b"(press TAB for no echo)" in recent:
-                        prompted = True
+                    recent = output[max(prompt_start, len(output) - 4096):]
+                    if not waiting_for_no_echo and PROMPT.search(recent) and b"(press TAB for no echo)" in recent:
+                        prompts += 1
+                        waiting_for_no_echo = True
                         if password is not None:
                             qemu.stdin.write(b"\t")
                             qemu.stdin.flush()
-                    if prompted and password is not None and not submitted and b"(no echo) " in recent:
+                    if waiting_for_no_echo and password is not None and b"(no echo) " in recent:
                         # The prompt is printed before the terminal switches off echo.
                         qemu.stdin.write(password + b"\r")
                         submitted = True
+                        waiting_for_no_echo = False
+                        prompt_start = len(output)
                         qemu.stdin.flush()
                     if READY in output:
                         break
@@ -118,7 +125,7 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
         log.write_bytes(safe_output)
     if password is not None and password in output:
         raise ValueError(f"{name} echoed the test credential")
-    return prompted, output
+    return prompts, output
 
 
 def check_hypervisor(args):
@@ -128,21 +135,26 @@ def check_hypervisor(args):
         raise ValueError("unexpected lab passphrase encoding")
     member_a, member_b = (lab / f"member-{label}.raw" for label in ("a", "b"))
     args.output.mkdir(mode=0o700)
-    for name, a, b in (
-        ("healthy", member_a, member_b),
-        ("rebuilt", lab / "surviving-member.raw", lab / "replacement.raw"),
-    ):
-        prompted, output = boot(args, name, password, a, b)
-        if (not prompted or output.count(PCR_CONFINED) < 2
-                or not all(mark in output for mark in (ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", READY))):
+    cases = [("healthy", args, member_a, member_b)]
+    if args.replacement_disk is not None:
+        rebuilt_args = argparse.Namespace(**vars(args))
+        rebuilt_args.disk = args.replacement_disk
+        cases.append(("rebuilt", rebuilt_args, lab / "surviving-member.raw", lab / "replacement.raw"))
+    for name, boot_args, a, b in cases:
+        prompts, output = boot(boot_args, name, password, a, b)
+        if (prompts != 2 or output.count(PCR_CONFINED) < 2 or FAIL in output
+                or not all(mark in output for mark in (HOST_PROFILES, ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", READY))):
             raise ValueError(f"{name} did not boot with the encrypted mirror")
         print(f"{name} passed")
 
     wrong = (b"1" if password.startswith(b"0") else b"0") + password[1:]
     for name, key, devices, reason in (
         ("wrong-passphrase", wrong, (member_a, member_b), b"development passphrase unlock exited"),
-        ("missing-member", None, (member_a,), b"both authorized storage members are required"),
+        ("missing-member-a", None, (member_b,), b"both authorized storage members are required"),
+        ("missing-member-b", None, (member_a,), b"both authorized storage members are required"),
         ("duplicate-member", None, (member_a, member_a), b"more than one device has the authorized partition UUID"),
+        ("unselected-replacement", None, (member_a, lab / "replacement.raw"), b"both authorized storage members are required"),
+        ("wrong-luks-identity", None, (member_a, lab / "wrong-luks.raw"), b"storage superblock does not match the signed selection"),
     ):
         prompted, output = boot(args, name, key, *devices)
         if prompted != (key is not None) or FAIL not in output or reason not in output or ACTIVE in output or READY in output:
@@ -154,7 +166,7 @@ def check_guest(args):
     args.output.mkdir(mode=0o700)
     data = args.lab / "guest-data.raw"
     prompted, output = boot(args, "guest", None, data)
-    if (prompted or output.count(PCR_CONFINED) < 2 or b"FVCA_GUEST_DATA_ACTIVE" not in output
+    if (prompted or output.count(PCR_CONFINED) < 2 or GUEST_PROFILES not in output or b"FVCA_GUEST_DATA_ACTIVE" not in output
             or READY not in output or FAIL in output):
         raise ValueError("the signed Guest did not boot with its Btrfs data partition")
     if args.oci_runtime is not None and not all(marker in output for marker in (
@@ -164,11 +176,14 @@ def check_guest(args):
         raise ValueError("the signed Guest did not execute its OCI runtime or render the approved Quadlet fixture")
     print("guest passed")
 
-    prompted, output = boot(args, "guest-missing-disk", None)
-    if (prompted or b"authorized Guest data partition is missing" not in output or FAIL not in output
-            or READY in output or b"FVCA_GUEST_DATA_ACTIVE" in output):
-        raise ValueError("the signed Guest did not fail closed with its data disk absent")
-    print("guest-missing-disk passed")
+    for name, disks, reason in (
+        ("guest-missing-disk", (), b"authorized Guest data partition is missing"),
+        ("guest-wrong-profile", (args.lab / "guest-wrong-profile.raw",), b"Btrfs metadata allocation must use only dup"),
+    ):
+        prompted, output = boot(args, name, None, *disks)
+        if prompted or reason not in output or FAIL not in output or READY in output or b"FVCA_GUEST_DATA_ACTIVE" in output:
+            raise ValueError(f"{name} did not fail closed before data activation")
+        print(f"{name} passed")
 
     if args.oci_runtime is None:
         return
@@ -264,7 +279,7 @@ def check_tpm(args):
     wrong = (b"1" if pin.startswith(b"0") else b"0") + pin[1:]
     a, b = (args.lab / f"member-{label}.raw" for label in ("a", "b"))
     args.output.mkdir(mode=0o700)
-    approvals = b"FVCA_HOST_STORAGE_TPM_UNLOCKED", ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", READY
+    approvals = b"FVCA_HOST_STORAGE_TPM_UNLOCKED", HOST_PROFILES, ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", READY
     for name, state, secret, extra in (
         ("approved", args.tpm_state, pin, False),
         ("wrong-pin", args.tpm_state, wrong, False),
@@ -277,7 +292,7 @@ def check_tpm(args):
         if b"passphrase for disk" in log:
             raise ValueError(f"{name} offered a passphrase fallback")
         if name == "approved":
-            if (not prompted or log.count(PCR_CONFINED) < 2
+            if (prompted != 2 or log.count(PCR_CONFINED) < 2
                     or not all(mark in log for mark in approvals) or FAIL in log):
                 raise ValueError("the approved TPM, boot state and operator PIN did not unlock storage")
         elif (not prompted or b'activation failed: "/usr/bin/cryptsetup" exited' not in log or FAIL not in log
@@ -302,6 +317,7 @@ if __name__ == "__main__":
     role.add_argument("--runtime", type=Path, help="signed Hypervisor runtime")
     role.add_argument("--guest", action="store_true", help="qualify the Service Guest data disk")
     role.add_argument("--oci-runtime", type=Path, help="signed Service Guest OCI runtime")
+    parser.add_argument("--replacement-disk", type=Path, help="Hypervisor boot disk authorizing the lab replacement")
     parser.add_argument("--wrong-runtime", type=Path, help="unselected runtime for a Guest rejection test")
     parser.add_argument("--workload", action="store_true", help="qualify workload activation with approved.raw and tampered.raw")
     parser.add_argument("--stalwart-lifecycle", action="store_true", help="check the disposable Stalwart lifecycle fixture")
@@ -320,6 +336,8 @@ if __name__ == "__main__":
     tpm_options = (args.tpm_state, args.pin_file, args.firmware)
     if any(tpm_options) and (args.guest or not all(tpm_options)):
         parser.error("the Hypervisor TPM test requires --tpm-state, --pin-file and --firmware")
+    if args.replacement_disk is not None and (args.guest or any(tpm_options)):
+        parser.error("--replacement-disk requires the Hypervisor development passphrase test")
     try:
         if args.tpm_state is not None:
             check_tpm(args)

@@ -1,9 +1,10 @@
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::FileTypeExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
-use super::{ARRAY, MAPPER, invalid, run};
+use super::{invalid, run};
 
 const CRYPTSETUP: &str = "/usr/bin/cryptsetup";
 const HEADER: &str = "/run/cryptsetup/fvca-host-header";
@@ -42,15 +43,15 @@ fn verify_header(uuid: &str, token: &str, expected: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn activate_with_pin(token: &str) -> io::Result<()> {
+fn activate_with_pin(source: &Path, mapper: &str, token: &str) -> io::Result<()> {
     let mut prompt = Command::new("/usr/bin/systemd-ask-password").env_clear()
         .args(["--no-tty", "--timeout=55", "--echo=masked", "Enter FVCA storage TPM PIN:"])
         .stdin(Stdio::null()).stdout(Stdio::piped()).spawn()?;
     let pin = prompt.stdout.take().expect("PIN output is piped");
     let result = run(Command::new(CRYPTSETUP).args([
         "open", "--type", "luks2", "--header", HEADER, "--token-id", token,
-        "--token-type", "systemd-tpm2", "--token-only", "--tries", "1", ARRAY, MAPPER,
-    ]).stdin(pin));
+        "--token-type", "systemd-tpm2", "--token-only", "--tries", "1",
+    ]).arg(source).arg(mapper).stdin(pin));
     if result.is_err() {
         let _ = prompt.kill();
     }
@@ -59,11 +60,10 @@ fn activate_with_pin(token: &str) -> io::Result<()> {
     if !prompt_status.success() {
         return Err(io::Error::other("the operator PIN prompt did not complete"));
     }
-    println!("FVCA_HOST_STORAGE_TPM_UNLOCKED");
     Ok(())
 }
 
-pub(super) fn unlock(uuid: &str, token: &str, expected: &str) -> io::Result<()> {
+pub(super) fn unlock(source: &Path, mapper: &str, uuid: &str, token: &str, expected: &str) -> io::Result<()> {
     if !fs::metadata("/dev/tpmrm0").is_ok_and(|dev| dev.file_type().is_char_device()) {
         return Err(invalid("TPM resource manager device is required"));
     }
@@ -77,13 +77,13 @@ pub(super) fn unlock(uuid: &str, token: &str, expected: &str) -> io::Result<()> 
     // Open the same private header copy that was checked, so later changes to
     // the block device cannot substitute a different token during PIN entry.
     let result = run(Command::new(CRYPTSETUP)
-        .args(["luksHeaderBackup", ARRAY, "--header-backup-file", HEADER]))
+        .arg("luksHeaderBackup").arg(source).args(["--header-backup-file", HEADER]))
         .and_then(|()| verify_header(uuid, token, expected))
-        .and_then(|()| activate_with_pin(token));
+        .and_then(|()| activate_with_pin(source, mapper, token));
     let cleanup = fs::remove_file(HEADER);
     result?;
     if let Err(error) = cleanup {
-        let _ = run(Command::new(CRYPTSETUP).args(["close", MAPPER]));
+        let _ = run(Command::new(CRYPTSETUP).args(["close", mapper]));
         return Err(error);
     }
     Ok(())

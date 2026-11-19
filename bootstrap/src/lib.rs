@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 
-use std::fs::{self, File};
+use std::fs;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, FileExt, FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+pub mod btrfs;
 pub mod runtime;
 
 pub const WORKLOAD_VERITY_CERTIFICATE: &str = "/usr/lib/fvca/workload-verity.der";
@@ -69,41 +70,6 @@ pub fn verify_superblock(path: &Path, kind: &str, uuid: &str, version: Option<&s
                 return Err(invalid("storage superblock does not match the signed selection"));
             }
         }
-    }
-    Ok(())
-}
-
-fn verify_btrfs_mount(source: &Path, uuid: &str, target: &str) -> io::Result<()> {
-    let root = fs::metadata(target)?;
-    if root.uid() != 0 || root.gid() != 0 || root.permissions().mode() & 0o7777 != 0o700 {
-        return Err(invalid("data filesystem root must be owned by root:root with mode 0700"));
-    }
-    let expected = sys_block(&fs::canonicalize(source)?)?;
-    let mut devices = fs::read_dir(format!("/sys/fs/btrfs/{uuid}/devices"))?;
-    if devices.next().transpose()?.map(|entry| fs::canonicalize(entry.path())).transpose()? != Some(expected)
-        || devices.next().is_some()
-    {
-        return Err(invalid("Btrfs mounted with a device outside the signed selection"));
-    }
-    Ok(())
-}
-
-pub fn mount_btrfs(source: &Path, uuid: &str, target: &str) -> io::Result<()> {
-    verify_superblock(source, "btrfs", uuid, None)?;
-    // The kernel mounts from the primary superblock at 64 KiB. Its little-endian
-    // num_devices field is at byte 0x88, as defined in linux/btrfs_tree.h.
-    let mut count = [0u8; 8];
-    File::open(source)?.read_exact_at(&mut count, 0x10000 + 0x88)?;
-    if u64::from_le_bytes(count) != 1 {
-        return Err(invalid("the selected Btrfs filesystem must have exactly one device"));
-    }
-    fs::DirBuilder::new().mode(0o700).create(target)?;
-    run(Command::new("/usr/bin/mount")
-        .args(["--internal-only", "-t", "btrfs", "-o", "rw,nodev,nosuid,noexec,subvolid=5"])
-        .arg(source).arg(target))?;
-    if let Err(error) = verify_btrfs_mount(source, uuid, target) {
-        let _ = run(Command::new("/usr/bin/umount").arg(target));
-        return Err(error);
     }
     Ok(())
 }

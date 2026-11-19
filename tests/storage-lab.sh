@@ -25,20 +25,23 @@ ln -s usr/bin "$root/bin"
 ln -s usr/lib "$root/lib"
 ln -s usr/lib64 "$root/lib64"
 install -m755 "$tests/storage-lab-init.sh" "$root/init"
+replacement=6dfe4168-65d6-4500-99f7-448214356652,02fe6c37-70be-4215-9872-4a41221fca18
 tail -n +3 "$tests/host-storage.conf" > "$root/lab-ids"
+printf 'replacement_b=%s\n' "$replacement" >> "$root/lab-ids"
+sed "s/^member_b=.*/member_b=$replacement/" "$tests/host-storage.conf" > "$output/replacement-storage.conf"
 sed -n -e 's/^partition=/guest_partition=/p' -e 's/^filesystem_uuid=/guest_filesystem=/p' \
     "$tests/guest-storage.conf" > "$root/guest-ids"
 printf '%s' "$(openssl rand -hex 32)" > "$output/storage.key"
 install -m400 "$output/storage.key" "$root/storage.key"
 
-for name in bash chmod cryptsetup mdadm mkfs.btrfs modprobe mount poweroff sfdisk sleep sync umount; do
+for name in bash btrfs chmod cryptsetup mkfs.btrfs modprobe mount poweroff sfdisk sleep sync umount; do
     binary=$(realpath "$(command -v "$name")")
     install -m755 "$binary" "$root/usr/bin/$name"
     while IFS= read -r dependency; do
         install -m755 "$dependency" "$root/usr/lib64/${dependency##*/}"
     done < <(ldd "$binary" | awk '/=> \// {print $3} /^[[:space:]]*\/.* \(/ {print $1}')
 done
-for module in raid1 dm_crypt; do
+for module in dm_crypt; do
     while read -r action path; do
         if [[ "$action" == insmod ]]; then
             install -D -m644 "$path" "$root$modules/${path##*/modules/$kernel/}"
@@ -63,10 +66,14 @@ boot() {
     fi
 }
 
-truncate -s 256M "$output/member-a.raw" "$output/member-b.raw" "$output/replacement.raw" "$output/guest-data.raw"
+truncate -s 384M "$output/member-a.raw" "$output/member-b.raw" "$output/replacement.raw" \
+    "$output/guest-data.raw" "$output/guest-wrong-profile.raw"
 boot guest \
     -drive "if=none,id=guest,format=raw,file=$output/guest-data.raw" -device virtio-blk-pci,drive=guest,serial=fvca-lab-guest
 grep -q FVCA_GUEST_BTRFS_LAB_PROVISIONED "$output/guest.log"
+boot guest-wrong-profile \
+    -drive "if=none,id=guest,format=raw,file=$output/guest-wrong-profile.raw" -device virtio-blk-pci,drive=guest,serial=fvca-lab-guest
+grep -q FVCA_GUEST_BTRFS_LAB_PROVISIONED "$output/guest-wrong-profile.log"
 
 boot provision \
     -drive "if=none,id=a,format=raw,file=$output/member-a.raw" -device virtio-blk-pci,drive=a,serial=fvca-lab-a \
@@ -81,8 +88,14 @@ grep -q 'FVCA_STORAGE_DEGRADED_READ_OK a' "$output/replace.log"
 grep -q FVCA_STORAGE_REBUILD_OK "$output/replace.log"
 
 boot verify \
-    -drive "if=none,id=b,format=raw,file=$output/replacement.raw" -device virtio-blk-pci,drive=b,serial=fvca-lab-b
-grep -q 'FVCA_STORAGE_DEGRADED_READ_OK b' "$output/verify.log"
+    -drive "if=none,id=b,format=raw,file=$output/replacement.raw" -device virtio-blk-pci,drive=b,serial=fvca-lab-replacement
+grep -q 'FVCA_STORAGE_DEGRADED_READ_OK replacement' "$output/verify.log"
+
+# Present the old GPT UUID over a different LUKS2 volume to test the two
+# independent boundaries in the signed member identity.
+cp --reflink=auto --sparse=always "$output/replacement.raw" "$output/wrong-luks.raw"
+original_b=$(sed -n 's/^member_b=\([^,]*\),.*$/\1/p' "$tests/host-storage.conf")
+sfdisk --part-uuid "$output/wrong-luks.raw" 1 "$original_b" >/dev/null
 
 if LC_ALL=C grep -aFq 'FVCA-PERSISTENCE-CHECK-c34ffdad562f4ddc' \
     "$output/member-a.raw" "$output/member-b.raw" "$output/replacement.raw"; then

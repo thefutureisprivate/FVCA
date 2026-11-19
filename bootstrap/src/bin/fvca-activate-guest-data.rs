@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fvca_initrd_bootstrap::{find_partition, identity, invalid, mount_btrfs, sys_block};
+use fvca_initrd_bootstrap::{btrfs, find_partition, identity, invalid, sys_block};
 
 #[global_allocator]
 static ALLOCATOR: System = System;
@@ -50,7 +50,7 @@ fn activate() -> io::Result<()> {
     fs::write(format!("{drop_in}/10-guest-data.conf"), format!(
         "[Service]\nExecStartPre=/usr/bin/findmnt --mountpoint {DATA} --source PARTUUID={part} --types btrfs --options rw,nodev,nosuid,noexec\n",
     ))?;
-    mount_btrfs(&source, filesystem, DATA)?;
+    btrfs::mount(btrfs::Pool::Guest(&source), filesystem, DATA)?;
     println!("FVCA_GUEST_DATA_ACTIVE");
     Ok(())
 }

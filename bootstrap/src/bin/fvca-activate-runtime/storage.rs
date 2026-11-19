@@ -1,85 +1,102 @@
 use std::fs;
 use std::io;
-use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fvca_initrd_bootstrap::{find_partition, identity, invalid, mount_btrfs, run, sys_block, verify_superblock};
+use fvca_initrd_bootstrap::btrfs::{self, Pool};
+use fvca_initrd_bootstrap::{find_partition, identity, invalid, run, sys_block, verify_superblock};
+
 use super::hash;
 
 #[path = "tpm.rs"]
 mod tpm;
 
 const POLICY: &str = "/usr/lib/fvca/host-storage";
-const ARRAY: &str = "/dev/md0";
-const MAPPER: &str = "fvca-host-data";
-const VOLUME: &str = "/dev/mapper/fvca-host-data";
+const MAPPERS: [&str; 2] = ["fvca-host-a", "fvca-host-b"];
+const VOLUMES: [&str; 2] = ["/dev/mapper/fvca-host-a", "/dev/mapper/fvca-host-b"];
 const DATA: &str = "/run/fvca/host-data";
-const MDADM: &str = "/usr/bin/mdadm";
-const CRYPTSETUP: &str = "/usr/bin/systemd-cryptsetup";
 
-enum Unlock<'a> {
-    DevelopmentPassphrase,
-    Tpm { token: &'a str, digest: &'a str },
+struct Member<'a> {
+    partition: &'a str,
+    luks: &'a str,
+}
+
+struct Token<'a> {
+    index: &'a str,
+    digest: &'a str,
 }
 
 struct Selection<'a> {
-    unlock: Unlock<'a>,
-    member_a: &'a str,
-    member_b: &'a str,
-    raid: &'a str,
-    luks: &'a str,
+    members: [Member<'a>; 2],
+    tokens: Option<[Token<'a>; 2]>,
     filesystem: &'a str,
+}
+
+fn member<'a>(field: &'a str, prefix: &str) -> io::Result<Member<'a>> {
+    let (partition, luks) = field.strip_prefix(prefix).and_then(|value| value.split_once(','))
+        .ok_or_else(|| invalid("storage member must specify a partition and LUKS2 UUID"))?;
+    let uuid = [8, 4, 4, 4, 12];
+    Ok(Member {
+        partition: identity(partition, "", &uuid, '-')?,
+        luks: identity(luks, "", &uuid, '-')?,
+    })
+}
+
+fn token<'a>(field: &'a str, prefix: &str) -> io::Result<Token<'a>> {
+    let (index, digest) = field.strip_prefix(prefix).and_then(|value| value.split_once(','))
+        .ok_or_else(|| invalid("missing TPM token authorization"))?;
+    let number = index.parse::<u8>().map_err(|_| invalid("invalid TPM token index"))?;
+    if number > 31 || number.to_string() != index {
+        return Err(invalid("invalid TPM token index"));
+    }
+    Ok(Token { index, digest: hash(digest)? })
 }
 
 fn selection(text: &str) -> io::Result<Selection<'_>> {
     let fields: Vec<_> = text.split('\n').collect();
-    let ["FVCA-HOST-STORAGE-2", unlock, a, b, raid, luks, "filesystem=btrfs", filesystem, rest @ ..] =
+    let ["FVCA-HOST-STORAGE-3", unlock, a, b, "filesystem=btrfs", filesystem, rest @ ..] =
         fields.as_slice()
     else {
         return Err(invalid("malformed Hypervisor storage selection"));
     };
-    let uuid = [8, 4, 4, 4, 12];
-    let member_a = identity(a, "member_a=", &uuid, '-')?;
-    let member_b = identity(b, "member_b=", &uuid, '-')?;
-    if member_a == member_b {
-        return Err(invalid("storage selection must name two distinct members"));
+    let a = member(a, "member_a=")?;
+    let b = member(b, "member_b=")?;
+    if a.partition == b.partition || a.luks == b.luks {
+        return Err(invalid("storage selection must name distinct partitions and LUKS2 volumes"));
     }
-    let unlock = match (*unlock, rest) {
-        ("unlock=development-passphrase", [""]) => Unlock::DevelopmentPassphrase,
-        ("unlock=tpm2-pin", [field, ""]) => {
-            let Some((token, digest)) = field.strip_prefix("token=").and_then(|value| value.split_once(',')) else {
-                return Err(invalid("missing TPM token authorization"));
-            };
-            let number = token.parse::<u8>().map_err(|_| invalid("invalid TPM token index"))?;
-            if number > 31 || number.to_string() != token {
-                return Err(invalid("invalid TPM token index"));
+    let tokens = match (*unlock, rest) {
+        ("unlock=development-passphrase", [""]) => None,
+        ("unlock=tpm2-pin", [a, b, ""]) => {
+            let a = token(a, "token_a=")?;
+            let b = token(b, "token_b=")?;
+            if a.digest == b.digest {
+                return Err(invalid("storage members require separate TPM tokens"));
             }
-            Unlock::Tpm { token, digest: hash(digest)? }
+            Some([a, b])
         }
         _ => return Err(invalid("unsupported storage unlock policy")),
     };
     Ok(Selection {
-        unlock,
-        member_a,
-        member_b,
-        raid: identity(raid, "raid=", &[8, 8, 8, 8], ':')?,
-        luks: identity(luks, "luks=", &uuid, '-')?,
-        filesystem: identity(filesystem, "filesystem_uuid=", &uuid, '-')?,
+        members: [a, b],
+        tokens,
+        filesystem: identity(filesystem, "filesystem_uuid=", &[8, 4, 4, 4, 12], '-')?,
     })
 }
 
-fn members(selection: &Selection<'_>) -> io::Result<(PathBuf, PathBuf)> {
+fn find_members(members: &[Member<'_>; 2]) -> io::Result<[PathBuf; 2]> {
     let deadline = Instant::now() + Duration::from_secs(6);
     loop {
-        if let (Some(a), Some(b)) = (find_partition(selection.member_a)?, find_partition(selection.member_b)?) {
+        if let (Some(a), Some(b)) = (find_partition(members[0].partition)?, find_partition(members[1].partition)?) {
             // Distinct partitions on the same drive cannot provide redundancy.
             if parent_device(&a)? == parent_device(&b)? {
                 return Err(invalid("mirror members reside on the same disk"));
             }
-            return Ok((a, b));
+            for (path, member) in [(&a, &members[0]), (&b, &members[1])] {
+                verify_superblock(path, "crypto_LUKS", member.luks, Some("2"))?;
+            }
+            return Ok([a, b]);
         }
         if Instant::now() >= deadline {
             return Err(io::Error::new(io::ErrorKind::NotFound, "both authorized storage members are required"));
@@ -96,52 +113,52 @@ fn parent_device(path: &Path) -> io::Result<PathBuf> {
     partition.parent().map(Path::to_path_buf).ok_or_else(|| invalid("missing parent block device"))
 }
 
-fn verify_array(a: &Path, b: &Path) -> io::Result<()> {
-    if !fs::metadata(ARRAY)?.file_type().is_block_device() {
-        return Err(invalid("assembled array is not a block device"));
-    }
-    let sys = sys_block(&fs::canonicalize(ARRAY)?)?;
-    for (name, expected) in [("level", "raid1"), ("raid_disks", "2"), ("degraded", "0"), ("metadata_version", "1.2")] {
-        if fs::read_to_string(sys.join("md").join(name))?.trim_end() != expected {
-            return Err(invalid("assembled array is not a healthy two-member native RAID1"));
-        }
-    }
-    let mut actual = fs::read_dir(sys.join("slaves"))?
-        .map(|entry| entry.and_then(|entry| fs::canonicalize(entry.path())))
+fn verify_mapping(volume: &Path, source: &Path) -> io::Result<()> {
+    let mapped = sys_block(&fs::canonicalize(volume)?)?;
+    let actual = fs::read_dir(mapped.join("slaves"))?
+        .map(|entry| fs::canonicalize(entry?.path()))
         .collect::<io::Result<Vec<_>>>()?;
-    actual.sort();
-    let mut selected = [sys_block(a)?, sys_block(b)?];
-    selected.sort();
-    if actual != selected {
-        return Err(invalid("assembled array has unselected members"));
+    if actual != [sys_block(source)?] {
+        return Err(invalid("LUKS mapping has an unselected backing device"));
     }
     Ok(())
 }
 
-fn unlock_development() -> io::Result<()> {
-    let status = Command::new(CRYPTSETUP).env_clear()
-        .env("SYSTEMD_CRYPTSETUP_USE_TOKEN_MODULE", "0").args([
-        "attach", MAPPER, ARRAY, "none", "luks,tries=1,timeout=55,password-cache=no",
-    ]).status()?;
+fn unlock_development(source: &Path, mapper: &str) -> io::Result<()> {
+    let status = Command::new("/usr/bin/systemd-cryptsetup").env_clear()
+        .env("SYSTEMD_CRYPTSETUP_USE_TOKEN_MODULE", "0")
+        .args(["attach", mapper]).arg(source)
+        .args(["none", "luks,tries=1,timeout=55,password-cache=no"]).status()?;
     if !status.success() {
         return Err(io::Error::other(format!("development passphrase unlock exited with {status}")));
     }
     Ok(())
 }
 
-fn open_data(selection: &Selection<'_>, a: &Path, b: &Path) -> io::Result<()> {
-    verify_array(a, b)?;
-    verify_superblock(Path::new(ARRAY), "crypto_LUKS", selection.luks, Some("2"))?;
-    run(Command::new(MDADM).args(["--readwrite", ARRAY]))?;
-    match selection.unlock {
-        Unlock::DevelopmentPassphrase => unlock_development()?,
-        Unlock::Tpm { token, digest } => tpm::unlock(selection.luks, token, digest)?,
+fn open_data(selection: &Selection<'_>, sources: &[PathBuf; 2]) -> io::Result<()> {
+    let volumes = VOLUMES.map(Path::new);
+    let mut opened = 0;
+    let result = (|| {
+        for index in 0..2 {
+            let source = &sources[index];
+            let mapper = MAPPERS[index];
+            if let Some(tokens) = &selection.tokens {
+                let token = &tokens[index];
+                tpm::unlock(source, mapper, selection.members[index].luks, token.index, token.digest)?;
+            } else {
+                unlock_development(source, mapper)?;
+            }
+            opened += 1;
+            verify_mapping(volumes[index], source)?;
+        }
+        btrfs::mount(Pool::Hypervisor(volumes), selection.filesystem, DATA)
+    })();
+    if result.is_err() {
+        for mapper in MAPPERS[..opened].iter().rev() {
+            let _ = run(Command::new("/usr/bin/cryptsetup").args(["close", mapper]));
+        }
     }
-    if let Err(error) = mount_btrfs(Path::new(VOLUME), selection.filesystem, DATA) {
-        let _ = run(Command::new(CRYPTSETUP).args(["detach", MAPPER]));
-        return Err(error);
-    }
-    Ok(())
+    result
 }
 
 pub(super) fn activate_if_selected() -> io::Result<()> {
@@ -151,15 +168,11 @@ pub(super) fn activate_if_selected() -> io::Result<()> {
         Err(error) => return Err(error),
     };
     let selection = selection(&policy)?;
-    let (a, b) = members(&selection)?;
+    let sources = find_members(&selection.members)?;
     bind_readiness_probe()?;
-    run(Command::new("/usr/bin/modprobe").args(["--ignore-install", "raid1"]))?;
-    run(Command::new(MDADM).args([
-        "--assemble", "--config=/dev/null", "--readonly", "--uuid", selection.raid, ARRAY,
-    ]).args([&a, &b]))?;
-    if let Err(error) = open_data(&selection, &a, &b) {
-        let _ = run(Command::new(MDADM).args(["--stop", ARRAY]));
-        return Err(error);
+    open_data(&selection, &sources)?;
+    if selection.tokens.is_some() {
+        println!("FVCA_HOST_STORAGE_TPM_UNLOCKED");
     }
     println!("FVCA_HOST_STORAGE_ACTIVE");
     Ok(())
@@ -171,6 +184,6 @@ fn bind_readiness_probe() -> io::Result<()> {
     fs::write(format!("{drop_in}/10-storage.conf"), concat!(
         "[Service]\n",
         "ExecStartPre=/usr/bin/findmnt --mountpoint /run/fvca/host-data",
-        " --source /dev/mapper/fvca-host-data --types btrfs --options rw,nodev,nosuid,noexec\n",
+        " --types btrfs --options rw,nodev,nosuid,noexec\n",
     ))
 }

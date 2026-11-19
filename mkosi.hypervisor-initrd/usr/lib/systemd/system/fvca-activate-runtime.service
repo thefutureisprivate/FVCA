@@ -11,6 +11,6 @@ Type=oneshot
 ExecStartPre=/usr/bin/modprobe --ignore-install kvm_intel nested=0
 ExecStart=/usr/lib/fvca/activate-runtime
 RemainAfterExit=yes
-TimeoutStartSec=105s
+TimeoutStartSec=145s
 StandardOutput=journal+console
 NoNewPrivileges=yes

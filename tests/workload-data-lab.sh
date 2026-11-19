@@ -50,7 +50,7 @@ PY
     fi
     image="$temporary/$name-filesystem.raw"
     truncate -s "$((size * 512))" "$image"
-    podman unshare mkfs.btrfs --quiet --force --nodiscard --data single --metadata single \
+    podman unshare mkfs.btrfs --quiet --force --nodiscard --data single --metadata dup \
         --uuid "$filesystem" --rootdir "$tree" "$image"
     guest="$temporary/$name.raw"
     cp --reflink=auto --sparse=always -- "$template" "$guest"

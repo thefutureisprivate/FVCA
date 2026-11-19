@@ -1,6 +1,7 @@
 #!/usr/bin/bash
 # Init process for the disposable provisioning and recovery guest.
-set -euo pipefail
+set -Eeuo pipefail
+shopt -s nullglob
 export PATH=/usr/bin
 trap 'printf "FVCA_STORAGE_LAB_FAILED at line %s\n" "$LINENO"; poweroff -f' ERR
 
@@ -9,12 +10,12 @@ mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
 mount -t tmpfs tmpfs /run
 
-# The host embeds the public test UUIDs and a random test-only passphrase.
+# The host embeds public fixture identities and a random test-only passphrase.
 . /lab-ids
 . /guest-ids
 marker=FVCA-PERSISTENCE-CHECK-c34ffdad562f4ddc
-array=/dev/md0
-volume=/dev/mapper/fvca-test
+a=/dev/mapper/fvca-test-a
+b=/dev/mapper/fvca-test-b
 
 require_disk() {
     local name=$1
@@ -27,83 +28,112 @@ require_disk() {
 }
 
 partition_disk() {
-    printf 'label: gpt\nunit: sectors\n\nstart=2048,type=%s,uuid=%s\n' \
-        "${3:-A19D880F-05FC-4D3B-A006-743F0F84911E}" "$2" | sfdisk "$1"
+    printf 'label: gpt\nunit: sectors\n\nstart=2048,type=%s,uuid=%s\n' "$3" "$2" | sfdisk "$1"
 }
 
-format_btrfs() {
+format_member() {
     local device=$1
-    local filesystem_id=$2
-    mkfs.btrfs -q -U "$filesystem_id" "$device"
-    mount -t btrfs -o nodev,nosuid,noexec "$device" /mnt
+    local identity=$2
+    local mapper=$3
+    partition_disk "$device" "${identity%,*}" ca7d7ccb-63ed-4c53-861c-1742536059cc
+    cryptsetup luksFormat --type=luks2 --uuid="${identity#*,}" --batch-mode \
+        --pbkdf=argon2id --pbkdf-memory=65536 --pbkdf-parallel=1 --iter-time=50 \
+        --key-file=/storage.key "${device}1"
+    cryptsetup open --type=luks2 --key-file=/storage.key "${device}1" "$mapper"
+}
+
+write_marker() {
     chmod 0700 /mnt
     printf '%s\n' "$marker" > /mnt/marker
     sync
-    umount /mnt
+}
+
+verify_mirror() {
+    local profile
+    for profile in data metadata system; do
+        local allocated=(/sys/fs/btrfs/"$filesystem_uuid"/allocation/"$profile"/*/)
+        if [[ ${#allocated[@]} != 1 || ${allocated[0]} != */raid1/ ]]; then
+            printf 'Unexpected Btrfs %s allocations: %s\n' "$profile" "${allocated[*]}" >&2
+            return 1
+        fi
+    done
 }
 
 provision() {
     require_disk vda fvca-lab-a
     require_disk vdb fvca-lab-b
-    partition_disk /dev/vda "$member_a"
-    partition_disk /dev/vdb "$member_b"
-    mdadm --create "$array" --metadata=1.2 --uuid="$raid" --level=1 --raid-devices=2 \
-        --bitmap=internal --run /dev/vda1 /dev/vdb1
-    mdadm --wait "$array"
-    cryptsetup luksFormat --type=luks2 --uuid="$luks" --batch-mode \
-        --pbkdf=argon2id --pbkdf-memory=65536 --pbkdf-parallel=1 --iter-time=50 \
-        --key-file=/storage.key "$array"
-    cryptsetup open --type=luks2 --key-file=/storage.key "$array" fvca-test
-    format_btrfs "$volume" "$filesystem_uuid"
-    cryptsetup close fvca-test
+    format_member /dev/vda "$member_a" fvca-test-a
+    format_member /dev/vdb "$member_b" fvca-test-b
+    mkfs.btrfs -q -U "$filesystem_uuid" --data raid1 --metadata raid1 "$a" "$b"
+    mount -t btrfs -o "nodev,nosuid,noexec,datacow,datasum,compress=no,skip_balance,device=$b" "$a" /mnt
+    verify_mirror
+    write_marker
+    umount /mnt
+    cryptsetup close fvca-test-b
+    cryptsetup close fvca-test-a
     echo FVCA_STORAGE_LAB_PROVISIONED
 }
 
 recover() {
     local member=$1
     require_disk vda "fvca-lab-$member"
-    mdadm --assemble --config=/dev/null --uuid="$raid" --readonly --run "$array" /dev/vda1
-    [[ $(</sys/block/md0/md/degraded) == 1 ]]
     printf '%s' wrong-lab-passphrase > /run/wrong
-    if cryptsetup open --type=luks2 --test-passphrase --key-file=/run/wrong "$array"; then
+    if cryptsetup open --type=luks2 --test-passphrase --key-file=/run/wrong /dev/vda1; then
         return 1
     fi
-    [[ ! -e "$volume" ]]
-    cryptsetup open --readonly --type=luks2 --key-file=/storage.key "$array" fvca-test
-    mount -t btrfs -o ro,rescue=nologreplay,nodev,nosuid,noexec "$volume" /mnt
+    [[ ! -e "$a" ]]
+    cryptsetup open --readonly --type=luks2 --key-file=/storage.key /dev/vda1 fvca-test-a
+    mount -t btrfs -o ro,degraded,rescue=nologreplay,nodev,nosuid,noexec "$a" /mnt
     [[ $(</mnt/marker) == "$marker" ]]
+    verify_mirror
     umount /mnt
-    cryptsetup close fvca-test
+    cryptsetup close fvca-test-a
     printf 'FVCA_STORAGE_DEGRADED_READ_OK %s\n' "$member"
 }
 
-cmdline=$(< /proc/cmdline)
-if [[ "$cmdline" == *' fvca.lab=guest' ]]; then
-    require_disk vda fvca-lab-guest
-    partition_disk /dev/vda "$guest_partition" 0FC63DAF-8483-4772-8E79-3D69D8477DE4
-    format_btrfs /dev/vda1 "$guest_filesystem"
-    echo FVCA_GUEST_BTRFS_LAB_PROVISIONED
-    poweroff -f
-fi
+replace() {
+    recover a
+    require_disk vdb fvca-lab-replacement
+    format_member /dev/vdb "$replacement_b" fvca-test-b
+    cryptsetup open --type=luks2 --key-file=/storage.key /dev/vda1 fvca-test-a
+    mount -t btrfs -o rw,degraded,nodev,nosuid,noexec "$a" /mnt
+    # The fixture creates the first mapping as device 1 and the second as 2.
+    btrfs replace start -B 2 "$b" /mnt
+    umount /mnt
+    mount -t btrfs -o "nodev,nosuid,noexec,device=$b" "$a" /mnt
+    # A writable degraded mount can allocate SINGLE chunks even without an
+    # application writer. Restore full redundancy before admitting the pool.
+    btrfs balance start -dconvert=raid1,soft -mconvert=raid1,soft /mnt
+    umount /mnt
+    mount -t btrfs -o "nodev,nosuid,noexec,device=$b" "$a" /mnt
+    [[ $(</mnt/marker) == "$marker" ]]
+    verify_mirror
+    btrfs scrub start -B /mnt
+    umount /mnt
+    cryptsetup close fvca-test-b
+    cryptsetup close fvca-test-a
+    echo FVCA_STORAGE_REBUILD_OK
+}
 
-modprobe raid1
-modprobe dm-crypt
+provision_guest() {
+    require_disk vda fvca-lab-guest
+    partition_disk /dev/vda "$guest_partition" 0fc63daf-8483-4772-8e79-3d69d8477de4
+    mkfs.btrfs -q -U "$guest_filesystem" --data single --metadata "$1" /dev/vda1
+    mount -t btrfs -o nodev,nosuid,noexec /dev/vda1 /mnt
+    write_marker
+    umount /mnt
+    echo FVCA_GUEST_BTRFS_LAB_PROVISIONED
+}
+
+cmdline=$(</proc/cmdline)
 case "$cmdline" in
-    *' fvca.lab=provision') provision ;;
-    *' fvca.lab=replace')
-        recover a
-        require_disk vdb fvca-lab-replacement
-        partition_disk /dev/vdb "$member_b"
-        mdadm --readwrite "$array"
-        mdadm --add "$array" /dev/vdb1
-        mdadm --wait "$array"
-        [[ $(</sys/block/md0/md/degraded) == 0 ]]
-        echo FVCA_STORAGE_REBUILD_OK
-        ;;
-    *' fvca.lab=verify') recover b ;;
+    *' fvca.lab=guest') provision_guest dup ;;
+    *' fvca.lab=guest-wrong-profile') provision_guest single ;;
+    *' fvca.lab=provision') modprobe dm-crypt; provision ;;
+    *' fvca.lab=replace') modprobe dm-crypt; replace ;;
+    *' fvca.lab=verify') modprobe dm-crypt; recover replacement ;;
     *) false ;;
 esac
 
-mdadm --stop "$array"
 sync
 poweroff -f
