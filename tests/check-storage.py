@@ -187,6 +187,24 @@ def check_guest(args):
         print(f"{name} passed")
 
 
+def check_guest_workload(args):
+    args.output.mkdir(mode=0o700)
+    active = b"FVCA_WORKLOAD_ROOT_ACTIVE"
+    for name, failure in (
+        ("approved", None),
+        ("tampered", b"workload artifact does not match the signed bytes"),
+    ):
+        prompted, output = boot(args, name, None, args.lab / f"{name}.raw")
+        if prompted or b"FVCA_GUEST_DATA_ACTIVE" not in output or b"FVCA_WORKLOAD_KEYRING_SEALED" not in output:
+            raise ValueError(f"{name} did not reach the workload admission boundary")
+        if failure is None:
+            if active not in output or READY not in output or FAIL in output:
+                raise ValueError("the authorized workload root did not mount in the signed Guest")
+        elif failure not in output or FAIL not in output or READY in output or active in output:
+            raise ValueError("the tampered workload did not fail before activation")
+        print(f"workload-{name} passed")
+
+
 @contextmanager
 def software_tpm(state):
     with tempfile.TemporaryDirectory(prefix="fvca-swtpm-") as directory:
@@ -260,11 +278,14 @@ if __name__ == "__main__":
     role.add_argument("--guest", action="store_true", help="qualify the Service Guest data disk")
     role.add_argument("--oci-runtime", type=Path, help="signed Service Guest OCI runtime")
     parser.add_argument("--wrong-runtime", type=Path, help="unselected runtime for a Guest rejection test")
+    parser.add_argument("--workload", action="store_true", help="qualify workload activation with approved.raw and tampered.raw")
     for option in ("tpm-state", "pin-file", "firmware"):
         parser.add_argument(f"--{option}", type=Path)
     args = parser.parse_args()
     if args.wrong_runtime is not None and args.oci_runtime is None:
         parser.error("--wrong-runtime requires --oci-runtime")
+    if args.workload and (args.oci_runtime is None or args.wrong_runtime is not None):
+        parser.error("--workload requires --oci-runtime and its own Btrfs fixtures")
     if args.oci_runtime is not None:
         args.guest = True
         args.runtime = args.oci_runtime
@@ -274,6 +295,8 @@ if __name__ == "__main__":
     try:
         if args.tpm_state is not None:
             check_tpm(args)
+        elif args.workload:
+            check_guest_workload(args)
         elif args.guest:
             check_guest(args)
         else:

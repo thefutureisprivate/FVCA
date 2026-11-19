@@ -1,9 +1,13 @@
 #![forbid(unsafe_code)]
 
 use std::alloc::System;
+use std::fs;
 use std::io;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{self, Command, ExitCode};
+
+use fvca_initrd_bootstrap::{WORKLOAD_VERITY_CERTIFICATE, invalid, run};
 
 #[global_allocator]
 static ALLOCATOR: System = System;
@@ -26,6 +30,20 @@ fn label_initramfs() -> io::Result<()> {
     Ok(())
 }
 
+fn load_verity() -> io::Result<()> {
+    let ring = match fs::symlink_metadata(WORKLOAD_VERITY_CERTIFICATE) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => "keyring_unsealed=0",
+        Ok(metadata) if metadata.is_file() && (1..=16 * 1024).contains(&metadata.len())
+            && Path::new("/usr/lib/fvca/service-guest.composition").is_file()
+            && !Path::new("/usr/lib/fvca/hypervisor.composition").exists() => "keyring_unsealed=1",
+        Ok(_) => return Err(invalid("invalid UKI workload certificate or boot role")),
+        Err(error) => return Err(error),
+    };
+    // PID 1 starts before procfs is mounted. Pass both parameters explicitly.
+    run(Command::new("/usr/bin/modprobe")
+        .args(["--ignore-install", "dm_verity", "require_signatures=1", ring]))
+}
+
 fn main() -> ExitCode {
     if process::id() != 1 {
         eprintln!("FVCA bootstrap must run as PID 1");
@@ -43,17 +61,11 @@ fn main() -> ExitCode {
 
     // The kernel and module files are already authenticated by the UKI.
     // systemd requires the kernel's signature check before loading the BPF policy.
-    let result = Command::new("/usr/bin/modprobe")
-        .env_clear()
-        .args(["--ignore-install", "dm_verity", "require_signatures=1"])
-        .status();
-    match result {
-        Ok(status) if status.success() => {
-            let error = Command::new("/usr/lib/systemd/systemd").exec();
-            eprintln!("FVCA bootstrap could not start systemd: {error}");
-        }
-        Ok(status) => eprintln!("FVCA bootstrap could not load dm-verity: {status}"),
-        Err(error) => eprintln!("FVCA bootstrap could not run modprobe: {error}"),
+    if let Err(error) = load_verity() {
+        eprintln!("FVCA bootstrap could not configure dm-verity: {error}");
+        return ExitCode::FAILURE;
     }
+    let error = Command::new("/usr/lib/systemd/systemd").exec();
+    eprintln!("FVCA bootstrap could not start systemd: {error}");
     ExitCode::FAILURE
 }

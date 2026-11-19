@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 
 from runtime_boot import (
-    DISABLE_AUTOMATIC_EXTENSIONS, composition_archive, prepare_core, run, verify_initrd, write_disk,
+    DISABLE_AUTOMATIC_EXTENSIONS, WORKLOAD_TRUST_FILES, composition_archive, prepare_core, run, verify_initrd, write_disk,
 )
 from runtime_image import verify as verify_runtime
 import vm_runtime
@@ -101,11 +101,13 @@ def assemble(args, work):
     runtime_work = work / "runtime"
     runtime_work.mkdir()
     runtime_hash = verify_runtime(args.runtime, args.runtime_certificate, prepared, runtime_work, vm_runtime)
-    forbidden = tuple(f"usr/lib/fvca/{name}" for name in ("hypervisor.composition", "vm-runtime.p7s", "host-storage"))
+    forbidden = tuple(f"usr/lib/fvca/{name}" for name in (
+        "hypervisor.composition", "vm-runtime.p7s", "host-storage", *WORKLOAD_TRUST_FILES,
+    ))
     verify_initrd(args.initrd, uname, ACTIVATION_FILES, forbidden, "Hypervisor")
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
-        extra=("host-storage", storage) if storage is not None else None,
+        extra=(("host-storage", storage),) if storage is not None else (),
     )
     write_disk(args, work, offset, cmdline, uname, composition, ROLE_BOOT_OPTIONS, uki_options=pcr_options)
     print(f"FVCA Hypervisor development disk binds core {core_hash} to VM runtime {runtime_hash}")

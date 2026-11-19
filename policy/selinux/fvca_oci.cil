@@ -1,2 +1,6 @@
 ; Preserve Podman's Fedora service-domain transition under NoNewPrivileges=yes.
 (allow init_t container_runtime_t (process2 (nnp_transition)))
+
+; The release activation service reserves a loop index before exposing a signed image region.
+(allow init_t loop_control_device_t (chr_file (getattr open read ioctl)))
+(allowx init_t loop_control_device_t (ioctl chr_file (0x4c82)))

@@ -15,6 +15,7 @@ DISABLE_AUTOMATIC_EXTENSIONS = (
     "rd.systemd.mask=systemd-sysext.socket", "rd.systemd.mask=systemd-confext.socket",
     "systemd.mask=systemd-sysext.socket", "systemd.mask=systemd-confext.socket",
 )
+WORKLOAD_TRUST_FILES = ("workload-policy.json", "workload-deployment.der", "workload-verity.der")
 
 
 def run(*args, **kwargs):
@@ -36,7 +37,7 @@ def verify_initrd(initrd, uname, required, forbidden, role):
         raise ValueError(f"expected an unconfigured {role} initramfs")
 
 
-def composition_archive(work, boot_key, boot_certificate, core_hash, runtime_hash, role, runtime, *, extra=None):
+def composition_archive(work, boot_key, boot_certificate, core_hash, runtime_hash, role, runtime, *, extra=()):
     root_hash_file = work / "runtime.roothash"
     root_hash_file.write_text(runtime_hash, encoding="ascii")
     files = work / "usr/lib/fvca"
@@ -53,8 +54,7 @@ def composition_archive(work, boot_key, boot_certificate, core_hash, runtime_has
     run("openssl", "cms", "-sign", "-binary", "-nocerts", "-noattr", "-outform", "DER",
         "-in", root_hash_file, "-signer", boot_certificate, "-inkey", boot_key, "-out", signature)
     paths = [composition, signature]
-    if extra is not None:
-        filename, payload = extra
+    for filename, payload in extra:
         entry = files / filename
         entry.write_bytes(payload)
         paths.append(entry)

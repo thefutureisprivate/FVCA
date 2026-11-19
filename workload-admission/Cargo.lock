@@ -101,11 +101,19 @@ name = "fvca-workload-admission"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "fvca-workload-loop",
  "gpt",
  "libc",
  "openssl",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "fvca-workload-loop"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

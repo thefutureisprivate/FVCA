@@ -8,6 +8,9 @@ use std::process::ExitCode;
 use fvca_initrd_bootstrap::invalid;
 use fvca_initrd_bootstrap::runtime::{self, Runtime};
 
+#[path = "fvca-activate-oci-runtime/workload_trust.rs"]
+mod workload_trust;
+
 #[global_allocator]
 static ALLOCATOR: System = System;
 
@@ -23,6 +26,7 @@ fn activate() -> io::Result<()> {
         return Err(invalid("expected a Service Guest core"));
     }
     let runtime_hash = runtime::activate(Runtime::Oci)?;
+    workload_trust::enroll()?;
     let quadlets = "/run/fvca/oci-probe-quadlet";
     fs::create_dir_all(quadlets)?;
     fs::write(format!("{quadlets}/fvca-oci-runtime-probe.container"), QUADLET)?;

@@ -162,6 +162,8 @@ Build against the exact prepared Guest core. The assembler verifies the separate
 
 ```sh
 umask 077
+bash tools/fetch-workload-admission.sh
+mkosi --profile=service-guest-storage --output-dir=build/service-guest-storage build
 python3 tools/verify-base.py build/service-guest-storage/fvca-dev-service-guest.raw mkosi.crt \
   --extract-root build/service-guest-runtime-base
 openssl req -x509 -newkey rsa:3072 -noenc -days 365 \
@@ -237,9 +239,9 @@ This off-node flow implements signed-only source admission. The optional unsigne
 
 ## Guest workload verifier
 
-The Rust verifier checks both CMS signatures against separate signer certificates. It binds the exact deployment, derivation, publisher evidence, launch definition and raw image bytes, then checks both GPT tables and the signed dm-verity root hash. It checks the target Guest and service, validity period, minimum security epoch, revocation list and offline launch profile before handing the verified file descriptor and partition offsets to a caller. Boot integration, protected staging, kernel dm-verity activation, and enforcement of the authorized resource limits remain pending.
+The Rust verifier checks both CMS signatures against separate signer certificates. It binds the exact deployment, derivation, publisher evidence, launch definition and raw image bytes, then checks both GPT tables and the signed dm-verity root hash. It checks the target Guest and service, validity period, minimum security epoch, revocation list and offline launch profile before returning the verified file descriptor and partition offsets.
 
-The development CLI takes a local policy record, the two public signer certificates and a private staging directory. The policy record contains `guest`, `service`, the reviewed `source_policy` SHA-256 digest from the derivation, `minimum_epoch` and `revoked` as a list of revocation UUIDs. Guest integration must load these inputs from verified configuration and enforce freshness against the controller ledger. Only the staging owner should be able to change the bundle, and verification and activation must hold exclusive access to it.
+The policy record contains `guest`, `service`, the reviewed `source_policy` SHA-256 digest from the derivation, `minimum_epoch` and `revoked` as a list of revocation UUIDs. The development CLI takes that record, the two public signer certificates and a private staging directory.
 
 On Fedora 45 with Rust, Cargo and `openssl-devel`, fetch the locked dependencies before the offline build. The development test uses disposable signer keys, OpenSSL and `sfdisk` to exercise rejection paths.
 
@@ -250,3 +252,13 @@ python3 tests/check-workload-admission.py
 workload-admission/target/debug/fvca-workload-admission \
   build/guest-workload-policy.json build/deployment.crt build/workload.crt build/stalwart-authorized
 ```
+
+## Guest workload root activation
+
+Supply `--workload-policy build/guest-workload-policy.json`, `--deployment-certificate build/deployment.crt` and `--workload-certificate build/workload.crt` to the Service Guest composer to embed one workload trust policy in the development UKI. The four signing keys for Secure Boot, the OCI runtime, deployment and workload authorization must be distinct. The signed initramfs enrolls the public workload certificate after checking the base and OCI runtime, then seals the kernel's `.dm-verity` keyring before switching root. [Amutable's upstream dm-verity keyring overview](https://amutable.com/blog/it-starts-upstream-kernel)
+
+Place the contents of the authorized bundle in a root-owned `0700` directory named `workload` at the top level of the selected Guest Btrfs filesystem. With the signed policy enabled, the boot service checks the bundle, binds two read-only loop devices to the verified file descriptor and its root and hash offsets, and mounts the kernel-verified EROFS root at `/run/fvca/workload-image/root`. Activation fails closed if the signed inputs or the disk differ. The workload stays within its dedicated mount path. Its public key and seal do not have to be re-signed with the Secure Boot key.
+
+For a disposable lab, run `tests/workload-data-lab.sh build/host-storage-lab/guest-data.raw build/stalwart-authorized build/workload-data-lab` on Fedora with Btrfs tools, `jq`, SELinux and rootless Podman. The resulting disks use the signed Guest storage identity and the `var_lib_t` SELinux type for staged data. Run `tests/check-storage.py --workload` with the composed disk, `--oci-runtime` and `--lab build/workload-data-lab`. It boots the approved bundle and a copy with one byte changed in `workload.raw`, using disk snapshots and the approved OVMF variable store.
+
+The Guest mounts the root at boot. Protected updates and controller-backed freshness, the generated Quadlet, workload resource enforcement, and the complete Stalwart service lifecycle remain pending.

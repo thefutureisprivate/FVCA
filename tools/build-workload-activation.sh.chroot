@@ -1,0 +1,32 @@
+#!/usr/bin/bash
+set -euo pipefail
+source "$SRCDIR/tools/allocator-source.env"
+
+build_dir=$(mktemp -d)
+trap 'rm -rf "$build_dir"' EXIT
+export CARGO_HOME="$build_dir/cargo"
+export CARGO_TARGET_DIR="$build_dir/target"
+export RUSTFLAGS="-Dwarnings"
+mkdir "$CARGO_HOME"
+lock=$(sha256sum "$SRCDIR/workload-admission/Cargo.lock")
+vendor="$SRCDIR/build/workload-admission-vendor/${lock%% *}"
+if [[ ! -d "$vendor" ]]; then
+    echo 'Prepare the checksum-locked workload dependencies with tools/fetch-workload-admission.sh' >&2
+    exit 1
+fi
+cat > "$CARGO_HOME/config.toml" <<EOF
+[source.crates-io]
+replace-with = "fvca-vendor"
+
+[source.fvca-vendor]
+directory = "$vendor"
+EOF
+target=x86_64-unknown-linux-gnu
+cargo build --frozen --release --target "$target" --bin fvca-activate-workload \
+    --manifest-path "$SRCDIR/workload-admission/Cargo.toml"
+
+activation="$DESTDIR/usr/lib/fvca/activate-workload"
+install -Dm755 "$CARGO_TARGET_DIR/$target/release/fvca-activate-workload" "$activation"
+patchelf --add-needed "$allocator_library" "$activation"
+dependencies=$(patchelf --print-needed "$activation")
+test "${dependencies%%$'\n'*}" = "$allocator_library"

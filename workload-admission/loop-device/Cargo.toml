@@ -1,0 +1,9 @@
+[package]
+name = "fvca-workload-loop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+publish = false
+
+[dependencies]
+libc = "0.2"

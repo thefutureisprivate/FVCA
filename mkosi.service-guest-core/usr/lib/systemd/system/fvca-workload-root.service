@@ -1,0 +1,20 @@
+[Unit]
+Description=Activate the authorized Service Guest workload root
+ConditionPathIsDirectory=/run/fvca/workload-trust
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+Before=fvca-base-ready.service
+OnFailure=emergency.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/fvca/activate-workload mount
+ExecStopPost=/usr/lib/fvca/activate-workload unmount
+RemainAfterExit=yes
+TimeoutStartSec=60s
+TimeoutStopSec=20s
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN
+UMask=0077
+StandardOutput=journal+console

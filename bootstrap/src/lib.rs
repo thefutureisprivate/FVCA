@@ -8,6 +8,8 @@ use std::process::{Command, Stdio};
 
 pub mod runtime;
 
+pub const WORKLOAD_VERITY_CERTIFICATE: &str = "/usr/lib/fvca/workload-verity.der";
+
 pub fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
