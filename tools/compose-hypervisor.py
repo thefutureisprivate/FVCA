@@ -41,7 +41,8 @@ def storage_selection(path):
     content = path.read_bytes()
     uuid = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
     match = re.fullmatch(
-        rf"FVCA-HOST-STORAGE-3\nunlock=(development-passphrase|tpm2-pin)\n"
+        rf"FVCA-HOST-STORAGE-4\nunlock=(development-passphrase|tpm2-pin)\n"
+        r"protection=(?:development-luks2|luks2-xts-hmac-sha256)\n"
         rf"member_a=({uuid}),({uuid})\nmember_b=({uuid}),({uuid})\n"
         rf"filesystem=btrfs\nfilesystem_uuid={uuid}\n"
         r"(?:token_a=(?:[0-9]|[12][0-9]|3[01]),([0-9a-f]{64})\n"
@@ -268,6 +269,9 @@ def assemble(args, work):
         TRIAL_CANDIDATE_FILE, PROMOTION_KEY,
     ))
     required = ACTIVATION_FILES
+    if storage is not None:
+        required += ("usr/lib/fvca/host-storage-support-v4", "usr/bin/dmsetup",
+                     "usr/lib/udev/rules.d/12-fvca-host-storage.rules")
     if args.gpt_slot:
         required += (f"usr/lib/fvca/{hypervisor_gpt.SUPPORT}",)
     if args.boot_trial is not None or args.boot_trial_candidate is not None:

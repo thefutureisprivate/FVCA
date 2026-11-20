@@ -18,6 +18,7 @@ READY = b"FVCA_DEV_BASE_READY"
 FAIL = b"FVCA_BOOT_FAILED"
 ACTIVE = b"FVCA_HOST_STORAGE_ACTIVE"
 HOST_PROFILES = b"FVCA_BTRFS_PROFILES raid1 raid1 raid1"
+HOST_AUTHENTICATED = b"FVCA_HOST_STORAGE_AUTHENTICATED"
 GUEST_PROFILES = b"FVCA_BTRFS_PROFILES single dup dup"
 DIRECT_ACTIVE = b"FVCA_DIRECT_BOOT_POLICY_ACTIVE"
 DIRECT_MISMATCH = b"direct-boot kernel command line differs from the signed command line"
@@ -170,31 +171,62 @@ def check_hypervisor(args):
     if re.fullmatch(b"[0-9a-f]{64}", password) is None:
         raise ValueError("unexpected lab passphrase encoding")
     member_a, member_b = (lab / f"member-{label}.raw" for label in ("a", "b"))
+    policy = lab / "host-storage.conf"
+    authenticated = policy.is_file() and b"\nprotection=luks2-xts-hmac-sha256\n" in policy.read_bytes()
     args.output.mkdir(mode=0o700)
+
+    def boot_case(options, name, key, *members):
+        if not authenticated:
+            return boot(options, name, key, *members)
+        options.no_default_devices = True
+        for attempt in range(1, 4):
+            prompted, log = boot(options, f"{name}-{attempt}", key, *members, firmware_timeout=36, timeout=105)
+            if b"Kernel command line:" in log:
+                break
+        log = re.sub(rb"\[ *[0-9]+\.[0-9]+\] BTRFS info \(device [^\r\n]*\r?\n", b"", KERNEL_AUDIT.sub(b"", log))
+        return prompted, log
+
     cases = [("healthy", args, member_a, member_b)]
+    if authenticated:
+        cases.append(("crash-recovered", args, lab / "crash-member-a.raw", lab / "crash-member-b.raw"))
     if args.replacement_disk is not None:
         rebuilt_args = argparse.Namespace(**vars(args))
         rebuilt_args.disk = args.replacement_disk
         cases.append(("rebuilt", rebuilt_args, lab / "surviving-member.raw", lab / "replacement.raw"))
     for name, boot_args, a, b in cases:
-        prompts, output = boot(boot_args, name, password, a, b)
+        prompts, output = boot_case(boot_args, name, password, a, b)
         if (prompts != 2 or output.count(PCR_CONFINED) < 2 or FAIL in output
-                or not all(mark in output for mark in (HOST_PROFILES, ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", READY))):
+                or not all(mark in output for mark in (HOST_PROFILES, ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", READY))
+                or (authenticated and not 0 <= output.find(HOST_AUTHENTICATED) < output.find(HOST_PROFILES))):
             raise ValueError(f"{name} did not boot with the encrypted mirror")
         print(f"{name} passed")
 
     wrong = (b"1" if password.startswith(b"0") else b"0") + password[1:]
-    for name, key, devices, reason in (
+    refusals = [
         ("wrong-passphrase", wrong, (member_a, member_b), b"development passphrase unlock exited"),
         ("missing-member-a", None, (member_b,), b"both authorized storage members are required"),
         ("missing-member-b", None, (member_a,), b"both authorized storage members are required"),
         ("duplicate-member", None, (member_a, member_a), b"more than one device has the authorized partition UUID"),
         ("unselected-replacement", None, (member_a, lab / "replacement.raw"), b"both authorized storage members are required"),
         ("wrong-luks-identity", None, (member_a, lab / "wrong-luks.raw"), b"storage superblock does not match the signed selection"),
-    ):
-        prompted, output = boot(args, name, key, *devices)
-        if prompted != (key is not None) or FAIL not in output or reason not in output or ACTIVE in output or READY in output:
+    ]
+    if authenticated:
+        refusals.extend((
+            ("plain-luks-substitution", password, (member_a, lab / "plain-member-b.raw"),
+             b"authenticated Host storage requires a journal over the selected partition"),
+            ("damaged-authenticated-sectors", password,
+             (lab / "damaged-member-a.raw", lab / "damaged-member-b.raw"), b"INTEGRITY AEAD ERROR"),
+        ))
+    for name, key, devices, reason in refusals:
+        prompted, output = boot_case(args, name, key, *devices)
+        expected_prompts = int(key is not None) + int(name in ("plain-luks-substitution", "damaged-authenticated-sectors"))
+        if (prompted != expected_prompts or FAIL not in output or reason not in output
+                or any(mark in output for mark in (ACTIVE, READY, HOST_PROFILES))):
             raise ValueError(f"{name} did not fail closed")
+        if name == "plain-luks-substitution" and HOST_AUTHENTICATED in output:
+            raise ValueError("the unauthenticated member passed the authenticated mapping gate")
+        if name == "damaged-authenticated-sectors" and HOST_AUTHENTICATED not in output:
+            raise ValueError("the damaged sectors were not tested through the verified mappings")
         print(f"{name} passed")
 
 

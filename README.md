@@ -245,9 +245,9 @@ Run `tests/check-hypervisor-promotion.py` against two fresh 4Kn slot images sign
 
 ## Development Hypervisor storage
 
-The Hypervisor assembler accepts `--storage tests/host-storage.conf` for the disposable storage fixture. The UKI signs the GPT and LUKS2 UUID of each member and the shared Btrfs filesystem UUID. The initramfs checks both partitions and their LUKS2 identities before prompting on the console, then verifies that each decrypted mapping is backed by its authorized partition on a separate disk.
+The Hypervisor assembler accepts `--storage tests/host-storage.conf` for the disposable storage fixture. The signed `FVCA-HOST-STORAGE-4` record fixes the protection and unlock modes, the GPT and LUKS2 UUID of each member, and the shared Btrfs filesystem UUID. The initramfs checks both partitions and their LUKS2 identities before prompting on the console, then verifies that each decrypted mapping is backed by its authorized partition on a separate disk.
 
-Btrfs mirrors data, metadata and system chunks across the two decrypted devices. The gate checks the actual devices and allocation profiles before enabling read-write access at `/run/fvca/host-data`. The mount uses `nodev,nosuid,noexec`, and the filesystem root must be owned by root with mode `0700`. Ordinary boot requires both authorized members. Physical TPM qualification, policy for degraded boot, the appliance recovery environment, and authenticated mutable-state protections remain pending.
+Btrfs mirrors data, metadata and system chunks across the two decrypted devices. The gate checks the actual devices and allocation profiles before enabling read-write access at `/run/fvca/host-data`. The mount uses `nodev,nosuid,noexec`, and the filesystem root must be owned by root with mode `0700`. Ordinary boot requires both authorized members. Physical TPM qualification, policy for degraded boot, and the appliance recovery environment remain pending.
 
 On a Fedora KVM test machine with `cryptsetup`, `btrfs-progs`, `e2fsprogs` and `cpio` installed, the fixture creates fresh file-backed disks. It tests single-member recovery without Btrfs log replay and replaces the missing device with a freshly encrypted mapping. A writable degraded mount can allocate SINGLE chunks. The fixture restores those chunks to RAID1 in the isolated repair guest, then verifies every profile and scrubs the restored pool. Build the Hypervisor as above with the fixture selection added to the assembler command, then run the integration checks against the signed disk and its matching runtime. To qualify boot after replacement, compose a second UKI with the fixture's `replacement-storage.conf` and provide its disk as `--replacement-disk`. [Btrfs recovery mount options](https://btrfs.readthedocs.io/en/latest/ch-mount-options.html)
 
@@ -259,6 +259,14 @@ python3 tests/check-storage.py \
   --variables build/fvca-vars.fd \
   --lab build/host-storage-lab --output build/host-storage-checks
 ```
+
+### Authenticated Hypervisor storage candidate
+
+Run `tests/storage-lab.sh --authenticated build/host-integrity-lab` to provision fresh disposable members with `cryptsetup luksFormat --type luks2 --cipher aes-xts-plain64 --integrity hmac-sha256 --sector-size 4096`. Use `--storage build/host-integrity-lab/host-storage.conf` when composing the Hypervisor. The signed record selects `protection=luks2-xts-hmac-sha256`. Use the generated replacement policy to compose the separately authorized replacement image.
+
+The initramfs disables udev filesystem probing on the storage mappings. It confirms that rule took effect, reads the active kernel tables, and verifies the AES-XTS and HMAC-SHA256 crypt target, the 32-byte tags, and journaled dm-integrity beneath both members before probing Btrfs. It checks that each stack ends at its selected physical partition and emits `FVCA_HOST_STORAGE_AUTHENTICATED` only once both stacks pass. The profile keeps discards disabled and prevents a same-UUID ordinary LUKS2 member from satisfying the authenticated selection. [Linux dm-integrity](https://docs.kernel.org/admin-guide/device-mapper/dm-integrity.html) · [Linux dm-crypt](https://docs.kernel.org/admin-guide/device-mapper/dm-crypt.html)
+
+The disposable fixture flips ciphertext beneath each member's primary Btrfs superblock and requires both decrypted reads to fail with zero bytes returned. It cuts VM power after a flushed record and subsequent writes, then verifies the retained record and scrubs the remounted pool. It also exercises single-member recovery and replacement. Use the same `tests/check-storage.py` command with the authenticated lab and its signed images to check Secure Boot activation, rejection of the plain member, and boot with the replacement. Physical NVMe interruption and performance qualification, TPM enrollment with this profile, and protected rollback state remain release gates.
 
 ### Development TPM and PIN unlock
 

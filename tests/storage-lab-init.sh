@@ -3,6 +3,7 @@
 set -Eeuo pipefail
 shopt -s nullglob
 export PATH=/usr/bin
+export LC_ALL=C
 trap 'printf "FVCA_STORAGE_LAB_FAILED at line %s\n" "$LINENO"; poweroff -f' ERR
 
 mount -t proc proc /proc
@@ -35,10 +36,14 @@ format_member() {
     local device=$1
     local identity=$2
     local mapper=$3
+    local protection_options=()
+    if [[ "$protection" == luks2-xts-hmac-sha256 ]]; then
+        protection_options=(--cipher aes-xts-plain64 --integrity hmac-sha256 --sector-size 4096)
+    fi
     partition_disk "$device" "${identity%,*}" ca7d7ccb-63ed-4c53-861c-1742536059cc
     cryptsetup luksFormat --type=luks2 --uuid="${identity#*,}" --batch-mode \
         --pbkdf=argon2id --pbkdf-memory=65536 --pbkdf-parallel=1 --iter-time=50 \
-        --key-file=/storage.key "${device}1"
+        "${protection_options[@]}" --key-file=/storage.key "${device}1"
     cryptsetup open --type=luks2 --key-file=/storage.key "${device}1" "$mapper"
 }
 
@@ -57,6 +62,22 @@ verify_mirror() {
             return 1
         fi
     done
+}
+
+report_superblock_location() {
+    local mapper=$1 side=$2
+    local layout start sectors target source offset tags mode count block_size interleave buffer journal rest
+    layout=$(dmsetup table "${mapper}_dif")
+    read -r start sectors target source offset tags mode count block_size interleave buffer journal rest <<< "$layout"
+    [[ "$start" == 0 && "$target" == integrity && "$mode" == J && "$tags" == 32 ]]
+    [[ "$block_size" == block_size:4096 && "$interleave" == interleave_sectors:32768 ]]
+    [[ "$journal" =~ ^journal_sectors:[1-9][0-9]*$ ]]
+    # The first run follows the 4 KiB integrity superblock and journal.
+    # Its 32-byte tags cover 4 KiB blocks across 32768 512-byte sectors.
+    local tag_area=$(( 32768 / 8 * 32 / 512 ))
+    local btrfs_primary=$(( 65536 / 512 ))
+    printf 'FVCA_INTEGRITY_LAB_SUPERBLOCK_%s %d\n' "$side" \
+        "$((offset + 8 + ${journal#journal_sectors:} + tag_area + btrfs_primary))"
 }
 
 provision() {
@@ -78,9 +99,63 @@ provision() {
     )
     sync
     umount /mnt
+    if [[ "$protection" == luks2-xts-hmac-sha256 ]]; then
+        report_superblock_location fvca-test-a a
+        report_superblock_location fvca-test-b b
+    fi
     cryptsetup close fvca-test-b
     cryptsetup close fvca-test-a
     echo FVCA_STORAGE_LAB_PROVISIONED
+}
+
+plain_b() {
+    require_disk vda fvca-lab-b
+    protection=development-luks2 format_member /dev/vda "$member_b" fvca-test-b
+    cryptsetup close fvca-test-b
+    echo FVCA_STORAGE_LAB_PLAIN_MEMBER_BUILT
+}
+
+check_bad_sectors() {
+    local side
+    for side in a b; do
+        require_disk "vd$side" "fvca-lab-$side"
+        cryptsetup open --readonly --type=luks2 --key-file=/storage.key "/dev/vd${side}1" "fvca-test-$side"
+        if dd if="/dev/mapper/fvca-test-$side" of=/dev/null bs=4096 skip=16 count=1 iflag=direct 2>/run/read-error; then
+            return 1
+        fi
+        local error
+        error=$(</run/read-error)
+        printf '%s\n' "$error"
+        [[ "$error" == *'Input/output error'* || "$error" == *'Invalid or incomplete multibyte or wide character'* ]]
+        [[ "$error" == *'0+0 records in'* && "$error" == *'0+0 records out'* ]]
+        cryptsetup close "fvca-test-$side"
+    done
+    echo FVCA_STORAGE_LAB_BAD_SECTORS_REJECTED
+}
+
+crash_check() {
+    require_disk vda fvca-lab-a
+    require_disk vdb fvca-lab-b
+    cryptsetup open --type=luks2 --key-file=/storage.key /dev/vda1 fvca-test-a
+    cryptsetup open --type=luks2 --key-file=/storage.key /dev/vdb1 fvca-test-b
+    mount -t btrfs -o "nodev,nosuid,noexec,device=$b" "$a" /mnt
+    verify_mirror
+    [[ $(</mnt/marker) == "$marker" ]]
+    if [[ "$1" == write ]]; then
+        printf '%s\n' "$marker" > /mnt/flushed-before-crash
+        sync -f /mnt
+        dd if=/dev/zero of=/mnt/interrupted bs=1M count=32 oflag=direct status=none
+        echo FVCA_STORAGE_LAB_UNFLUSHED_WRITE
+        while :; do
+            dd if=/dev/zero of=/mnt/interrupted bs=1M count=32 oflag=direct status=none
+        done
+    fi
+    [[ $(</mnt/flushed-before-crash) == "$marker" ]]
+    btrfs scrub start -B /mnt
+    umount /mnt
+    cryptsetup close fvca-test-b
+    cryptsetup close fvca-test-a
+    echo FVCA_STORAGE_LAB_CRASH_RECOVERED
 }
 
 recover() {
@@ -162,6 +237,10 @@ case "$cmdline" in
     *' fvca.lab=guest') provision_guest dup ;;
     *' fvca.lab=guest-wrong-profile') provision_guest single ;;
     *' fvca.lab=provision') modprobe dm-crypt; provision ;;
+    *' fvca.lab=plain-b') modprobe dm-crypt; plain_b ;;
+    *' fvca.lab=authenticated-read-error') modprobe dm-crypt; check_bad_sectors ;;
+    *' fvca.lab=crash-write') modprobe dm-crypt; crash_check write ;;
+    *' fvca.lab=crash-recover') modprobe dm-crypt; crash_check recover ;;
     *' fvca.lab=nocow') modprobe dm-crypt; provision_nocow ;;
     *' fvca.lab=replace') modprobe dm-crypt; replace ;;
     *' fvca.lab=verify') modprobe dm-crypt; recover replacement ;;

@@ -10,6 +10,8 @@ use fvca_initrd_bootstrap::{find_partition, identity, invalid, run, sys_block, v
 
 use super::hash;
 
+#[path = "storage_integrity.rs"]
+mod integrity;
 #[path = "tpm.rs"]
 mod tpm;
 
@@ -32,6 +34,7 @@ struct Selection<'a> {
     members: [Member<'a>; 2],
     tokens: Option<[Token<'a>; 2]>,
     filesystem: &'a str,
+    authenticated: bool,
 }
 
 fn member<'a>(field: &'a str, prefix: &str) -> io::Result<Member<'a>> {
@@ -56,7 +59,7 @@ fn token<'a>(field: &'a str, prefix: &str) -> io::Result<Token<'a>> {
 
 fn selection(text: &str) -> io::Result<Selection<'_>> {
     let fields: Vec<_> = text.split('\n').collect();
-    let ["FVCA-HOST-STORAGE-3", unlock, a, b, "filesystem=btrfs", filesystem, rest @ ..] =
+    let ["FVCA-HOST-STORAGE-4", unlock, protection, a, b, "filesystem=btrfs", filesystem, rest @ ..] =
         fields.as_slice()
     else {
         return Err(invalid("malformed Hypervisor storage selection"));
@@ -66,6 +69,11 @@ fn selection(text: &str) -> io::Result<Selection<'_>> {
     if a.partition == b.partition || a.luks == b.luks {
         return Err(invalid("storage selection must name distinct partitions and LUKS2 volumes"));
     }
+    let authenticated = match *protection {
+        "protection=development-luks2" => false,
+        "protection=luks2-xts-hmac-sha256" => true,
+        _ => return Err(invalid("unsupported Host storage protection")),
+    };
     let tokens = match (*unlock, rest) {
         ("unlock=development-passphrase", [""]) => None,
         ("unlock=tpm2-pin", [a, b, ""]) => {
@@ -82,6 +90,7 @@ fn selection(text: &str) -> io::Result<Selection<'_>> {
         members: [a, b],
         tokens,
         filesystem: identity(filesystem, "filesystem_uuid=", &[8, 4, 4, 4, 12], '-')?,
+        authenticated,
     })
 }
 
@@ -113,15 +122,13 @@ fn parent_device(path: &Path) -> io::Result<PathBuf> {
     partition.parent().map(Path::to_path_buf).ok_or_else(|| invalid("missing parent block device"))
 }
 
-fn verify_mapping(volume: &Path, source: &Path) -> io::Result<()> {
-    let mapped = sys_block(&fs::canonicalize(volume)?)?;
-    let actual = fs::read_dir(mapped.join("slaves"))?
-        .map(|entry| fs::canonicalize(entry?.path()))
-        .collect::<io::Result<Vec<_>>>()?;
-    if actual != [sys_block(source)?] {
-        return Err(invalid("LUKS mapping has an unselected backing device"));
+fn sole_backing(mapped: &Path) -> io::Result<PathBuf> {
+    let mut slaves = fs::read_dir(mapped.join("slaves"))?;
+    let backing = slaves.next().transpose()?;
+    match backing {
+        Some(backing) if slaves.next().transpose()?.is_none() => fs::canonicalize(backing.path()),
+        _ => Err(invalid("Host storage mapping requires exactly one backing device")),
     }
-    Ok(())
 }
 
 fn unlock_development(source: &Path, mapper: &str) -> io::Result<()> {
@@ -149,7 +156,16 @@ fn open_data(selection: &Selection<'_>, sources: &[PathBuf; 2]) -> io::Result<()
                 unlock_development(source, mapper)?;
             }
             opened += 1;
-            verify_mapping(volumes[index], source)?;
+            let volume = sys_block(&fs::canonicalize(volumes[index])?)?;
+            let partition = sys_block(source)?;
+            if selection.authenticated {
+                integrity::verify(&volume, &partition)?;
+            } else if sole_backing(&volume)? != partition {
+                return Err(invalid("LUKS mapping has an unselected backing device"));
+            }
+        }
+        if selection.authenticated {
+            println!("FVCA_HOST_STORAGE_AUTHENTICATED");
         }
         btrfs::mount(Pool::Hypervisor(volumes), selection.filesystem, DATA)
     })();

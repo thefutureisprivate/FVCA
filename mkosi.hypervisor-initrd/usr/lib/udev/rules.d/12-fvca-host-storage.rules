@@ -1,0 +1,2 @@
+# FVCA checks both live storage mappings before running its own Btrfs probe.
+SUBSYSTEM=="block", KERNEL=="dm-[0-9]*", ENV{DM_NAME}=="fvca-host-a|fvca-host-b|fvca-host-a_dif|fvca-host-b_dif", ENV{DM_UDEV_DISABLE_DISK_RULES_FLAG}="1"

@@ -25,6 +25,7 @@ for binary in "${binaries[@]}"; do
     install -Dm755 "$CARGO_TARGET_DIR/$target/release/$binary" "$DESTDIR/usr/lib/fvca/${binary#fvca-}"
 done
 if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-storage-support-v4"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-slot-support-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-trial-support-v2"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-promotion-support-v1"
