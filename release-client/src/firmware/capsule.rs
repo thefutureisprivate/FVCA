@@ -6,7 +6,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use fvca_trial_authorization::efi;
-use rustix::fs::{self, CWD, Dir, Mode, OFlags, ResolveFlags, StatVfsMountFlags};
+use rustix::fs::{self, CWD, Dir, Mode, OFlags, ResolveFlags, StatFs, StatVfsMountFlags};
 use rustix::io::Errno;
 use serde::Serialize;
 
@@ -18,6 +18,13 @@ const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 const EFIVARFS_MAGIC: u64 = 0xde5e81e4;
 const VFAT_MAGIC: u64 = 0x4d44;
 const ESP_PATH_LIMIT: usize = 256;
+const WITHIN_MOUNT: ResolveFlags = ResolveFlags::BENEATH
+    .union(ResolveFlags::NO_SYMLINKS)
+    .union(ResolveFlags::NO_XDEV);
+const X86_EFIVAR_RESERVE: u64 = 5 * 1024;
+// Allow two 128-byte records for setting and restoring OsIndications. Each
+// includes the eight-byte value, UTF-16 name and room for headers and padding.
+const EFIVAR_REQUIRED: u64 = 2 * 128;
 const DIRECTORY: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
@@ -43,6 +50,8 @@ enum Route {
         esp_device_path_sha256: String,
         esp_available_bytes: u64,
         esp_required_bytes: u64,
+        efivar_available_bytes: u64,
+        efivar_required_bytes: u64,
     },
     Blocked {
         reason: String,
@@ -81,16 +90,14 @@ fn live_route(esrt: &Esrt, target: u32, payload_bytes: u64) -> Result<(String, R
     file.take((ESP_PATH_LIMIT + size_of::<u64>() + 1) as u64)
         .read_to_end(&mut binding)?;
     let (device_id, expected) = esp_binding(&binding)?;
-    let efivars = Path::new(EFIVARS);
-    if rustix::fs::fstatfs(File::open(efivars)?)?.f_type as u64 != EFIVARFS_MAGIC {
-        return Err(invalid("capsule routing requires the kernel efivarfs mount").into());
-    }
+    let efivars = File::from(fs::openat(CWD, EFIVARS, DIRECTORY, Mode::empty())?);
+    let efivar_available = efivar_space(&fs::fstatfs(&efivars)?)?;
     let boot = state::read(Path::new(BOOT_ID), 37)?;
     let boot_id = std::str::from_utf8(&boot)?
         .strip_suffix('\n')
         .filter(|id| uuid(id))
         .ok_or_else(|| invalid("invalid Linux boot identifier"))?;
-    let boot_entry = route(efivars, expected, esrt, target)?;
+    let boot_entry = route(&efivars, expected, esrt, target)?;
     let required = required_space(payload_bytes)?;
     let available = esp_space(Path::new(efi::FIRMWARE_ESP), device_id)?;
     if available < required {
@@ -106,8 +113,40 @@ fn live_route(esrt: &Esrt, target: u32, payload_bytes: u64) -> Result<(String, R
             esp_device_path_sha256: digest(expected),
             esp_available_bytes: available,
             esp_required_bytes: required,
+            efivar_available_bytes: efivar_available,
+            efivar_required_bytes: EFIVAR_REQUIRED,
         },
     ))
+}
+
+fn efivar_space(space: &StatFs) -> io::Result<u64> {
+    if space.f_type as u64 != EFIVARFS_MAGIC {
+        return Err(invalid(
+            "capsule routing requires the kernel efivarfs mount",
+        ));
+    }
+    // Linux reports QueryVariableInfo for nonvolatile runtime variables in
+    // one-byte blocks, or a zero store size when it cannot query firmware.
+    if space.f_bsize != 1
+        || space.f_frsize != 1
+        || space.f_blocks == 0
+        || space.f_bavail > space.f_bfree
+        || space.f_bfree > space.f_blocks
+    {
+        return Err(invalid(
+            "firmware EFI variable capacity is unavailable or invalid",
+        ));
+    }
+    if space.f_bavail > space.f_bfree.saturating_sub(X86_EFIVAR_RESERVE) {
+        return Err(invalid("the kernel EFI variable store reserve is missing"));
+    }
+    if space.f_bavail < EFIVAR_REQUIRED {
+        return Err(invalid(&format!(
+            "firmware EFI variable store has {} available bytes and requires {EFIVAR_REQUIRED}",
+            space.f_bavail,
+        )));
+    }
+    Ok(space.f_bavail)
 }
 
 fn esp_binding(binding: &[u8]) -> io::Result<(u64, &[u8])> {
@@ -155,9 +194,14 @@ fn esp_space(path: &Path, device_id: u64) -> io::Result<u64> {
 }
 
 fn require_empty_capsule_directory(root: &File) -> io::Result<()> {
-    let resolve = ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV;
-    let efi = fs::openat2(root, "EFI", DIRECTORY, Mode::empty(), resolve)?;
-    let queue = match fs::openat2(&efi, "UpdateCapsule", DIRECTORY, Mode::empty(), resolve) {
+    let efi = fs::openat2(root, "EFI", DIRECTORY, Mode::empty(), WITHIN_MOUNT)?;
+    let queue = match fs::openat2(
+        &efi,
+        "UpdateCapsule",
+        DIRECTORY,
+        Mode::empty(),
+        WITHIN_MOUNT,
+    ) {
         Ok(queue) => queue,
         Err(Errno::NOENT) => return Ok(()),
         Err(error) => return Err(error.into()),
@@ -172,9 +216,27 @@ fn require_empty_capsule_directory(root: &File) -> io::Result<()> {
     Ok(())
 }
 
-fn read(variables: &Path, name: &str) -> io::Result<Vec<u8>> {
-    state::read(&variables.join(format!("{name}-{}", efi::GLOBAL)), 4096)
-        .map_err(|error| io::Error::new(error.kind(), format!("EFI {name}: {error}")))
+fn read(variables: &File, name: &str) -> io::Result<Vec<u8>> {
+    let fetch = || -> io::Result<_> {
+        let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY;
+        let file = File::from(fs::openat2(
+            variables,
+            format!("{name}-{}", efi::GLOBAL).as_str(),
+            flags,
+            Mode::empty(),
+            WITHIN_MOUNT,
+        )?);
+        if !file.metadata()?.is_file() {
+            return Err(invalid("expected a regular EFI variable file"));
+        }
+        let mut raw = Vec::new();
+        file.take(4097).read_to_end(&mut raw)?;
+        if raw.is_empty() || raw.len() > 4096 {
+            return Err(invalid("EFI variable exceeds its size bound or is empty"));
+        }
+        Ok(raw)
+    };
+    fetch().map_err(|error| io::Error::new(error.kind(), format!("EFI {name}: {error}")))
 }
 
 fn mask(raw: &[u8], attributes: u32) -> io::Result<u64> {
@@ -184,7 +246,7 @@ fn mask(raw: &[u8], attributes: u32) -> io::Result<u64> {
     Ok(u64::from_le_bytes(bytes))
 }
 
-fn route(variables: &Path, expected: &[u8], esrt: &Esrt, target: u32) -> Result<u16> {
+fn route(variables: &File, expected: &[u8], esrt: &Esrt, target: u32) -> Result<u16> {
     if target < esrt.lowest_supported_fw_version {
         return Err(invalid("capsule target is below the device's ESRT firmware floor").into());
     }
@@ -325,16 +387,60 @@ mod tests {
     }
 
     #[test]
+    fn requires_efivarfs_capacity_above_the_kernel_reserve() -> Result<()> {
+        let work = tempfile::tempdir()?;
+        let mut stats = rustix::fs::fstatfs(File::open(work.path())?)?;
+        assert!(efivar_space(&stats).is_err());
+        stats.f_type = EFIVARFS_MAGIC as _;
+        stats.f_bsize = 1;
+        stats.f_frsize = 1;
+        stats.f_blocks = 196_608;
+        stats.f_bfree = 26_002;
+        stats.f_bavail = 20_882;
+        assert_eq!(efivar_space(&stats)?, 20_882);
+        stats.f_bfree = stats.f_blocks + 1;
+        assert!(efivar_space(&stats).is_err());
+        stats.f_bfree = X86_EFIVAR_RESERVE + EFIVAR_REQUIRED;
+        stats.f_bavail = EFIVAR_REQUIRED;
+        assert_eq!(efivar_space(&stats)?, EFIVAR_REQUIRED);
+        stats.f_bavail -= 1;
+        assert!(
+            efivar_space(&stats)
+                .unwrap_err()
+                .to_string()
+                .contains("available bytes")
+        );
+        stats.f_bavail = stats.f_bfree;
+        assert!(
+            efivar_space(&stats)
+                .unwrap_err()
+                .to_string()
+                .contains("reserve is missing")
+        );
+        stats.f_bfree = 0;
+        stats.f_bavail = 0;
+        stats.f_blocks = 0;
+        assert!(
+            efivar_space(&stats)
+                .unwrap_err()
+                .to_string()
+                .contains("unavailable")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn matches_only_the_running_signed_esp_and_an_idle_firmware_route() -> Result<()> {
         let work = tempfile::tempdir()?;
         let dir = work.path();
+        let efivars = File::open(dir)?;
         let expected = efi::esp_device_path(ESP, 1, 256, 64_000)?;
         assert_eq!(
             &expected[24..42],
             &hex::decode("1edb9549221144335566778899aabbcc0202")?
         );
         let esrt = baseline();
-        let require = || route(dir, &expected, &esrt, TARGET);
+        let require = || route(&efivars, &expected, &esrt, TARGET);
         variables(dir, &expected)?;
         assert_eq!(require()?, 2);
         for (name, attributes, contents, reason) in [
@@ -397,6 +503,11 @@ mod tests {
             );
             fs::remove_file(dir.join(format!("{name}-{}", efi::GLOBAL)))?;
         }
+        let unrelated = dir.join("unrelated");
+        fs::write(&unrelated, [BOOT_RUNTIME as u8, 0, 0, 0, 1])?;
+        fs::remove_file(dir.join(format!("SecureBoot-{}", efi::GLOBAL)))?;
+        std::os::unix::fs::symlink(unrelated, dir.join(format!("SecureBoot-{}", efi::GLOBAL)))?;
+        assert!(require().is_err());
         Ok(())
     }
 
@@ -404,12 +515,13 @@ mod tests {
     fn refuses_a_capsule_below_the_esrt_floor_or_with_an_existing_attempt() -> Result<()> {
         let work = tempfile::tempdir()?;
         let dir = work.path();
+        let efivars = File::open(dir)?;
         let expected = efi::esp_device_path(ESP, 1, 256, 64_000)?;
         variables(dir, &expected)?;
         let mut esrt = baseline();
         esrt.lowest_supported_fw_version = TARGET + 1;
         assert!(
-            route(dir, &expected, &esrt, TARGET)
+            route(&efivars, &expected, &esrt, TARGET)
                 .err()
                 .unwrap()
                 .to_string()
@@ -420,7 +532,7 @@ mod tests {
         for status in [0, 1, 5] {
             esrt.last_attempt_status = status;
             assert!(
-                route(dir, &expected, &esrt, TARGET)
+                route(&efivars, &expected, &esrt, TARGET)
                     .err()
                     .unwrap()
                     .to_string()

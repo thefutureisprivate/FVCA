@@ -359,7 +359,7 @@ def assemble(args, work):
         for tree, members in (
             (prepared / "root", (Path("usr/libexec/fwupd/fwupd"), Path("usr/lib/systemd/system/fvca-fwupd.service"),
                                  Path("usr/share/fvca/firmware-build.txt"))),
-            (runtime_work / "tree", (*vm_runtime.FIRMWARE_UPDATE_UNITS, vm_runtime.FIRMWARE_ESP_PREFLIGHT)),
+            (runtime_work / "tree", (*vm_runtime.FIRMWARE_UPDATE_UNITS, vm_runtime.FIRMWARE_CAPSULE_PREFLIGHT)),
         ):
             if any((tree / member).is_symlink() or not (tree / member).is_file() for member in members):
                 raise ValueError("scheduled Host firmware requires the confined fwupd core and VM runtime units")
