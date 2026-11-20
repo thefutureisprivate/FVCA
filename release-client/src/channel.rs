@@ -6,7 +6,10 @@ use std::path::Path;
 
 use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
 use fvca_trial_authorization::{APPROVAL_LIMIT, Standing};
-use jiff::{Timestamp, tz::TimeZone};
+use jiff::{
+    Timestamp,
+    tz::{TimeZone, TimeZoneDatabase},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tough::schema::key::Key;
@@ -74,7 +77,7 @@ impl Window {
         {
             return Err(invalid("invalid maintenance window").into());
         }
-        Ok(TimeZone::get(&self.timezone)?)
+        Ok(TimeZoneDatabase::bundled().get(&self.timezone)?)
     }
 
     fn contains(&self, now: Timestamp, zone: TimeZone) -> bool {

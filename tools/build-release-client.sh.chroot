@@ -1,0 +1,29 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+export CARGO_HOME="$work/cargo"
+export CARGO_TARGET_DIR="$work/target"
+export PKG_CONFIG=/usr/bin/pkgconf
+export RUSTFLAGS=-Dwarnings
+
+mkdir -p "$CARGO_HOME"
+cat > "$CARGO_HOME/config.toml" <<EOF
+[source.crates-io]
+replace-with = "vendored-sources"
+[source.vendored-sources]
+directory = "$SRCDIR/build/release-client-vendor/sources"
+EOF
+cargo build --frozen --release --features appliance --manifest-path "$SRCDIR/release-client/Cargo.toml"
+install -Dm755 "$CARGO_TARGET_DIR/release/fvca-release-client" "$DESTDIR/usr/libexec/fvca/release-client"
+
+# mcopy uses the OEM code page for the fixed EFI path. Isolate its module
+# and configuration from the base's reduced glibc conversion cache.
+gconv="$DESTDIR/usr/lib64/fvca/fat-gconv"
+install -Dm755 /usr/lib64/gconv/IBM437.so "$gconv/IBM437.so"
+grep -wE 'IBM437(//)?' /usr/lib64/gconv/gconv-modules.d/gconv-modules-extra.conf > "$gconv/gconv-modules"
+chmod 0644 "$gconv/gconv-modules"
+install -d "$DESTDIR/usr/share/fvca"
+printf 'default_codepage=437\n' > "$DESTDIR/usr/share/fvca/mtools.conf"
+chmod 0644 "$DESTDIR/usr/share/fvca/mtools.conf"

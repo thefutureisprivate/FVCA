@@ -477,6 +477,9 @@ async fn intake(
 }
 
 fn run() -> Result<()> {
+    #[cfg(feature = "appliance")]
+    fvca_allocator_binding::require_allocator()?;
+
     let operands = std::env::args_os()
         .skip(1)
         .map(PathBuf::from)

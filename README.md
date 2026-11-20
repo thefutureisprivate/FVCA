@@ -100,11 +100,12 @@ Prepare a private state directory owned by the intake account with mode `0700`. 
 ```sh
 umask 077
 # Install the Fedora C toolchain, pkgconf-pkg-config, and tpm2-tss-devel on the build system.
+mkdir -p build/release-client-vendor
 cargo vendor --locked --versioned-dirs --manifest-path release-client/Cargo.toml \
-  "$PWD/build/release-client-vendor" > build/release-client-cargo.toml
+  "$PWD/build/release-client-vendor/sources" > build/release-client-vendor/config.toml
 # Run the build below in a Fedora Rust 1.100 environment with networking disabled.
 cargo build --frozen --release --manifest-path release-client/Cargo.toml \
-  --config build/release-client-cargo.toml
+  --config build/release-client-vendor/config.toml
 release-client/target/release/fvca-release-client trusted-root.json depot.json intake-state selection.json
 ```
 
@@ -252,9 +253,9 @@ If the reboot request fails after the Guest stopped, systemd starts `fvca-recove
 
 ## Hypervisor runtime candidate
 
-The separate mkosi recipe builds `vm-runtime.raw`, a signed EROFS system extension. It contains QEMU, the modular libvirt QEMU, log and lock daemons, the selected OVMF firmware and restic. The VMM is built offline from the pinned upstream QEMU release and the build checks that KVM is its only accelerator. The development appliance uses private UNIX sockets for libvirt and requires SELinux confinement for QEMU processes. The build strips Fedora's automatic service hooks and management commands before signing, records the exact core root hash in the extension and checks the shared package versions. [QEMU release archive and signing key](https://www.qemu.org/download/)
+The separate mkosi recipe builds `vm-runtime.raw`, a signed EROFS system extension. It contains QEMU, the modular libvirt QEMU, log and lock daemons, the selected OVMF firmware, restic, and `/usr/libexec/fvca/release-client`. The release client checks the hardened allocator before running. It uses a bundled IANA time-zone database and the native EFI helpers in the verified runtime. The VMM is built offline from the pinned upstream QEMU release and the build checks that KVM is its only accelerator. The development appliance uses private UNIX sockets for libvirt and requires SELinux confinement for QEMU processes. The build strips Fedora's automatic service hooks and management commands before signing, records the exact core root hash in the extension and checks the shared package versions. [QEMU release archive and signing key](https://www.qemu.org/download/)
 
-Prepare a fresh base input from the verified development disk, and use a separate development certificate for the runtime. Keep the private key in the ignored build directory.
+Vendor the locked release-client sources into `build/release-client-vendor/sources` using the command above. Prepare a fresh base input from the verified development disk, and use a separate development certificate for the runtime. Keep the private key in the ignored build directory.
 
 ```sh
 umask 077

@@ -161,7 +161,14 @@ fn copy(source: &File, extent: Extent, target: &File, destination: u64) -> io::R
 }
 
 fn tool(program: &str, args: &[&Path]) -> Result<()> {
-    let result = Command::new(program).env_clear().args(args).output()?;
+    let mut command = Command::new(program);
+    command.env_clear().args(args);
+    #[cfg(feature = "appliance")]
+    if program == "/usr/bin/mcopy" {
+        command.env("MTOOLSRC", "/usr/share/fvca/mtools.conf");
+        command.env("GCONV_PATH", "/usr/lib64/fvca/fat-gconv");
+    }
+    let result = command.output()?;
     if !result.status.success() {
         return Err(io::Error::other(format!(
             "{program} refused the Hypervisor EFI loader: {}",

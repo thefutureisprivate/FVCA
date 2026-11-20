@@ -9,8 +9,10 @@ import runtime_tree
 
 IMAGE_ID = "vm-runtime"
 EXECUTABLES = (
-    "qemu-img", "qemu-system-x86_64", "restic", "virtlockd", "virtlogd", "virtqemud",
+    "mtools", "qemu-img", "qemu-system-x86_64", "restic", "sbverify", "virtlockd", "virtlogd", "virtqemud",
 )
+MCOPY = Path("usr/bin/mcopy")
+RELEASE_CLIENT = Path("usr/libexec/fvca/release-client")
 LIBVIRT_UNITS = {
     Path(f"usr/lib/systemd/system/fvca-{daemon}.{kind}")
     for daemon in ("virtqemud", "virtlogd", "virtlockd")
@@ -34,6 +36,10 @@ REQUIRED_FILES = {
     Path("usr/libexec/fvca/qualify-libvirt"),
     Path("usr/libexec/fvca/launch-guest"),
     Path("usr/libexec/fvca/backup-worker"),
+    RELEASE_CLIENT,
+    Path("usr/lib64/fvca/fat-gconv/IBM437.so"),
+    Path("usr/lib64/fvca/fat-gconv/gconv-modules"),
+    Path("usr/share/fvca/mtools.conf"),
     Path("usr/lib/systemd/system/fvca-service-guest.service"),
     Path("usr/lib/systemd/system/fvca-activate-hypervisor-trial.service"),
     Path("usr/lib/systemd/system/fvca-recover-hypervisor-activation.service"),
@@ -79,6 +85,7 @@ FIRMWARE_DATA = {
 def allowed(path):
     return (
         path in REQUIRED_FILES
+        or path == MCOPY
         or path == TRIAL_HEALTH
         or path in FIRMWARE_DATA
         or path.is_relative_to("usr/share/licenses")
@@ -94,3 +101,5 @@ def inspect_tree(root, base, *, prune):
     if os.path.lexists(base / "usr/lib/fvca/role"):
         raise ValueError("VM runtime requires the common core")
     runtime_tree.inspect_tree(root, base, allowed=allowed, required=REQUIRED_FILES, prune=prune)
+    if not (root / MCOPY).is_symlink() or os.readlink(root / MCOPY) != "mtools":
+        raise ValueError("the EFI reader must be the signed relative mtools link")
