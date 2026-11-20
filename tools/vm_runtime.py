@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 
 import runtime_tree
-from runtime_boot import GUEST_CONFIG_CHANGE_SUPPORT, GUEST_VM_SUPPORT, MANAGEMENT_SUPPORT
+from runtime_boot import GUEST_CONFIG_CHANGE_SUPPORT, GUEST_VM_SUPPORT, HOST_NETWORK_SUPPORT, MANAGEMENT_SUPPORT
 
 
 IMAGE_ID = "vm-runtime"
@@ -121,7 +121,8 @@ def allowed(path):
         or path in GUEST_TRIAL_FILES
         or path in GUEST_UPDATE_UNITS
         or path in FIRMWARE_UPDATE_UNITS
-        or path in (FIRMWARE_UPDATE_SUPPORT, GUEST_VM_SUPPORT, GUEST_CONFIG_CHANGE_SUPPORT, MANAGEMENT_SUPPORT)
+        or path in (FIRMWARE_UPDATE_SUPPORT, GUEST_VM_SUPPORT, GUEST_CONFIG_CHANGE_SUPPORT, HOST_NETWORK_SUPPORT,
+                    MANAGEMENT_SUPPORT)
         or path in FIRMWARE_DATA
         or path.is_relative_to("usr/share/licenses")
         or (path.parent == Path("usr/share/libvirt/cpu_map") and path.suffix == ".xml")

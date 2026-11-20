@@ -789,6 +789,19 @@ Publish the approval as `hypervisor-EPOCH-MANIFEST_SHA256-guest-configuration-ch
 
 #### Host management service
 
+The verified Hypervisor initrd installs a default-deny nftables policy for IPv4, IPv6 and bridge traffic. Without an uplink enrollment it permits loopback IP traffic only. For a physical management uplink, pass `--host-network FILE` with a record in this format. Use the same record for both Host slots.
+
+```text
+FVCA-HOST-NETWORK-1
+pci=0000:03:00.0
+mac=02:fc:00:00:00:01
+address=192.168.44.15/24
+gateway=192.168.44.1
+operator=192.168.44.20
+```
+
+Replace the example PCI address and MAC with the selected NIC's PCI address and permanent MAC. Set `gateway=none` for an on-link deployment and `operator=none` when management is local or disabled. A remote management listener must equal the uplink's IPv4 address. Its TCP port accepts new connections only from the signed operator address on the selected NIC. Host-initiated traffic on that NIC is limited to the enrolled HTTPS update destinations on port 443 and the enrolled S3 address and port. The initrd applies filtering before activating the link. Standing updates preserve the uplink record. This profile covers Host management and depot traffic. [nftables reference](https://netfilter.org/projects/nftables/manpage.html)
+
 `compose-hypervisor.py --management-enrollment FILE` binds the exact enrollment JSON and listener address to the signed Hypervisor UKI. Supply the same file for both slots. Its schema is `fvca-hypervisor-management-v1` and its fields are `host` (enrolled Host UUID), `address` (literal private or loopback IP with port 1024–65535), `gateway_uid` and `gateway_gid` (both `62000`), `tls_certificate_sha256` (leaf certificate DER digest), and `operator_public_key` (hex-encoded Ed25519 public key dedicated to status and preflight). The initrd publishes the verified record at `/run/fvca/management.json`. Standing Host updates preserve this enrollment. Operator or certificate changes require explicit enrollment.
 
 From trusted Host maintenance, stage the PEM chain as `management/tls.crt` and the PEM private key as `management/tls.key` on the authenticated Hypervisor Btrfs pool. Use `root:root` ownership, mode `0700` on `management/`, and mode `0600` on the two regular files. At boot the initrd enables the listener only when the signed enrollment and protected credential files are present. systemd copies the credentials into the unprivileged gateway's credential mount and passes it the enrolled TCP socket. The gateway runs in an enforcing SELinux domain and forwards authorized requests over `/run/fvca-management-broker/broker.sock`. The broker runs in a separate domain and checks the gateway's UID and GID. Both services use private network namespaces and can create only Unix sockets.

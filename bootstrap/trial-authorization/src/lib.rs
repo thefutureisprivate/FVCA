@@ -10,6 +10,7 @@ pub mod efi;
 pub mod firmware;
 pub mod guest;
 pub mod guest_config;
+pub mod host_network;
 
 pub const APPROVAL_LIMIT: usize = 2048;
 pub const PENDING: &str = "pending-trial";
@@ -32,7 +33,7 @@ pub const MANAGEMENT_INTENTS: &str = "/run/fvca/host-data/os-update/management-i
 pub const MANAGEMENT_POLICY_BYTES: usize = 4096;
 pub const MANAGEMENT_UID: u32 = 62000;
 
-fn management_argument<'a>(cmdline: &'a str, argument: &str) -> io::Result<Option<&'a str>> {
+fn signed_argument<'a>(cmdline: &'a str, argument: &str) -> io::Result<Option<&'a str>> {
     let mut markers = cmdline
         .split_ascii_whitespace()
         .filter(|arg| arg.split('=').next() == Some(argument));
@@ -40,12 +41,12 @@ fn management_argument<'a>(cmdline: &'a str, argument: &str) -> io::Result<Optio
         return Ok(None);
     };
     if markers.next().is_some() {
-        return Err(invalid("duplicate management enrollment binding"));
+        return Err(invalid("duplicate signed command-line binding"));
     }
     marker
         .split_once('=')
         .map(|(_, value)| Some(value))
-        .ok_or_else(|| invalid("invalid management enrollment binding"))
+        .ok_or_else(|| invalid("invalid signed command-line binding"))
 }
 
 pub fn private_management_address(address: SocketAddr) -> bool {
@@ -59,8 +60,8 @@ pub fn private_management_address(address: SocketAddr) -> bool {
 }
 
 pub fn management_binding(cmdline: &str) -> io::Result<Option<(&str, SocketAddr)>> {
-    let digest_value = management_argument(cmdline, MANAGEMENT_ARGUMENT)?;
-    let address = management_argument(cmdline, MANAGEMENT_ADDRESS_ARGUMENT)?;
+    let digest_value = signed_argument(cmdline, MANAGEMENT_ARGUMENT)?;
+    let address = signed_argument(cmdline, MANAGEMENT_ADDRESS_ARGUMENT)?;
     match (digest_value, address) {
         (None, None) => Ok(None),
         (Some(value), Some(address)) => {

@@ -20,7 +20,8 @@ import hypervisor_gpt
 from runtime_boot import (
     DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_CHANGE_SUPPORT,
     GUEST_CONFIG_KEY, GUEST_CONFIG_KEY_ARGUMENT, GUEST_LAUNCH_FILES, GUEST_VM_SETTINGS,
-    GUEST_VM_SUPPORT, MANAGEMENT_ADDRESS_ARGUMENT, MANAGEMENT_ARGUMENT, MANAGEMENT_POLICY,
+    GUEST_VM_SUPPORT, HOST_NETWORK_ARGUMENT, HOST_NETWORK_POLICY, HOST_NETWORK_SUPPORT,
+    MANAGEMENT_ADDRESS_ARGUMENT, MANAGEMENT_ARGUMENT, MANAGEMENT_POLICY,
     MANAGEMENT_POLICY_SUPPORT, MANAGEMENT_SUPPORT, WORKLOAD_TRUST_FILES,
     composition_archive, prepare_core, run, verify_initrd, write_disk,
 )
@@ -356,6 +357,49 @@ def management_selection(args, authorities):
     return ((MANAGEMENT_POLICY, raw),), binding, operators
 
 
+def network_selection(args, management, backup):
+    listener = None
+    if management:
+        address = json.loads(management[0][1])["address"]
+        listener = ipaddress.ip_address(address.rpartition(":")[0].strip("[]"))
+        if listener.is_loopback:
+            listener = None
+    depots = [address for address in (args.os_update_address, args.guest_os_update_address,
+                                     args.firmware_update_address) if address is not None]
+    if backup:
+        endpoint = backup_destination.parse(backup[0][1], backup[1][1]).endpoint
+        depots.append(ipaddress.ip_address(endpoint.rpartition(":")[0].strip("[]")))
+    remote = [address for address in depots if not address.is_loopback]
+    if args.host_network is None:
+        if listener is not None or remote:
+            raise ValueError("a remote Host endpoint requires a signed uplink profile")
+        return (), ()
+    raw = read_bytes(args.host_network, 512)
+    record = re.fullmatch(
+        r"FVCA-HOST-NETWORK-1\npci=([0-9a-f]{4}:[0-9a-f]{2}:[01][0-9a-f]\.[0-7])\n"
+        r"mac=((?:[0-9a-f]{2}:){5}[0-9a-f]{2})\naddress=([0-9./]+)\n"
+        r"gateway=([0-9.]+|none)\noperator=([0-9.]+|none)\n", raw.decode("ascii"))
+    if record is None or int(record[2][:2], 16) & 1 or record[2] == "00:00:00:00:00:00":
+        raise ValueError("invalid canonical Host uplink record")
+    local = ipaddress.IPv4Interface(record[3])
+    gateway, peer = (None if value == "none" else ipaddress.IPv4Address(value) for value in record.groups()[3:])
+
+    def private(ip):
+        return any(ip in network for network in MANAGEMENT_NETWORKS[:3])
+
+    def usable(ip):
+        return local.network.prefixlen >= 31 or ip not in (local.network.network_address, local.network.broadcast_address)
+
+    if (str(local) != record[3] or not local.network.prefixlen or not private(local.ip) or not usable(local.ip)
+            or gateway is not None and (gateway not in local.network or not usable(gateway) or gateway == local.ip
+                                         or gateway.is_loopback or gateway.is_link_local or gateway.packed[0] == 0)
+            or peer is not None and (not private(peer) or not usable(peer) or peer == local.ip)
+            or (listener is None) != (peer is None) or listener is not None and listener != local.ip
+            or any(address.version != 4 or address.is_reserved for address in remote)):
+        raise ValueError("the signed Host uplink does not cover its management listener and IPv4 destinations")
+    return ((HOST_NETWORK_POLICY, raw),), (f"{HOST_NETWORK_ARGUMENT}={hashlib.sha256(raw).hexdigest()}",)
+
+
 def assemble(args, work):
     storage = host_storage.selection(args.storage) if args.storage is not None else None
     if args.management_enrollment is not None and (storage is None or storage.protection != host_storage.AUTHENTICATED):
@@ -405,9 +449,14 @@ def assemble(args, work):
         RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE, TRIAL_FILE,
         TRIAL_CANDIDATE_FILE, TRIAL_WATCHDOG_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY,
         GUEST_TRIAL_KEY, GUEST_BASE_EPOCH, EPOCH_FILE, *UPDATE_FILES, *GUEST_UPDATE_FILES,
-        *FIRMWARE_UPDATE_FILES, UPDATE_PEER, GUEST_VM_SETTINGS, GUEST_CONFIG_KEY, MANAGEMENT_POLICY,
+        *FIRMWARE_UPDATE_FILES, UPDATE_PEER, GUEST_VM_SETTINGS, GUEST_CONFIG_KEY, HOST_NETWORK_POLICY, MANAGEMENT_POLICY,
     ))
     required = ACTIVATION_FILES
+    required += (str(HOST_NETWORK_SUPPORT), "usr/bin/nft", "usr/bin/ip")
+    if args.host_network is not None:
+        marker = runtime_work / "tree" / HOST_NETWORK_SUPPORT
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
+            raise ValueError("the signed VM runtime lacks Host uplink update enforcement")
     if resources:
         required += (str(GUEST_VM_SUPPORT), "usr/bin/sha256sum")
         marker = runtime_work / "tree" / GUEST_VM_SUPPORT
@@ -509,6 +558,7 @@ def assemble(args, work):
                                                         candidate=True)
     authorities = approval_keys(args)
     management, management_arguments, operators = management_selection(args, authorities)
+    network, network_arguments = network_selection(args, management, backup)
     guest_epoch = ((GUEST_BASE_EPOCH, f"{args.guest_trial_epoch}\n".encode("ascii")),) if args.guest_trial_epoch else ()
     trial_key_arguments = tuple(f"{TRIAL_KEY_ARGUMENT}={key.hex()}" for name, key in authorities
                                 if name == STANDING_TRIAL_KEY)
@@ -516,7 +566,7 @@ def assemble(args, work):
                                         if name == GUEST_CONFIG_KEY)
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
-        extra=(*extra, *epoch, *guest, *resources, *management, *backup, *backup_job_selection(args.backup_job, backup),
+        extra=(*extra, *epoch, *guest, *resources, *management, *network, *backup, *backup_job_selection(args.backup_job, backup),
                *restore_selection(args.restore_authorization, backup),
                *retention_selection(args.retention_policy, backup),
                *stable_trial, *candidate_trial, *watchdog, *guest_epoch,
@@ -524,12 +574,12 @@ def assemble(args, work):
     )
     if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT, TRIAL_WATCHDOG_ARGUMENT,
                                     GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_KEY_ARGUMENT, MANAGEMENT_ARGUMENT,
-                                    MANAGEMENT_ADDRESS_ARGUMENT)
+                                    MANAGEMENT_ADDRESS_ARGUMENT, HOST_NETWORK_ARGUMENT)
            for arg in cmdline.split()):
         raise ValueError("shared core already configures a Hypervisor epoch, trial, Guest configuration or management")
     cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments,
                         *trial_key_arguments, *watchdog_arguments, *resource_arguments, *configuration_key_arguments,
-                        *management_arguments))
+                        *management_arguments, *network_arguments))
     immutable = None
     if ids is None:
         disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)
@@ -565,6 +615,7 @@ def main():
                         help="pin the independent Ed25519 signer for Guest configuration changes")
     parser.add_argument("--management-enrollment", type=Path,
                         help="pin a Host management identity, listener, certificate and read-only operator")
+    parser.add_argument("--host-network", type=Path, help="pin the Host management NIC, address and operator peer")
     parser.add_argument("--guest-trial-public-key", type=Path, help="pin the independent Service Guest trial signer")
     parser.add_argument("--guest-trial-epoch", type=int, help="initial epoch of the enrolled Service Guest release")
     parser.add_argument("--gpt-slot", type=UUID, help="assign one unique UUID to a self-contained Hypervisor GPT slot image")

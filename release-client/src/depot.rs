@@ -142,6 +142,14 @@ impl Depot {
                         )
                         .into());
                     }
+                    if address.is_some_and(|ip| !ip.is_loopback())
+                        && base_url.port_or_known_default() != Some(443)
+                    {
+                        return Err(invalid(
+                            "the enrolled remote HTTPS depot requires TCP port 443",
+                        )
+                        .into());
+                    }
                 }
                 if base_url.scheme() != "https"
                     || base_url.host().is_none()

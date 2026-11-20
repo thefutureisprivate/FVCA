@@ -11,7 +11,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use fvca_initrd_bootstrap::runtime::{self, Runtime, hash};
 use fvca_initrd_bootstrap::{
-    HYPERVISOR_EPOCH_ARGUMENT, backup_job, backup_policy, guest_boot, host_update,
+    HYPERVISOR_EPOCH_ARGUMENT, backup_job, backup_policy, guest_boot, host_network, host_update,
     hypervisor_slot::Slot, hypervisor_trial, invalid, recovery, retention_policy, run,
 };
 
@@ -101,6 +101,7 @@ fn activate() -> io::Result<()> {
         None
     };
     let verified_runtime = runtime::activate(Runtime::Vm, slot.as_ref().map(|slot| &slot.runtime))?;
+    host_network::activate(&cmdline)?;
     runtime::install_development_probe("fvca-vm-runtime-probe.service", PROBE)?;
     let storage = storage::activate_if_selected(protected_epoch)?;
     let esp = slot.as_ref().map(|slot| slot.esp.as_str());

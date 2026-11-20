@@ -31,6 +31,9 @@ MANAGEMENT_ARGUMENT = "fvca.management"
 MANAGEMENT_ADDRESS_ARGUMENT = "fvca.management_address"
 MANAGEMENT_POLICY_SUPPORT = Path("usr/lib/fvca/management-policy-v1")
 MANAGEMENT_SUPPORT = Path("usr/lib/fvca/management-services-v1")
+HOST_NETWORK_ARGUMENT = "fvca.host_network"
+HOST_NETWORK_POLICY = "host-network"
+HOST_NETWORK_SUPPORT = Path("usr/lib/fvca/host-network-v1")
 
 
 def run(*args, **kwargs):
