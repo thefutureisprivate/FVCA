@@ -31,6 +31,14 @@ pub(super) fn require_context(domain: &str) -> io::Result<()> {
 }
 
 pub(super) fn take(name: &str) -> io::Result<OwnedFd> {
+    take_stream(name, true)
+}
+
+pub(super) fn take_connected(name: &str) -> io::Result<OwnedFd> {
+    take_stream(name, false)
+}
+
+fn take_stream(name: &str, listening: bool) -> io::Result<OwnedFd> {
     if env::var("LISTEN_PID")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -47,10 +55,11 @@ pub(super) fn take(name: &str) -> io::Result<OwnedFd> {
     // Startup consumes it once after checking the process, name and count.
     let socket = unsafe { OwnedFd::from_raw_fd(3) };
     fcntl_setfd(&socket, FdFlags::CLOEXEC)?;
-    if sockopt::socket_type(&socket)? != SocketType::STREAM || !sockopt::socket_acceptconn(&socket)?
+    if sockopt::socket_type(&socket)? != SocketType::STREAM
+        || sockopt::socket_acceptconn(&socket)? != listening
     {
         return Err(invalid(
-            "management activation descriptor is not a listening stream",
+            "management activation descriptor has the wrong stream state",
         ));
     }
     Ok(socket)

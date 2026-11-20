@@ -79,7 +79,7 @@ Keep the approved `fvca-hypervisor-boot-reference-v1` JSON on the verifier. Esta
 | `ak_qualified_name` | TPM qualified name as hex, including the SHA-256 algorithm identifier `000b` |
 | `sha256_pcrs` | Eight 32-byte hex digests for PCRs 0, 2, 4, 7, 9, 11, 12 and 13 in that order |
 
-On the verifier, create a new 0700 directory and issue a challenge into it. Send the printed nonce to the collector through the authenticated test or maintenance channel, then return the collector's JSON to the verifier. Pass the nonce as `NONCE_HEX` to `--collect-boot-quote`, or supply one newline-terminated hex line on stdin. Each challenge expires after two minutes. Successful appraisal consumes the challenge before it prints the verdict. [RATS architecture](https://www.rfc-editor.org/rfc/rfc9334.html)
+On the verifier, create a new 0700 directory and issue a challenge into it. Send the printed nonce through the [authenticated management protocol](#host-management-service) and save the returned evidence object. For trusted local maintenance, pass the nonce as `NONCE_HEX` to `--collect-boot-quote` or supply one newline-terminated hex line on stdin. Each challenge expires after two minutes. Successful appraisal consumes the challenge before it prints the verdict. [RATS architecture](https://www.rfc-editor.org/rfc/rfc9334.html)
 
 ```sh
 mkdir -m 700 verifier-state
@@ -90,7 +90,7 @@ fvca-release-client --collect-boot-quote NONCE_HEX
 fvca-release-client --appraise-boot-quote trusted-reference.json verifier-state/pending evidence.json
 ```
 
-The verdict identifies the approved measured boot and its enrolled Host. Guest identity, application authorization and runtime health are separate checks. Management transport integration and physical TPM enrollment qualification remain open. The disposable TPM test uses a client built with `--features swtpm-test` and runs `python3 tests/check-boot-attestation.py CLIENT` on the off-node test machine.
+The verdict identifies the approved measured boot and its enrolled Host. Guest identity, application authorization and runtime health are separate checks. Physical TPM enrollment qualification remains open. The disposable TPM test uses a client built with `--features swtpm-test` and runs `python3 tests/check-boot-attestation.py CLIENT` on the off-node test machine.
 
 ## Verify and stage a signed role release
 
@@ -853,6 +853,10 @@ Connect with TLS 1.3, verify the enrolled server certificate and negotiate ALPN 
 ```
 
 Generate a fresh random nonce and use current Unix seconds with a validity window of at most 30 seconds. Use `{"type":"status"}` to read boot-selected settings, Host trial state and separate updater-owned release observations. For preflight, supply `expected: null` for the default profile or `expected: {"revision": 1, "sha256": "..."}` from status. The broker returns the candidate settings revision, its canonical digest and the required activation scope. A stale revision, a changed digest or a running Host trial produces a typed refusal. Check the `fvca-management-response-v1` schema, both identities and the echoed nonce on each response. Apply continues through the signed Host channel and trial described above.
+
+To enable remote boot appraisal, add `attestation_operator_public_key` to the signed enrollment. Use a dedicated hex-encoded Ed25519 public key distinct from read, configuration and release authorities. Sign the usual management envelope with this key and set the operation to `{"type":"boot-quote","challenge":"NONCE_HEX"}`, where `NONCE_HEX` is the 64-character lowercase nonce issued by the separate verifier. The request envelope still carries its own fresh 16-byte nonce. For `result: "boot-quote"`, save the `evidence` object as JSON and pass it to `--appraise-boot-quote`. For `result: "refused"` with `code: "boot-quote-unavailable"`, the Host could not collect a quote.
+
+The broker delegates only the 32-byte challenge to the SELinux-confined collector over its systemd activation socket. The collector serves one request per instance and its device allowlist grants access to `/dev/tpmrm0`. The gateway and broker keep their private device namespaces. [systemd socket activation](https://www.freedesktop.org/software/systemd/man/262/systemd.socket.html) · [systemd device controls](https://www.freedesktop.org/software/systemd/man/262/systemd.resource-control.html#DeviceAllow=)
 
 The [off-node OpenTofu provider and module](opentofu/README.md) use this protocol for authenticated Guest configuration preflight and separate release observations.
 

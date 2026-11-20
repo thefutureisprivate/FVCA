@@ -19,7 +19,7 @@ cargo build --frozen --release --features appliance --manifest-path "$SRCDIR/rel
 install -Dm755 "$CARGO_TARGET_DIR/release/fvca-release-client" "$DESTDIR/usr/libexec/fvca/release-client"
 install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/firmware-update-support-v14"
 install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/guest-configuration-change-v1"
-install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/management-services-v1"
+install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/management-services-v2"
 install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-network-v1"
 
 # mcopy uses the OEM code page for the fixed EFI path. Isolate its module

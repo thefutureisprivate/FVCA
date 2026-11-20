@@ -1,12 +1,14 @@
 ; The gateway receives the enrolled TCP socket and uses only the broker IPC.
-; The broker receives a pathname socket and writes only its typed intent.
+; The broker writes typed configuration intents and delegates boot quotes.
 (type fvca_management_gateway_t)
 (type fvca_management_broker_t)
+(type fvca_attestation_t)
 (typeattribute fvca_management_domain)
-(typeattributeset fvca_management_domain (fvca_management_gateway_t fvca_management_broker_t))
-(typeattributeset domain (fvca_management_gateway_t fvca_management_broker_t))
+(typeattributeset fvca_management_domain (fvca_management_gateway_t fvca_management_broker_t fvca_attestation_t))
+(typeattributeset domain (fvca_management_domain))
 (roletype system_r fvca_management_gateway_t)
 (roletype system_r fvca_management_broker_t)
+(roletype system_r fvca_attestation_t)
 
 (allow init_t fvca_management_domain (process (getattr sigkill signal transition)))
 (allow init_t fvca_management_domain (process2 (nnp_transition)))
@@ -24,7 +26,7 @@
 (allow fvca_management_domain self (file (getattr open read)))
 
 ; systemd selects the domain for the verified release-client entrypoint.
-; Neither domain has execute_no_trans on command binaries.
+; No service domain has execute_no_trans on command binaries.
 (allow fvca_management_domain bin_t (file (entrypoint execute getattr map open read)))
 (allow fvca_management_domain bin_t (dir (getattr search)))
 (allow fvca_management_domain usr_t (dir (getattr search)))
@@ -56,7 +58,8 @@
 (allow fvca_management_enrollment_t fs_t (filesystem (associate)))
 (allow fvca_management_enrollment_t tmpfs_t (filesystem (associate)))
 (allow init_t fvca_management_enrollment_t (file (getattr open read relabelto)))
-(allow fvca_management_domain fvca_management_enrollment_t (file (getattr open read)))
+(allow fvca_management_gateway_t fvca_management_enrollment_t (file (getattr open read)))
+(allow fvca_management_broker_t fvca_management_enrollment_t (file (getattr open read)))
 
 (type fvca_management_socket_t)
 (typeattributeset file_type (fvca_management_socket_t))
@@ -72,7 +75,7 @@
 (allow fvca_management_gateway_t fvca_management_broker_t (unix_stream_socket (connectto)))
 (allow fvca_management_gateway_t self (unix_stream_socket (connect create getattr getopt ioctl read setopt shutdown write)))
 (allow fvca_management_gateway_t self (tcp_socket (accept getattr getopt ioctl read setopt shutdown write)))
-(allow fvca_management_broker_t self (unix_stream_socket (accept getattr getopt ioctl read setopt shutdown write)))
+(allow fvca_management_broker_t self (unix_stream_socket (accept connect create getattr getopt ioctl read setopt shutdown write)))
 ; Credentials are copied by PID 1 into the gateway's private read-only mount.
 (allow fvca_management_gateway_t tmpfs_t (file (getattr open read)))
 (allow fvca_management_gateway_t var_run_t (file (getattr open read)))
@@ -112,3 +115,18 @@
 (typetransition fvca_management_broker_t fvca_management_intents_t file fvca_management_intent_t)
 (allow fvca_management_broker_t fvca_management_intent_t (file (create getattr open read rename setattr unlink write)))
 (allow init_t fvca_management_intent_t (file (getattr open read)))
+
+(type fvca_attestation_socket_t)
+(typeattributeset file_type (fvca_attestation_socket_t))
+(roletype object_r fvca_attestation_socket_t)
+(filecon "/run/fvca-attestation" dir (system_u object_r fvca_attestation_socket_t ((s0) (s0))))
+(filecon "/run/fvca-attestation/quote\.sock" socket (system_u object_r fvca_attestation_socket_t ((s0) (s0))))
+(allow fvca_attestation_socket_t tmpfs_t (filesystem (associate)))
+(allow init_t fvca_attestation_socket_t (dir (add_name create getattr open read remove_name rmdir search setattr write)))
+(allow init_t fvca_attestation_socket_t (sock_file (create getattr relabelto setattr unlink write)))
+(allow init_t fvca_attestation_t (unix_stream_socket (accept bind create getattr getopt ioctl listen read setopt shutdown write)))
+(allow fvca_management_broker_t fvca_attestation_socket_t (dir (getattr search)))
+(allow fvca_management_broker_t fvca_attestation_socket_t (sock_file (getattr write)))
+(allow fvca_management_broker_t fvca_attestation_t (unix_stream_socket (connectto)))
+(allow fvca_attestation_t self (unix_stream_socket (getattr getopt read setopt write)))
+(allow fvca_attestation_t tpm_device_t (chr_file (getattr open read write)))

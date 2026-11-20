@@ -321,8 +321,9 @@ def management_selection(args, authorities):
         "schema", "host", "address", "gateway_uid", "gateway_gid",
         "tls_certificate_sha256", "operator_public_key",
     }
+    optional = {"apply_operator_public_key", "attestation_operator_public_key"}
     if (not isinstance(policy, dict)
-            or not required <= policy.keys() <= required | {"apply_operator_public_key"}
+            or not required <= policy.keys() <= required | optional
             or policy["schema"] != "fvca-hypervisor-management-v1"):
         raise ValueError("invalid Hypervisor management enrollment schema")
     host = policy["host"]
@@ -342,14 +343,14 @@ def management_selection(args, authorities):
     if any(type(policy[field]) is not int or policy[field] != 62000
            for field in ("gateway_uid", "gateway_gid")):
         raise ValueError("invalid management gateway account")
-    writers = ("apply_operator_public_key",) if "apply_operator_public_key" in policy else ()
-    if writers and args.guest_configuration_public_key is None:
+    if "apply_operator_public_key" in policy and args.guest_configuration_public_key is None:
         raise ValueError("management submission requires an enrolled Guest configuration signing authority")
-    for field in ("tls_certificate_sha256", "operator_public_key", *writers):
+    operator_fields = ("operator_public_key", *sorted(optional & policy.keys()))
+    for field in ("tls_certificate_sha256", *operator_fields):
         value = policy[field]
         if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None or int(value, 16) == 0:
             raise ValueError("invalid management certificate or operator key pin")
-    operators = tuple((field, bytes.fromhex(policy[field])) for field in ("operator_public_key", *writers))
+    operators = tuple((field, bytes.fromhex(policy[field])) for field in operator_fields)
     certs = (args.boot_certificate, args.runtime_certificate, args.guest_release_certificate)
     certificate_keys = {
         run("openssl", "pkey", "-pubin", "-outform", "DER", input=guest_boot_bundle.public_key(certificate),

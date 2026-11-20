@@ -26,6 +26,7 @@ pub(super) struct Enrollment {
     pub tls_certificate_sha256: String,
     operator_public_key: String,
     pub apply_operator_public_key: Option<String>,
+    attestation_operator_public_key: Option<String>,
 }
 
 impl Enrollment {
@@ -44,6 +45,15 @@ impl Enrollment {
                     || key == &self.operator_public_key
                     || key.bytes().all(|byte| byte == b'0')
             })
+            || self
+                .attestation_operator_public_key
+                .as_ref()
+                .is_some_and(|key| {
+                    !valid_digest(key)
+                        || key == &self.operator_public_key
+                        || Some(key) == self.apply_operator_public_key.as_ref()
+                        || key.bytes().all(|byte| byte == b'0')
+                })
         {
             return Err(invalid("invalid Hypervisor management enrollment").into());
         }
@@ -71,6 +81,10 @@ impl From<Expected> for Binding {
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) enum Operation {
     Status,
+    BootQuote {
+        #[serde(deserialize_with = "boot_challenge")]
+        challenge: [u8; 32],
+    },
     Preflight {
         expected: Option<Expected>,
         vcpus: u32,
@@ -83,6 +97,20 @@ pub(super) enum Operation {
     InspectConfiguration {
         operation_id: String,
     },
+}
+
+fn boot_challenge<'de, D: serde::Deserializer<'de>>(
+    input: D,
+) -> std::result::Result<[u8; 32], D::Error> {
+    let value = String::deserialize(input)?;
+    let mut challenge = [0; 32];
+    if !valid_digest(&value)
+        || hex::decode_to_slice(value, &mut challenge).is_err()
+        || challenge == [0; 32]
+    {
+        return Err(serde::de::Error::custom("invalid boot quote challenge"));
+    }
+    Ok(challenge)
 }
 
 #[derive(Deserialize)]
@@ -133,7 +161,13 @@ pub(super) fn authorize(enrollment: &Enrollment, packet: &[u8], now: u64) -> Res
             .apply_operator_public_key
             .as_deref()
             .ok_or_else(|| invalid("the Host has no management configuration submitter"))?,
-        _ => &enrollment.operator_public_key,
+        Operation::BootQuote { .. } => enrollment
+            .attestation_operator_public_key
+            .as_deref()
+            .ok_or_else(|| invalid("the Host has no attestation operator"))?,
+        Operation::Status
+        | Operation::Preflight { .. }
+        | Operation::InspectConfiguration { .. } => &enrollment.operator_public_key,
     };
     channel::verify(
         &hex::decode(key)?,
@@ -197,6 +231,7 @@ pub(super) enum Refusal {
     UnknownConfigurationOperation,
     LifecycleBusy,
     OutsideHostCapacity,
+    BootQuoteUnavailable,
 }
 
 #[derive(Serialize)]
@@ -380,13 +415,14 @@ mod tests {
     }
 
     #[test]
-    fn confines_submitter_and_reader_to_their_enrolled_operations() -> Result<()> {
+    fn confines_operators_to_their_enrolled_operations() -> Result<()> {
         let key = || -> Result<Ed25519KeyPair> {
             let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())?;
             Ok(Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())?)
         };
         let reader = key()?;
         let submitter = key()?;
+        let verifier = key()?;
         let host = "367f5cbc-c46a-437d-af72-5d96d805d234";
         let mut enrollment: Enrollment = serde_json::from_value(json!({
             "schema": "fvca-hypervisor-management-v1",
@@ -394,6 +430,7 @@ mod tests {
             "tls_certificate_sha256": "b".repeat(64),
             "operator_public_key": hex::encode(reader.public_key().as_ref()),
             "apply_operator_public_key": hex::encode(submitter.public_key().as_ref()),
+            "attestation_operator_public_key": hex::encode(verifier.public_key().as_ref()),
         }))?;
         enrollment.validate()?;
         let request = |operation, key: &Ed25519KeyPair| -> Result<Vec<u8>> {
@@ -410,17 +447,36 @@ mod tests {
             "vcpus": 3, "memory_mib": 2560, "planned_at": 5, "plan_expires": 300,
         }});
         let read = json!({"type": "configuration-operation", "operation_id": "d".repeat(64)});
+        let quote = json!({"type": "boot-quote", "challenge": "a4".repeat(32)});
         assert!(authorize(&enrollment, &request(mutation.clone(), &reader)?, 20).is_err());
+        assert!(authorize(&enrollment, &request(mutation.clone(), &verifier)?, 20).is_err());
         let write = request(mutation, &submitter)?;
         assert!(matches!(
             authorize(&enrollment, &write, 20)?.operation,
             Operation::ApplyConfiguration { .. }
         ));
         assert!(authorize(&enrollment, &request(read.clone(), &submitter)?, 20).is_err());
+        assert!(authorize(&enrollment, &request(read.clone(), &verifier)?, 20).is_err());
         assert!(matches!(
             authorize(&enrollment, &request(read, &reader)?, 20)?.operation,
             Operation::InspectConfiguration { .. }
         ));
+        for other in [&reader, &submitter] {
+            assert!(authorize(&enrollment, &request(quote.clone(), other)?, 20).is_err());
+        }
+        for invalid in ["0".repeat(64), "A4".repeat(32), "a4".repeat(31)] {
+            let malformed = json!({"type": "boot-quote", "challenge": invalid});
+            assert!(authorize(&enrollment, &request(malformed, &verifier)?, 20).is_err());
+        }
+        let quote = request(quote, &verifier)?;
+        assert!(matches!(
+            authorize(&enrollment, &quote, 20)?.operation,
+            Operation::BootQuote { challenge } if challenge == [0xa4; 32]
+        ));
+        enrollment.attestation_operator_public_key = enrollment.apply_operator_public_key.clone();
+        assert!(enrollment.validate().is_err());
+        enrollment.attestation_operator_public_key = None;
+        assert!(authorize(&enrollment, &quote, 20).is_err());
         enrollment.apply_operator_public_key = None;
         assert!(authorize(&enrollment, &write, 20).is_err());
         enrollment.apply_operator_public_key = Some(enrollment.operator_public_key.clone());

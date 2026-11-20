@@ -152,7 +152,7 @@ impl Challenge {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Evidence {
+pub(crate) struct Evidence {
     schema: String,
     quote: String,
     signature: String,
@@ -190,8 +190,10 @@ pub fn issue(reference: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn collect(nonce: &str) -> Result<()> {
-    let nonce = decode::<32>(nonce)?;
+pub(crate) fn quote(nonce: &[u8; 32]) -> Result<Evidence> {
+    if *nonce == [0; 32] {
+        return Err(invalid("expected a nonzero boot challenge").into());
+    }
     let mut quote = [0; QUOTE_BYTES];
     let mut size = 0;
     let mut signature = [0; 64];
@@ -214,14 +216,15 @@ pub fn collect(nonce: &str) -> Result<()> {
         ))
         .into());
     }
-    println!(
-        "{}",
-        serde_json::to_string(&Evidence {
-            schema: EVIDENCE_SCHEMA.into(),
-            quote: hex::encode(&quote[..size]),
-            signature: hex::encode(signature)
-        })?
-    );
+    Ok(Evidence {
+        schema: EVIDENCE_SCHEMA.into(),
+        quote: hex::encode(&quote[..size]),
+        signature: hex::encode(signature),
+    })
+}
+
+pub fn collect(nonce: &str) -> Result<()> {
+    println!("{}", serde_json::to_string(&quote(&decode(nonce)?)?)?);
     Ok(())
 }
 

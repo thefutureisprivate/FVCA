@@ -517,7 +517,9 @@ fn run() -> Result<()> {
         [option, nonce] if option.as_os_str() == "--collect-boot-quote" => {
             return attestation::collect(nonce.to_str().ok_or_else(usage)?);
         }
-        [option, reference, challenge, evidence] if option.as_os_str() == "--appraise-boot-quote" => {
+        [option, reference, challenge, evidence]
+            if option.as_os_str() == "--appraise-boot-quote" =>
+        {
             return attestation::appraise(reference, challenge, evidence);
         }
         _ => (),
@@ -538,6 +540,7 @@ fn run() -> Result<()> {
             Some("--guest-configuration-status") => return guest_configuration::report(),
             Some("--serve-management-broker") => return runtime()?.block_on(management::broker()),
             Some("--serve-management") => return runtime()?.block_on(management::gateway()),
+            Some("--serve-boot-quote") => return management::boot_quote::serve(),
             Some("--collect-boot-quote") => return attestation::collect_from_stdin(),
             _ => (),
         }

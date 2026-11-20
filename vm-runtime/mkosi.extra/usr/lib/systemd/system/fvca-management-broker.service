@@ -1,5 +1,5 @@
 [Unit]
-Description=FVCA Guest configuration policy broker
+Description=FVCA Hypervisor management policy broker
 After=fvca-base-ready.service
 AssertPathIsMountPoint=/run/fvca/host-data
 AssertSecurity=uefi-secureboot

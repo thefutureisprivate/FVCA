@@ -1,0 +1,22 @@
+[Unit]
+Description=Private FVCA boot quote socket
+DefaultDependencies=no
+After=fvca-base-ready.service
+Before=shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/run/fvca/management.json
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+
+[Socket]
+ListenStream=/run/fvca-attestation/quote.sock
+ExecStartPost=/usr/bin/chcon --no-dereference system_u:object_r:fvca_attestation_socket_t:s0 /run/fvca-attestation/quote.sock
+FileDescriptorName=boot-quote
+Accept=yes
+AcceptFileDescriptors=no
+MaxConnections=1
+DirectoryMode=0700
+SocketMode=0600
+Backlog=1
+PollLimitIntervalSec=1s
+PollLimitBurst=8

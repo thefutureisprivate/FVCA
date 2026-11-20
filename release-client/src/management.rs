@@ -1,5 +1,6 @@
 //! Authenticate requests on the network and authorize them again at the Host broker.
 
+pub(crate) mod boot_quote;
 mod intent;
 mod listener;
 mod protocol;
@@ -21,16 +22,26 @@ use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::Semaphore;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout_at};
 use tokio_rustls::TlsAcceptor;
 
-use crate::{Result, channel, guest_configuration, invalid, state};
+use crate::{Result, attestation, channel, guest_configuration, invalid, state};
 use protocol::{Activation, Enrollment, Operation, Refusal, Request, Settings};
 
 const SOCKET: &str = "/run/fvca-management-broker/broker.sock";
 const CREDENTIAL_BYTES: u64 = 16 * 1024;
 const CONNECTIONS: usize = 8;
 const DEADLINE: Duration = Duration::from_secs(3);
+const QUOTE_DEADLINE: Duration = Duration::from_secs(8);
+
+fn operation_deadline(started: Instant, operation: &Operation) -> Instant {
+    started
+        + if matches!(operation, Operation::BootQuote { .. }) {
+            QUOTE_DEADLINE
+        } else {
+            DEADLINE
+        }
+}
 
 fn enrollment() -> Result<Option<Enrollment>> {
     let cmdline = state::read(Path::new("/proc/cmdline"), 32 * 1024)?;
@@ -116,23 +127,32 @@ fn tls(enrollment: &Enrollment) -> Result<TlsAcceptor> {
 }
 
 async fn forward(stream: TcpStream, enrollment: &Enrollment, acceptor: TlsAcceptor) -> Result<()> {
-    let mut tls = acceptor.accept(stream).await?;
+    let started = Instant::now();
+    let deadline = started + DEADLINE;
+    let mut tls = timeout_at(deadline, acceptor.accept(stream)).await??;
     if tls.get_ref().1.alpn_protocol() != Some(protocol::ALPN) {
         return Err(invalid("unsupported management protocol").into());
     }
-    let data = protocol::read_frame(&mut tls, protocol::REQUEST_BYTES).await?;
-    protocol::authorize(enrollment, &data, protocol::current_time()?)?;
-    let mut broker = UnixStream::connect(SOCKET).await.inspect_err(|error| {
-        eprintln!("FVCA_MANAGEMENT_BROKER_UNAVAILABLE {error}");
-    })?;
-    if broker.peer_cred()?.uid() != 0 {
-        return Err(invalid("invalid management broker peer identity").into());
-    }
-    protocol::write_frame(&mut broker, &data, protocol::REQUEST_BYTES).await?;
-    let reply = protocol::read_frame(&mut broker, protocol::RESPONSE_BYTES).await?;
-    protocol::write_frame(&mut tls, &reply, protocol::RESPONSE_BYTES).await?;
-    tls.shutdown().await?;
-    Ok(())
+    let data = timeout_at(
+        deadline,
+        protocol::read_frame(&mut tls, protocol::REQUEST_BYTES),
+    )
+    .await??;
+    let request = protocol::authorize(enrollment, &data, protocol::current_time()?)?;
+    timeout_at(operation_deadline(started, &request.operation), async {
+        let mut broker = UnixStream::connect(SOCKET).await.inspect_err(|error| {
+            eprintln!("FVCA_MANAGEMENT_BROKER_UNAVAILABLE {error}");
+        })?;
+        if broker.peer_cred()?.uid() != 0 {
+            return Err(invalid("invalid management broker peer identity").into());
+        }
+        protocol::write_frame(&mut broker, &data, protocol::REQUEST_BYTES).await?;
+        let reply = protocol::read_frame(&mut broker, protocol::RESPONSE_BYTES).await?;
+        protocol::write_frame(&mut tls, &reply, protocol::RESPONSE_BYTES).await?;
+        tls.shutdown().await?;
+        Ok(())
+    })
+    .await?
 }
 
 pub(super) async fn gateway() -> Result<()> {
@@ -162,7 +182,7 @@ pub(super) async fn gateway() -> Result<()> {
             let tls = tls.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                let _ = timeout(DEADLINE, forward(stream, &enrollment, tls)).await;
+                let _ = forward(stream, &enrollment, tls).await;
             });
         }
     }
@@ -207,6 +227,9 @@ enum Outcome {
         #[serde(flatten)]
         receipt: intent::Receipt,
     },
+    BootQuote {
+        evidence: attestation::Evidence,
+    },
     Refused {
         code: Refusal,
     },
@@ -222,12 +245,18 @@ struct Response<'a> {
     outcome: Outcome,
 }
 
-fn dispatch(
+async fn dispatch(
     operation: &Operation,
     enrollment: &Enrollment,
     packet: &[u8],
 ) -> std::result::Result<Outcome, Refusal> {
     match operation {
+        Operation::BootQuote { challenge } => {
+            let evidence = boot_quote::request(challenge)
+                .await
+                .map_err(|_| Refusal::BootQuoteUnavailable)?;
+            Ok(Outcome::BootQuote { evidence })
+        }
         Operation::ApplyConfiguration { plan } => {
             let receipt = intent::submit(enrollment, plan, packet)?;
             Ok(Outcome::ConfigurationOperation { receipt })
@@ -271,8 +300,9 @@ fn dispatch(
     }
 }
 
-fn respond(request: &Request, enrollment: &Enrollment, packet: &[u8]) -> Result<Vec<u8>> {
+async fn respond(request: &Request, enrollment: &Enrollment, packet: &[u8]) -> Result<Vec<u8>> {
     let outcome = dispatch(&request.operation, enrollment, packet)
+        .await
         .unwrap_or_else(|code| Outcome::Refused { code });
     Ok(serde_json::to_vec(&Response {
         schema: "fvca-management-response-v1",
@@ -284,15 +314,23 @@ fn respond(request: &Request, enrollment: &Enrollment, packet: &[u8]) -> Result<
 }
 
 async fn serve(mut stream: UnixStream, enrollment: &Enrollment) -> Result<()> {
+    let started = Instant::now();
     let peer = stream.peer_cred()?;
     if peer.uid() != enrollment.gateway_uid || peer.gid() != enrollment.gateway_gid {
         return Err(invalid("management broker peer is outside enrollment").into());
     }
-    let data = protocol::read_frame(&mut stream, protocol::REQUEST_BYTES).await?;
+    let data = timeout_at(
+        started + DEADLINE,
+        protocol::read_frame(&mut stream, protocol::REQUEST_BYTES),
+    )
+    .await??;
     let request = protocol::authorize(enrollment, &data, protocol::current_time()?)?;
-    let reply = respond(&request, enrollment, &data)?;
-    protocol::write_frame(&mut stream, &reply, protocol::RESPONSE_BYTES).await?;
-    Ok(())
+    timeout_at(operation_deadline(started, &request.operation), async {
+        let reply = respond(&request, enrollment, &data).await?;
+        protocol::write_frame(&mut stream, &reply, protocol::RESPONSE_BYTES).await?;
+        Ok(())
+    })
+    .await?
 }
 
 pub(super) async fn broker() -> Result<()> {
@@ -319,7 +357,7 @@ pub(super) async fn broker() -> Result<()> {
             let enrollment = Arc::clone(&enrollment);
             tokio::spawn(async move {
                 let _permit = permit;
-                let _ = timeout(DEADLINE, serve(stream, &enrollment)).await;
+                let _ = serve(stream, &enrollment).await;
             });
         }
     }

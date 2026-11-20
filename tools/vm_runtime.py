@@ -43,6 +43,9 @@ MANAGEMENT_UNITS = {
     Path(f"usr/lib/systemd/system/fvca-{daemon}.{kind}")
     for daemon in ("management", "management-broker")
     for kind in ("service", "socket")
+} | {
+    Path("usr/lib/systemd/system/fvca-attestation.socket"),
+    Path("usr/lib/systemd/system/fvca-attestation@.service"),
 }
 MANAGEMENT_USERDB = Path("usr/lib/userdb")
 MANAGEMENT_RECORDS = tuple(f"fvca-management.{kind}" for kind in ("user", "group"))

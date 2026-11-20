@@ -104,7 +104,7 @@ def exercise(client, directory, socket):
     def appraise(pending, evidence="quote.json", ref="reference.json", failure=None):
         return run("--appraise-boot-quote", ref, pending, evidence, failure=failure)
 
-    run("--collect-boot-quote", "00" * 32, failure="TPM could not collect a boot quote")
+    run("--collect-boot-quote", "00" * 32, failure="expected a nonzero boot challenge")
     reference = enroll(socket, directory)
     save("reference.json", reference)
     quote(issue("first"))
