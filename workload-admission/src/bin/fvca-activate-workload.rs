@@ -27,6 +27,8 @@ const QUADLET_DIR: &str = "/run/fvca/workload-image/quadlet";
 const GENERATED_UNIT: &str = "/run/fvca/workload-image/quadlet/units/fvca-workload-payload.service";
 const PUBLISHED_UNIT: &str = "/run/fvca/workload-image/fvca-workload-payload.service";
 const OS_UNIT_DEFAULTS: &str = "/usr/lib/systemd/system/service.d/10-timeout-abort.conf";
+const KERNEL_SERVICE_POLICY: &str =
+    "/usr/lib/systemd/system/service.d/60-fvca-kernel-observability.conf";
 const NETWORK: &str = "/run/fvca/workload-network";
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -134,6 +136,22 @@ fn same_unit() -> io::Result<bool> {
         && (generated.dev(), generated.ino()) == (loaded.dev(), loaded.ino()))
 }
 
+fn approved_unit(output: &str) -> bool {
+    let mut fragments = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("FragmentPath="));
+    let mut overrides = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("DropInPaths="));
+    let with_defaults = format!("{OS_UNIT_DEFAULTS} {KERNEL_SERVICE_POLICY}");
+    fragments.next() == Some(UNIT_PATH)
+        && fragments.next().is_none()
+        && overrides
+            .next()
+            .is_some_and(|paths| paths == KERNEL_SERVICE_POLICY || paths == with_defaults)
+        && overrides.next().is_none()
+}
+
 fn start_workload() -> Result<()> {
     if !same_unit()? {
         return Err(io::Error::other(
@@ -153,15 +171,7 @@ fn start_workload() -> Result<()> {
         ))
         .into());
     }
-    let output = String::from_utf8(result.stdout)?;
-    let fragment = format!("FragmentPath={UNIT_PATH}");
-    let mut overrides = output
-        .lines()
-        .filter_map(|line| line.strip_prefix("DropInPaths="));
-    if !output.lines().any(|line| line == fragment)
-        || !matches!(overrides.next(), Some("" | OS_UNIT_DEFAULTS))
-        || overrides.next().is_some()
-    {
+    if !approved_unit(&String::from_utf8(result.stdout)?) {
         return Err(io::Error::other(
             "workload service was overridden outside the verified policy",
         )
@@ -364,5 +374,36 @@ fn main() -> ExitCode {
             eprintln!("FVCA workload root activation failed: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workload_unit_requires_the_verified_kernel_policy() {
+        for paths in [
+            KERNEL_SERVICE_POLICY.to_owned(),
+            format!("{OS_UNIT_DEFAULTS} {KERNEL_SERVICE_POLICY}"),
+        ] {
+            assert!(approved_unit(&format!(
+                "FragmentPath={UNIT_PATH}\nDropInPaths={paths}\n"
+            )));
+        }
+        for paths in [
+            String::new(),
+            OS_UNIT_DEFAULTS.to_owned(),
+            format!("{KERNEL_SERVICE_POLICY} /run/systemd/system/service.d/local.conf"),
+            KERNEL_SERVICE_POLICY.replacen("/usr/lib/", "/etc/", 1),
+            format!("{KERNEL_SERVICE_POLICY}\nDropInPaths={KERNEL_SERVICE_POLICY}"),
+        ] {
+            assert!(!approved_unit(&format!(
+                "FragmentPath={UNIT_PATH}\nDropInPaths={paths}\n"
+            )));
+        }
+        assert!(!approved_unit(&format!(
+            "FragmentPath=/etc/systemd/system/fvca-workload-payload.service\nDropInPaths={KERNEL_SERVICE_POLICY}\n"
+        )));
     }
 }

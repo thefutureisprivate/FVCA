@@ -1,6 +1,8 @@
 [Unit]
 Description=Test FVCA execution policy
 AssertSecurity=uefi-secureboot
+Requires=sys-kernel-tracing.mount
+After=sys-kernel-tracing.mount
 
 [Service]
 Type=oneshot

@@ -1,8 +1,10 @@
 //! Exercise execution-policy denials in a disposable signed development image.
 
 use std::alloc::System;
-use std::ffi::{c_int, c_void};
+use std::ffi::{c_int, c_long, c_void};
+use std::fs::{self, File};
 use std::io::{self, ErrorKind};
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::process::{Command, ExitCode};
 use std::ptr;
 
@@ -17,6 +19,23 @@ const MAP_PRIVATE: c_int = 0x02;
 const MAP_ANONYMOUS: c_int = 0x20;
 const LEN: usize = 4096;
 const MAP_FAILED: *mut c_void = ptr::without_provenance_mut(usize::MAX);
+const PERF_EVENT_OPEN: c_long = 298;
+const CAP_SYS_RAWIO: u64 = 1 << 17;
+
+// PERF_ATTR_SIZE_VER0 from linux/perf_event.h suffices for a software CPU clock event.
+#[repr(C)]
+struct PerfEvent {
+    kind: u32,
+    size: u32,
+    config: u64,
+    sample_period: u64,
+    sample_type: u64,
+    read_format: u64,
+    flags: u64,
+    wakeup_events: u32,
+    breakpoint_type: u32,
+    breakpoint_address: u64,
+}
 
 unsafe extern "C" {
     fn mmap(
@@ -29,12 +48,20 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn mprotect(addr: *mut c_void, length: usize, prot: c_int) -> c_int;
     fn munmap(addr: *mut c_void, length: usize) -> c_int;
+    fn syscall(number: c_long, ...) -> c_long;
 }
 
 fn anonymous_mapping(protection: c_int) -> io::Result<*mut c_void> {
     // The kernel chooses the address. Anonymous mappings take no file descriptor.
     let mapped = unsafe {
-        mmap(ptr::null_mut(), LEN, protection, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+        mmap(
+            ptr::null_mut(),
+            LEN,
+            protection,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1,
+            0,
+        )
     };
     if mapped == MAP_FAILED {
         Err(io::Error::last_os_error())
@@ -58,13 +85,58 @@ fn require_denied<T>(case: &str, result: io::Result<T>) -> io::Result<()> {
             println!("FVCA_EXEC_CHECK {case}: denied");
             Ok(())
         }
-        Err(error) => Err(io::Error::other(format!("{case}: unexpected error {error}"))),
+        Err(error) => Err(io::Error::other(format!(
+            "{case}: unexpected error {error}"
+        ))),
         Ok(_) => Err(io::Error::other(format!("{case}: unexpectedly allowed"))),
     }
 }
 
+fn open_perf_event() -> io::Result<OwnedFd> {
+    let event = PerfEvent {
+        kind: 1, // PERF_TYPE_SOFTWARE
+        size: size_of::<PerfEvent>() as u32,
+        config: 0, // PERF_COUNT_SW_CPU_CLOCK
+        sample_period: 0,
+        sample_type: 0,
+        read_format: 0,
+        flags: (1 << 0) | (1 << 5) | (1 << 6), // disabled, exclude kernel and hypervisor
+        wakeup_events: 0,
+        breakpoint_type: 0,
+        breakpoint_address: 0,
+    };
+    // Open a disabled event for this thread. The kernel only reads the ABI structure.
+    let fd = unsafe { syscall(PERF_EVENT_OPEN, &raw const event, 0, -1, -1, 0_u64) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // A successful perf_event_open returns a new descriptor owned by this process.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as c_int) })
+}
+
+fn check_kernel_interfaces() -> io::Result<()> {
+    let status = fs::read_to_string("/proc/self/status")?;
+    for field in ["CapBnd:\t", "CapEff:\t"] {
+        let set = status
+            .lines()
+            .find_map(|line| line.strip_prefix(field))
+            .and_then(|bits| u64::from_str_radix(bits, 16).ok())
+            .ok_or_else(|| io::Error::other("missing process capability set"))?;
+        if set & CAP_SYS_RAWIO != 0 {
+            return Err(io::Error::other("service retains CAP_SYS_RAWIO"));
+        }
+    }
+    require_denied("kernel-memory", File::open("/proc/kcore"))?;
+    require_denied(
+        "kernel-tracing",
+        File::open("/sys/kernel/tracing/tracing_on"),
+    )?;
+    require_denied("performance-counters", open_perf_event())
+}
+
 fn check() -> io::Result<()> {
     fvca_allocator_binding::require_allocator()?;
+    check_kernel_interfaces()?;
     for (case, flags) in [
         ("anonymous-rx", PROT_READ | PROT_EXEC),
         ("anonymous-rwx", PROT_READ | PROT_WRITE | PROT_EXEC),
@@ -92,7 +164,7 @@ fn check() -> io::Result<()> {
     if !Command::new(source).status()?.success() {
         return Err(io::Error::other("program on the verified root failed"));
     }
-    std::fs::copy(source, copy)?;
+    fs::copy(source, copy)?;
     require_denied("tmpfs-exec", Command::new(copy).status())?;
     println!("FVCA_EXEC_CHECK_PASSED");
     Ok(())

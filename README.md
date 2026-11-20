@@ -29,6 +29,8 @@ The builder compiles Fedora's pinned targeted SELinux policy offline with the FV
 
 The composed Hypervisor and Service Guest boot policies require integrity lockdown and enforced kernel module signatures. Their initramfs loads the drivers needed by each role, then permanently disables module loading and unloading, kexec, and unprivileged BPF for that boot. The Hypervisor boot policy forcibly disables SMT and requests VT-d with interrupt remapping, translated DMA domains, and strict invalidation. Verify remapping and device isolation on the enrolled hardware. [Linux kernel sysctls](https://docs.kernel.org/admin-guide/sysctl/kernel.html) · [Linux kernel parameters](https://docs.kernel.org/admin-guide/kernel-parameters.html)
 
+Both composed roles disable debugfs at kernel startup. The verified service manager removes `CAP_SYS_RAWIO` from PID 1 and its descendants. System service policy denies opening files on debugfs and tracefs and blocks `perf_event_open`, including requests for user-space counters. Integrity lockdown allows systemd to establish the signed-filesystem execution policy on the pinned Fedora kernel. [systemd manager security settings](https://www.freedesktop.org/software/systemd/man/262/systemd-system.conf.html#Security) · [systemd service sandboxing](https://www.freedesktop.org/software/systemd/man/262/systemd.exec.html)
+
 ## Boot in QEMU
 
 Install `qemu-system-x86-core`, `edk2-ovmf`, and `python3-virt-firmware`. Enroll the development certificate in a disposable OVMF variable store and start the image with disk snapshots and no network adapter. Use `-accel tcg -cpu max` if KVM is unavailable.
@@ -56,7 +58,7 @@ The serial console prints `FVCA_DEV_BASE_READY` after the boot gate verifies UEF
 mkosi --profile=exec-check --output-dir=build/exec-check build
 ```
 
-Use the same QEMU command with `build/exec-check/fvca-dev-exec-check.raw` as the boot disk. The development test runs from the verified root after switch-root. It checks its allocator binding and requires permission denials for anonymous RX and RWX mappings, an RW-to-RX transition, and execution of a copied binary from `/run`. The console prints `FVCA_EXEC_CHECK_PASSED` before `FVCA_DEV_BASE_READY` when all checks pass. The probe is built only in the qualification profile.
+Use the same QEMU command with `build/exec-check/fvca-dev-exec-check.raw` as the boot disk. The development test runs from the verified root after switch-root. It checks its allocator binding and requires permission denials for anonymous RX and RWX mappings, an RW-to-RX transition, and execution of a copied binary from `/run`. It also checks that `CAP_SYS_RAWIO` is absent and that kernel memory, tracefs, and per-thread performance counters are inaccessible to a system service. The console prints `FVCA_EXEC_CHECK_PASSED` before `FVCA_DEV_BASE_READY` when all checks pass. The probe is built only in the qualification profile.
 
 ## Open Build Service
 

@@ -41,8 +41,12 @@ HOST_WORKLOAD_SUPPORT = Path("usr/lib/fvca/host-workload-network-v1")
 WORKLOAD_NETWORK_ARGUMENT = "fvca.workload_network"
 WORKLOAD_NETWORK_POLICY = "workload-network"
 WORKLOAD_NETWORK_SUPPORT = Path("usr/lib/fvca/workload-network-v1")
-SECURE_KERNEL_OPTIONS = ("module.sig_enforce=1", "lockdown=integrity")
+SECURE_KERNEL_OPTIONS = ("module.sig_enforce=1", "lockdown=integrity", "debugfs=off")
 KERNEL_POLICY_SUPPORT = "usr/lib/fvca/kernel-policy-v1"
+KERNEL_SERVICE_POLICY = (
+    Path("usr/lib/systemd/system.conf.d/60-fvca-raw-io.conf"),
+    Path("usr/lib/systemd/system/service.d/60-fvca-kernel-observability.conf"),
+)
 
 
 def add_kernel_policy(cmdline, options):
@@ -63,6 +67,7 @@ def verify_initrd(initrd, uname, required, forbidden, role):
         if decompressor.wait():
             raise ValueError(f"could not decompress the {role} initramfs")
     paths = entries.stdout.splitlines()
+    required = (*required, *map(str, KERNEL_SERVICE_POLICY))
     if any(paths.count(path) != 1 for path in required):
         raise ValueError(f"expected the {role} initramfs with its activation units")
     if f"usr/lib/modules/{uname}/modules.dep" not in paths:
@@ -105,6 +110,12 @@ def composition_archive(work, boot_key, boot_certificate, core_hash, runtime_has
 def prepare_core(args, work):
     prepared = work / "core"
     run("python3", TOOLS / "verify-base.py", args.core, args.boot_certificate, "--extract-root", prepared)
+    for path in KERNEL_SERVICE_POLICY:
+        policy = prepared / "root" / path
+        if policy.is_symlink() or not policy.is_file() or policy.read_bytes() != (
+            TOOLS.parent / "mkosi.os-policy" / path
+        ).read_bytes():
+            raise ValueError(f"the verified core lacks the FVCA kernel service policy at {path}")
     core_hash = (prepared / "roothash").read_text(encoding="ascii").strip()
     sector_size, partitions = read_layout(args.core, PARTITIONS)
     offset = partitions["esp"]["start"] * sector_size
