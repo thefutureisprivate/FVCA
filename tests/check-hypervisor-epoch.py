@@ -41,7 +41,7 @@ def qualify(args):
         ("eligible-recovery", args.eligible, None, args.states / "counter-two", second, second, None),
         ("wrong-policy", args.wrong_policy, None, args.states / "counter-two", second, second, b"policy differ"),
         ("uninitialized-counter", args.eligible, None, args.states / "uninitialized", second, 0, b"policy differ"),
-        ("missing-counter", args.eligible, None, args.original_tpm, second, 0, b"TPM refused the enrolled release counter"),
+        ("missing-counter", args.eligible, None, args.original_tpm, second, 0, b"TPM refused read command 0x00000169"),
         ("missing-tpm", args.eligible, None, None, second, 0, b"TPM resource manager device is required"),
     ]
     if args.paired_slots is not None:
