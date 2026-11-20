@@ -65,9 +65,11 @@ pub fn activate_if_selected() -> io::Result<()> {
     }
     fs::write(POLICY, &text)?;
     fs::write(CA, ca)?;
-    let override_dir = Path::new("/run/systemd/system/fvca-backup-upload@.service.d");
-    fs::create_dir_all(override_dir)?;
-    fs::write(override_dir.join("20-egress.conf"),
-              format!("[Service]\nIPAddressAllow={}\n", policy.endpoint.ip()))?;
+    for unit in ["fvca-backup-upload@.service.d", "fvca-backup-download@.service.d"] {
+        let override_dir = Path::new("/run/systemd/system").join(unit);
+        fs::create_dir_all(&override_dir)?;
+        fs::write(override_dir.join("20-egress.conf"),
+                  format!("[Service]\nIPAddressAllow={}\n", policy.endpoint.ip()))?;
+    }
     Ok(())
 }

@@ -10,7 +10,7 @@ pub const BOOT: &str = "/run/fvca/guest-boot";
 pub const SELECTION: &str = "/run/fvca/guest-launch";
 const SOURCE: &str = "/usr/lib/fvca/guest-launch";
 const SIGNATURE: &str = "/usr/lib/fvca/guest-launch.p7s";
-const FILES: [&str; 9] = [
+pub const FILES: [&str; 9] = [
     "boot.efi", "linux", "initrd", "cmdline", "domain.xml", "core.raw", "runtime.raw", "release.json", "release.p7s",
 ];
 
@@ -51,7 +51,7 @@ pub fn parse(payload: &str) -> io::Result<Selection<'_>> {
     Ok(Selection { bundle, core, runtime, checksums })
 }
 
-pub fn activate_if_selected() -> io::Result<()> {
+pub fn activate_if_selected(auto_start: bool) -> io::Result<()> {
     let payload = match fs::read_to_string(SOURCE) {
         Ok(payload) => payload,
         Err(error) if error.kind() == io::ErrorKind::NotFound && !Path::new(SIGNATURE).try_exists()? => return Ok(()),
@@ -61,6 +61,9 @@ pub fn activate_if_selected() -> io::Result<()> {
     runtime::mount_verified("guest-boot", "Guest boot bundle", selection.bundle, Path::new(SIGNATURE),
                             Path::new(BOOT), "ro,nodev,nosuid,noexec")?;
     fs::write(SELECTION, payload)?;
+    if !auto_start {
+        return Ok(());
+    }
     let control = Path::new("/run/systemd/system");
     let dropin = control.join("fvca-base-ready.service.d");
     let wants = control.join("fvca-base-ready.service.wants");

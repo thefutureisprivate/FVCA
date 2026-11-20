@@ -1,0 +1,42 @@
+[Unit]
+Description=Download the authorized FVCA recovery set %i
+AssertPathExists=/run/fvca/vm-restore-authorization
+AssertSecurity=selinux
+AssertSecurity=uefi-secureboot
+
+[Service]
+Type=oneshot
+Slice=fvca-backup.slice
+ExecStart=/usr/libexec/fvca/backup-worker --download %i
+TimeoutStartSec=13h
+TimeoutStopSec=10s
+DynamicUser=yes
+SELinuxContext=system_u:system_r:fvca_backup_t:s0
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+MemoryDenyWriteExecute=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+SystemCallFilter=~@mount @module @raw-io @reboot @swap
+IPAddressDeny=any
+TemporaryFileSystem=/run:ro
+InaccessiblePaths=/var
+BindPaths=/run/fvca/host-data/captures/restore-downloads/%i:/run/fvca-backup/output
+BindReadOnlyPaths=/run/fvca/vm-backup-policy:/run/fvca-backup/policy
+BindReadOnlyPaths=/run/fvca/vm-backup-ca.pem:/run/fvca-backup/ca.pem
+BindReadOnlyPaths=/run/fvca/vm-restore-authorization:/run/fvca-backup/authorization
+LoadCredential=repository-password:/run/fvca/host-data/restore-credentials/repository-password
+LoadCredential=s3-credentials:/run/fvca/host-data/restore-credentials/s3-credentials
+UMask=0077
+StandardOutput=journal+console
+StandardError=journal+console

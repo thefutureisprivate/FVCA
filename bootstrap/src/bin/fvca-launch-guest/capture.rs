@@ -211,20 +211,31 @@ struct Plan<'a> {
 }
 
 fn parse_plan<'a>(text: &'a str, id: &str, store: &Store) -> io::Result<Plan<'a>> {
+    parse_plan_fields(text, id, store.consistency, Some(&store.fsid))
+}
+
+fn parse_plan_fields<'a>(text: &'a str, id: &str, consistency: Consistency, filesystem: Option<&str>) -> io::Result<Plan<'a>> {
     let launch_header = "FVCA-GUEST-LAUNCH-1\n";
     let start = text.find(launch_header).ok_or_else(|| invalid("capture record lacks its authorized launch selection"))?;
     let (prefix, launch) = text.split_at(start);
     guest_boot::parse(launch)?;
     let mut lines = prefix.lines();
-    let name = store.consistency.name();
-    for expected in [store.consistency.header().to_owned(), format!("capture_id={id}"), format!("vm_uuid={}", UUID.to_str().unwrap()),
-        format!("requested_consistency={name}"), format!("achieved_consistency={name}"),
-        format!("filesystem_uuid={}", store.fsid), "identity_policy=single-instance".to_owned(),
-        "persistent_firmware=none".to_owned(), "persistent_vtpm=none".to_owned(),
-        "external_storage=none".to_owned(), "workload_state=contained-in-data.raw".to_owned(),
-        "member=data.raw,raw,vdc".to_owned()] {
+    let name = consistency.name();
+    for expected in [consistency.header().to_owned(), format!("capture_id={id}"), format!("vm_uuid={}", UUID.to_str().unwrap()),
+        format!("requested_consistency={name}"), format!("achieved_consistency={name}")] {
         if lines.next() != Some(expected.as_str()) {
             return Err(invalid("unexpected capture fields"));
+        }
+    }
+    let fsid = uuid(lines.next().and_then(|line| line.strip_prefix("filesystem_uuid="))
+        .ok_or_else(|| invalid("missing capture filesystem UUID"))?)?;
+    if filesystem.is_some_and(|expected| expected != fsid) {
+        return Err(invalid("capture belongs to a different Btrfs filesystem"));
+    }
+    for expected in ["identity_policy=single-instance", "persistent_firmware=none", "persistent_vtpm=none",
+        "external_storage=none", "workload_state=contained-in-data.raw", "member=data.raw,raw,vdc"] {
+        if lines.next() != Some(expected) {
+            return Err(invalid("unsupported Guest recovery profile"));
         }
     }
     let mut take = |key| lines.next().and_then(|line| line.strip_prefix(key))

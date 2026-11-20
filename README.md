@@ -291,7 +291,30 @@ repository=REPLACE_WITH_64_LOWERCASE_HEX_DIGITS
 
 Start `fvca-backup-live@CAPTURE_UUID.service` to capture a running Guest or `fvca-backup-stopped@CAPTURE_UUID.service` to use an orderly stop. Upload begins after Guest recovery. The isolated worker authenticates the authorized repository, reads back the exact snapshot inventory and manifest, then returns the full snapshot ID. The coordinator records the result in `backup-REPOSITORY_ID` beside the finalized capture manifest. After an upload failure, retry with the same capture UUID and the same capture mode to reuse the sealed disk. The pending record identifies the sealed disk and its SHA-256 digest.
 
-Automated retention and restore from S3 on a clean Hypervisor are pending.
+### Recover a Service Guest from S3
+
+Provision and authorize a new encrypted Host Btrfs mirror. Authorize the Guest release that should boot on the recovery Hypervisor. Fence the source appliance before reusing its Guest identity. Use an independently retained receipt and manifest to approve the exact recovery set. Obtain the total logical byte count by summing the regular-file sizes in `restic ls --json FULL_SNAPSHOT_ID`. Include the raw disk, manifest, and all release members in that count.
+
+Compose the recovery Hypervisor with the repository policy and CA above plus `--restore-authorization FILE`. Set the fields in this format using the independently retained records.
+
+```text
+FVCA-S3-RESTORE-1
+identity=source-fenced
+capture=CAPTURE_UUID
+restore=NEW_RESTORE_UUID
+repository=REPOSITORY_ID
+snapshot=FULL_SNAPSHOT_ID
+manifest_sha256=SHA256_OF_FINALIZED_MANIFEST
+disk_sha256=SHA256_OF_RAW_GUEST_DISK
+disk_bytes=RAW_GUEST_DISK_BYTES
+total_bytes=TOTAL_RECOVERY_SET_BYTES
+```
+
+Place the repository password and a dedicated read-only S3 key in `/run/fvca/host-data/restore-credentials`, with the same filenames and ownership modes as the backup credentials. Pause repository maintenance during the recovery. The recovery worker uses read-only S3 operations, including snapshot listing and retrieval. The recovery UKI suppresses automatic Guest startup.
+
+Start `fvca-restore-s3@CAPTURE_UUID.NEW_RESTORE_UUID.service`. The worker fetches the authorized snapshot into isolated staging and checks the manifest against its approved digest before downloading the large files. The coordinator verifies the complete release inventory and disk digest, then installs the disk through the cold-restore transaction. The isolated Guest boots with the release authorized by the recovery UKI. Reuse the same instance to reconcile an interrupted restore. Check the `verified` receipt in `/run/fvca/host-data/captures/restores/NEW_RESTORE_UUID` before authorizing service exposure.
+
+Automated retention and configured Stalwart mail recovery qualification are pending.
 
 ## Off-node Stalwart workload derivation
 

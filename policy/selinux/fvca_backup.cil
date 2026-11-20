@@ -48,6 +48,16 @@
 (allow fvca_backup_t fvca_host_data_t (file (getattr open read)))
 (allow fvca_backup_t fvca_backup_result_t (file (getattr write)))
 
+; The downloader writes only pre-created regular staging members. The
+; coordinator owns their directories and creates the independent VM slot.
+(type fvca_restore_data_t)
+(typeattributeset file_type (fvca_restore_data_t))
+(roletype object_r fvca_restore_data_t)
+(allow fvca_restore_data_t fs_t (filesystem (associate)))
+(allow init_t fvca_host_data_t (dir (rmdir)))
+(allow init_t fvca_restore_data_t (file (getattr ioctl open read relabelto setattr unlink write)))
+(allow fvca_backup_t fvca_restore_data_t (file (getattr open read setattr write)))
+
 ; Encrypted restic packs use only the worker's private, size-capped tmpfs.
 (type fvca_backup_tmp_t)
 (typeattributeset file_type (fvca_backup_tmp_t))

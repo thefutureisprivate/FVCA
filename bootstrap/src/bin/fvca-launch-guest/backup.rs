@@ -15,7 +15,7 @@ use super::{Consistency, Store, btrfs, complete_record, directory, disk_digest, 
 const OUTGOING: &str = "/run/fvca/host-data/captures/outgoing";
 const BACKUP_LOCK: &str = "/run/fvca/guest-backup.lock";
 
-fn mountable_directory(path: &Path) -> io::Result<()> {
+pub(super) fn mountable_directory(path: &Path) -> io::Result<()> {
     match fs::DirBuilder::new().mode(0o755).create(path) {
         Ok(()) => fs::set_permissions(path, fs::Permissions::from_mode(0o755))?,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -46,8 +46,7 @@ fn readonly_copy(source: &Path, target: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn preflight_credentials() -> io::Result<()> {
-    let parent = Path::new(backup_policy::CREDENTIALS);
+pub(super) fn preflight_credentials(parent: &Path) -> io::Result<()> {
     private_directory(parent)?;
     for (name, bound) in [("repository-password", 4096), ("s3-credentials", 8192)] {
         let meta = fs::symlink_metadata(parent.join(name))?;
@@ -91,7 +90,7 @@ pub(crate) fn upload(id: &str, running: bool) -> io::Result<()> {
     super::uuid(id)?;
     let policy_text = fs::read_to_string(backup_policy::POLICY)?;
     let policy = backup_policy::parse(&policy_text)?;
-    preflight_credentials()?;
+    preflight_credentials(Path::new(backup_policy::CREDENTIALS))?;
     let _job = lease(Path::new(BACKUP_LOCK))?;
     let consistency = if running {
         live::capture(id)?;

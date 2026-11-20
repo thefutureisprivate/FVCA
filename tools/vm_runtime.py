@@ -44,6 +44,8 @@ REQUIRED_FILES = {
     Path("usr/lib/systemd/system/fvca-backup-live@.service"),
     Path("usr/lib/systemd/system/fvca-backup-stopped@.service"),
     Path("usr/lib/systemd/system/fvca-backup-upload@.service"),
+    Path("usr/lib/systemd/system/fvca-backup-download@.service"),
+    Path("usr/lib/systemd/system/fvca-restore-s3@.service"),
     Path("usr/lib/systemd/system/fvca-backup.slice"),
     Path("usr/libexec/libvirt_iohelper"),
     Path("usr/lib64/libvirt/connection-driver/libvirt_driver_qemu.so"),
