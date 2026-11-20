@@ -355,11 +355,11 @@ def assemble(args, work):
             if path.is_symlink() or not path.is_file():
                 raise ValueError("the VM runtime lacks scheduled Service Guest updates")
     if args.firmware_update_owner is not None:
-        required += ("usr/lib/fvca/firmware-update-enrollment-v3", "usr/bin/chcon", "usr/bin/mount")
+        required += ("usr/lib/fvca/firmware-update-enrollment-v4", "usr/bin/chcon", "usr/bin/mount")
         for tree, members in (
             (prepared / "root", (Path("usr/libexec/fwupd/fwupd"), Path("usr/lib/systemd/system/fvca-fwupd.service"),
                                  Path("usr/share/fvca/firmware-build.txt"))),
-            (runtime_work / "tree", (*vm_runtime.FIRMWARE_UPDATE_UNITS, vm_runtime.FIRMWARE_CAPSULE_PREFLIGHT)),
+            (runtime_work / "tree", (*vm_runtime.FIRMWARE_UPDATE_UNITS, vm_runtime.FIRMWARE_UPDATE_SUPPORT)),
         ):
             if any((tree / member).is_symlink() or not (tree / member).is_file() for member in members):
                 raise ValueError("scheduled Host firmware requires the confined fwupd core and VM runtime units")

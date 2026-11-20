@@ -14,7 +14,7 @@ use crate::{invalid, run};
 
 const HOST_STATE: &str = "os-update";
 const GUEST_STATE: &str = "guest-os-update";
-const FIRMWARE_STATE: &str = "firmware-update";
+const FIRMWARE_STATE: &str = fvca_trial_authorization::firmware::STATE_DIRECTORY;
 const HOST_DATA: &str = "/run/fvca/host-data";
 const RUN: &str = "/run/fvca";
 const SIGNED: &str = "/usr/lib/fvca";

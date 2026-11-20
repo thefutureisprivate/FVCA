@@ -109,6 +109,7 @@ fn exclusive_lease(path: &Path) -> io::Result<File> {
 pub(super) fn lease(path: &Path) -> io::Result<File> {
     let file = exclusive_lease(path)?;
     if path == Path::new(CAPTURE_LOCK) {
+        fvca_trial_authorization::firmware::require_idle()?;
         super::update::require_idle()?;
         super::guest_trial::require_idle()?;
     }
@@ -123,6 +124,7 @@ pub(super) fn wait_for_lease(path: &Path) -> io::Result<File> {
     let file = lock_file(path)?;
     file.lock()?;
     if path == Path::new(CAPTURE_LOCK) {
+        fvca_trial_authorization::firmware::require_idle()?;
         super::update::require_idle()?;
         super::guest_trial::require_idle()?;
     }

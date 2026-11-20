@@ -67,6 +67,7 @@ pub fn reboot_into_trial() -> io::Result<()> {
 }
 
 pub fn queue_host_reboot() -> io::Result<()> {
+    fvca_trial_authorization::firmware::require_idle()?;
     crate::run(Command::new("/usr/bin/systemctl").args([
         "--no-block",
         "--job-mode=replace-irreversibly",
@@ -662,6 +663,17 @@ pub fn arm_candidate_watchdog(cmdline: &str) -> io::Result<()> {
     }
     gpt_device(&trial.stable)?;
     watchdog::arm(seconds, &boot_id()?, trial.transaction)
+}
+
+pub fn stop_candidate_watchdog_for_firmware(cmdline: &str) -> io::Result<()> {
+    if watchdog::policy()?.is_none() {
+        return Ok(());
+    }
+    let mut raw = Vec::new();
+    let trial = candidate(cmdline, &mut raw)?.ok_or_else(|| {
+        invalid("firmware recovery requires the signed candidate watchdog identity")
+    })?;
+    watchdog::stop(&boot_id()?, trial.transaction)
 }
 
 pub fn start_candidate(

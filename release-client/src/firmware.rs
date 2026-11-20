@@ -1,5 +1,6 @@
 //! Authenticate an exact Host firmware offer and stage its cabinet for qualification.
 
+mod activation;
 mod bus;
 mod capsule;
 mod live;
@@ -9,6 +10,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use fvca_trial_authorization::firmware::{self as firmware_fence, STATE_DIRECTORY as ENROLLMENT};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use tough::schema::key::Key;
@@ -29,7 +31,6 @@ const OBSERVATION_AGE: i64 = 300;
 const OFFER: &str = "offer.json";
 const SIGNATURE: &str = "offer.sig";
 const ARCHIVE: &str = "firmware.cab";
-const ENROLLMENT: &str = "firmware-update";
 const STATUS: &str = "firmware-update-status.json";
 const OBSERVATION_SCHEMA: &str = "fvca-firmware-observation-v2";
 
@@ -627,9 +628,23 @@ pub async fn scheduled() -> Result<()> {
         return Err(invalid("firmware scheduling requires a stable Hypervisor boot").into());
     }
     let directory = boot.join("host-data").join(ENROLLMENT);
-    handoff::require_pool_directory(&directory)?;
+    let pool_directory = handoff::require_pool_directory(&directory)?;
+    let _lease = state::lock(&directory)?;
+    if let Some(activation) = activation::recover(&directory, &pool_directory)? {
+        let status = Status {
+            schema: "fvca-firmware-discovery-status-v1",
+            disposition: activation.disposition(),
+            checked_at: Timestamp::now().as_second(),
+            freshness: Freshness::default(),
+            staged: None,
+            activation: Some(activation),
+        };
+        save(&directory, STATUS, &status)?;
+        println!("{}", serde_json::to_string(&status)?);
+        return Ok(());
+    }
     let depot = EnrolledDepot::load(boot, ENROLLMENT)?;
-    stage(
+    stage_locked(
         Intake {
             trusted_root: &directory.join("trusted-root.json"),
             depot_config: &directory.join("depot.json"),
@@ -660,11 +675,18 @@ struct Status {
     freshness: Freshness,
     #[serde(flatten)]
     staged: Option<Staged>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activation: Option<activation::Activation>,
 }
 
 pub async fn stage(inputs: Intake<'_>, source: ObservationSource<'_>) -> Result<()> {
+    let _lease = state::lock(inputs.directory)?;
+    firmware_fence::require_idle()?;
+    stage_locked(inputs, source).await
+}
+
+async fn stage_locked(inputs: Intake<'_>, source: ObservationSource<'_>) -> Result<()> {
     let directory = inputs.directory;
-    let _lease = state::lock(directory)?;
     let scheduled = matches!(source, ObservationSource::Scheduled(_));
     let freshness = if scheduled {
         match state::read(&directory.join(STATUS), MANIFEST_BYTES) {
@@ -681,6 +703,7 @@ pub async fn stage(inputs: Intake<'_>, source: ObservationSource<'_>) -> Result<
         checked_at: Timestamp::now().as_second(),
         freshness,
         staged: None,
+        activation: None,
     };
     if scheduled {
         save(directory, STATUS, &status)?;

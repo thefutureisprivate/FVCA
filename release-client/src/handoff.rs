@@ -147,6 +147,7 @@ pub fn check_install(transaction: &str, envelope: &[u8]) -> Result<bool> {
 }
 
 pub fn require_idle() -> Result<()> {
+    fvca_trial_authorization::firmware::require_idle()?;
     for path in [
         PathBuf::from(ACTIVATION),
         PathBuf::from(BOOT_NEXT),

@@ -307,6 +307,8 @@ The verified initramfs mounts only the selected ESP read-only for inspection. Th
 
 The same check reads nonvolatile variable capacity and boot variables from one pinned efivarfs mount. It reports the available bytes after the kernel reserve and requires 256 bytes for setting and restoring `OsIndications`. Missing or inconsistent capacity counters and a disabled x86 reserve block delivery. The capacity observation must be refreshed before any future write. Firmware-specific write behavior, device authentication, power and post-update TPM authorization still require qualification. [Linux efivarfs capacity accounting](https://github.com/torvalds/linux/blob/master/fs/efivarfs/super.c)
 
+An active `firmware-update/activation.json` record on the authenticated Host pool fences Guest startup, capture, and ordinary Host update and reboot operations. The scheduled firmware service reconciles that record before reading the update depot. If it can acquire the lifecycle lease after a recorded flash was interrupted, it durably records `outcome-unknown` and preserves the original operation, boot, device and signed offer identity. Reboot and power-transition states stay pending. In each case the service retains the staged cabinet and reports the active operation in `firmware-update-status.json`. Resolving the fence requires the device-specific recovery evidence.
+
 ### Build the Host core with firmware discovery
 
 ```sh
