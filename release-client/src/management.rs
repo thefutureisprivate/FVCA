@@ -4,6 +4,8 @@ pub(crate) mod boot_quote;
 mod intent;
 mod listener;
 mod protocol;
+#[cfg(not(feature = "appliance"))]
+pub(crate) mod quote_client;
 
 use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};

@@ -141,6 +141,17 @@ struct Challenge {
 }
 
 impl Challenge {
+    fn fresh(reference_sha256: String) -> Result<Self> {
+        let mut nonce = [0; 32];
+        rand::fill(&mut nonce)
+            .map_err(|_| io::Error::other("could not generate a boot challenge"))?;
+        Ok(Self {
+            nonce: hex::encode(nonce),
+            reference_sha256,
+            issued: unix_seconds()?,
+        })
+    }
+
     fn require_current(&self) -> Result<()> {
         let now = unix_seconds()?;
         if now < self.issued || now - self.issued >= CHALLENGE_SECONDS {
@@ -174,13 +185,7 @@ fn state_parent(path: &Path) -> io::Result<&Path> {
 pub fn issue(reference: &Path, destination: &Path) -> Result<()> {
     let (_, reference_sha256) = Reference::load(reference)?;
     let parent = state_parent(destination)?;
-    let mut nonce = [0; 32];
-    rand::fill(&mut nonce).map_err(|_| io::Error::other("could not generate a boot challenge"))?;
-    let challenge = Challenge {
-        nonce: hex::encode(nonce),
-        reference_sha256,
-        issued: unix_seconds()?,
-    };
+    let challenge = Challenge::fresh(reference_sha256)?;
     let mut record = tempfile::NamedTempFile::new_in(parent)?;
     serde_json::to_writer(&mut record, &challenge)?;
     record.as_file().sync_all()?;
@@ -273,6 +278,34 @@ pub fn appraise(reference: &Path, pending: &Path, evidence: &Path) -> Result<()>
     // the verdict only after the one-use challenge is durably consumed.
     file.set_len(0)?;
     file.sync_all()?;
+    verdict(&reference)
+}
+
+#[cfg(not(feature = "appliance"))]
+pub(crate) async fn appraise_remote(
+    reference: &Path,
+    enrollment: &Path,
+    ca: &Path,
+    server_name: &str,
+    operator: &Path,
+) -> Result<()> {
+    let (reference, reference_sha256) = Reference::load(reference)?;
+    let challenge = Challenge::fresh(reference_sha256)?;
+    let evidence = crate::management::quote_client::collect(
+        enrollment,
+        ca,
+        server_name,
+        operator,
+        &reference.host,
+        &challenge.nonce,
+    )
+    .await?;
+    reference.verify(&challenge, evidence)?;
+    challenge.require_current()?;
+    verdict(&reference)
+}
+
+fn verdict(reference: &Reference) -> Result<()> {
     println!(
         "{}",
         serde_json::json!({

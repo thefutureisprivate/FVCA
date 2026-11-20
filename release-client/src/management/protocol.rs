@@ -13,7 +13,7 @@ use crate::{Result, channel, invalid, valid_digest, valid_uuid};
 pub(super) const REQUEST_BYTES: usize = 2048;
 pub(super) const RESPONSE_BYTES: usize = 4096;
 pub(super) const ALPN: &[u8] = b"fvca-management/1";
-const VALIDITY_SECONDS: u64 = 30;
+pub(super) const VALIDITY_SECONDS: u64 = 30;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,7 +26,7 @@ pub(super) struct Enrollment {
     pub tls_certificate_sha256: String,
     operator_public_key: String,
     pub apply_operator_public_key: Option<String>,
-    attestation_operator_public_key: Option<String>,
+    pub(super) attestation_operator_public_key: Option<String>,
 }
 
 impl Enrollment {

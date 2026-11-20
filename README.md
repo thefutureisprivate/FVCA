@@ -79,7 +79,14 @@ Keep the approved `fvca-hypervisor-boot-reference-v1` JSON on the verifier. Esta
 | `ak_qualified_name` | TPM qualified name as hex, including the SHA-256 algorithm identifier `000b` |
 | `sha256_pcrs` | Eight 32-byte hex digests for PCRs 0, 2, 4, 7, 9, 11, 12 and 13 in that order |
 
-On the verifier, create a new 0700 directory and issue a challenge into it. Send the printed nonce through the [authenticated management protocol](#host-management-service) and save the returned evidence object. For trusted local maintenance, pass the nonce as `NONCE_HEX` to `--collect-boot-quote` or supply one newline-terminated hex line on stdin. Each challenge expires after two minutes. Successful appraisal consumes the challenge before it prints the verdict. [RATS architecture](https://www.rfc-editor.org/rfc/rfc9334.html)
+On the verifier, use the release client built without the `appliance` feature. Supply the independently trusted boot reference, an authenticated copy of the signed Host management enrollment, the management CA bundle and server name, and the enrolled attestation operator's PKCS#8 Ed25519 PEM key. Keep the key in a file owned by the verifier account with mode `0600`. The command checks the CA chain, server name, enrolled leaf certificate pin and protocol before sending the signed challenge. It emits the measured-boot verdict only after verifying the response identity, fresh TPM signature and approved PCRs.
+
+```sh
+fvca-release-client --appraise-remote-boot trusted-reference.json \
+  trusted-management.json management-ca.pem fvca-management.example attestation-operator.key
+```
+
+For split collection and appraisal, create a new 0700 directory on the verifier and issue a challenge into it. Send the printed nonce through the [authenticated management protocol](#host-management-service) and save the returned evidence object. For trusted local maintenance, pass the nonce as `NONCE_HEX` to `--collect-boot-quote` or supply one newline-terminated hex line on stdin. Each challenge expires after two minutes. Successful appraisal consumes the saved challenge before it prints the verdict. [RATS architecture](https://www.rfc-editor.org/rfc/rfc9334.html)
 
 ```sh
 mkdir -m 700 verifier-state
