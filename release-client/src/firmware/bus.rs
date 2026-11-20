@@ -1,12 +1,14 @@
-//! Minimal sd-bus client for the read-only fwupd boundary.
+//! Minimal sd-bus client for Host firmware discovery and catalog admission.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::io;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::ptr::{self, NonNull};
 
 use crate::{Result, invalid};
 
 const CALL_TIMEOUT: u64 = 10_000_000;
+const CATALOG_TIMEOUT: u64 = 120_000_000;
 const STR_LIMIT: usize = 4096;
 const ITEM_LIMIT: usize = 128;
 
@@ -27,6 +29,7 @@ unsafe extern "C" {
     fn sd_bus_unref(bus: *mut SdBus) -> *mut SdBus;
     fn sd_bus_set_address(bus: *mut SdBus, address: *const c_char) -> c_int;
     fn sd_bus_set_bus_client(bus: *mut SdBus, enabled: c_int) -> c_int;
+    fn sd_bus_negotiate_fds(bus: *mut SdBus, enabled: c_int) -> c_int;
     fn sd_bus_start(bus: *mut SdBus) -> c_int;
     fn sd_bus_call(
         bus: *mut SdBus,
@@ -99,6 +102,7 @@ impl Bus {
         unsafe {
             check(sd_bus_set_address(bus.0.as_ptr(), address.as_ptr()))?;
             check(sd_bus_set_bus_client(bus.0.as_ptr(), 1))?;
+            check(sd_bus_negotiate_fds(bus.0.as_ptr(), 1))?;
             check(sd_bus_start(bus.0.as_ptr()))?;
         }
         Ok(bus)
@@ -111,6 +115,35 @@ impl Bus {
         interface: &CStr,
         member: &CStr,
         args: &[&CStr],
+    ) -> Result<Message> {
+        let call = self.prepare(destination, path, interface, member)?;
+        for value in args {
+            call.append(b's', value.as_ptr().cast())?;
+        }
+        self.send(&call, CALL_TIMEOUT)
+    }
+
+    pub(super) fn import_lvfs(
+        &self,
+        owner: &CStr,
+        metadata: BorrowedFd<'_>,
+        signature: BorrowedFd<'_>,
+    ) -> Result<()> {
+        let call = self.prepare(owner, c"/", c"org.freedesktop.fwupd", c"UpdateMetadata")?;
+        call.append(b's', c"lvfs".as_ptr().cast())?;
+        for fd in [metadata, signature] {
+            // sd-bus duplicates each passed Unix descriptor before this value goes out of scope.
+            call.append(b'h', std::ptr::from_ref(&fd.as_raw_fd()).cast())?;
+        }
+        self.send(&call, CATALOG_TIMEOUT)?.finish()
+    }
+
+    fn prepare(
+        &self,
+        destination: &CStr,
+        path: &CStr,
+        interface: &CStr,
+        member: &CStr,
     ) -> Result<Message> {
         let mut ptr = ptr::null_mut();
         // The connection and the descriptor strings outlive this call.
@@ -125,25 +158,23 @@ impl Bus {
             )
         })?;
         let call = Message::owned(ptr)?;
+        // Never activate a different peer while constructing a call.
+        check(unsafe { sd_bus_message_set_auto_start(call.0.as_ptr(), 0) })?;
+        Ok(call)
+    }
+
+    fn send(&self, call: &Message, timeout: u64) -> Result<Message> {
         let mut reply = ptr::null_mut();
-        // sd-bus copies the supplied strings. Success transfers one reply reference.
-        unsafe {
-            check(sd_bus_message_set_auto_start(call.0.as_ptr(), 0))?;
-            for value in args {
-                check(sd_bus_message_append_basic(
-                    call.0.as_ptr(),
-                    b's' as c_char,
-                    value.as_ptr().cast(),
-                ))?;
-            }
-            check(sd_bus_call(
+        // Success transfers one reply reference.
+        check(unsafe {
+            sd_bus_call(
                 self.0.as_ptr(),
                 call.0.as_ptr(),
-                CALL_TIMEOUT,
+                timeout,
                 ptr::null_mut(),
                 &mut reply,
-            ))?;
-        }
+            )
+        })?;
         Message::owned(reply)
     }
 }
@@ -162,6 +193,12 @@ impl Message {
         Ok(Self(
             NonNull::new(ptr).ok_or_else(|| invalid("sd-bus returned no message"))?,
         ))
+    }
+
+    fn append(&self, kind: u8, value: *const c_void) -> io::Result<()> {
+        // Private callers provide a NUL-terminated string or a pointer to a live c_int.
+        check(unsafe { sd_bus_message_append_basic(self.0.as_ptr(), kind as c_char, value) })?;
+        Ok(())
     }
 
     pub(super) fn string(&mut self) -> Result<String> {

@@ -10,10 +10,9 @@ NotifyAccess=main
 ExecStart=/usr/libexec/fwupd/fwupd
 Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/fvca/firmware-bus
 TimeoutStartSec=60s
-CacheDirectory=fwupd
-CacheDirectoryMode=0700
-StateDirectory=fwupd
-StateDirectoryMode=0700
+RuntimeDirectory=fvca-firmware
+RuntimeDirectoryMode=0700
+Environment=STATE_DIRECTORY=/run/fvca-firmware CACHE_DIRECTORY=/run/fvca-firmware
 CapabilityBoundingSet=
 DevicePolicy=closed
 DeviceAllow=char-nvme r

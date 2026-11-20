@@ -11,6 +11,7 @@ trap 'rm -r -- "$work"' EXIT
 mkdir "$work/source"
 tar -xJf "$archive" --strip-components=1 -C "$work/source"
 patch --directory="$work/source" --strip=1 --fuzz=0 < "$SRCDIR/tools/fwupd-inventory.patch"
+patch --directory="$work/source" --strip=1 --fuzz=0 < "$SRCDIR/tools/fwupd-catalog.patch"
 
 meson setup "$work/build" "$work/source" \
     --wrap-mode=nodownload --prefix=/usr --libdir=lib64 --sysconfdir=/etc --localstatedir=/var \
@@ -53,6 +54,7 @@ install -Dm644 /usr/share/licenses/dbus-daemon/COPYING "$DESTDIR/usr/share/licen
     printf '%s\n' 'builtin_plugins=nvme,uefi_capsule' 'external_plugins=disabled'
     rpm -q dbus-daemon dbus-libs gcc glib2 libxmlb meson
     sha256sum "$SRCDIR/tools/fwupd-inventory.patch" | cut -d ' ' -f1 | sed 's/^/patch_sha256=/'
+    sha256sum "$SRCDIR/tools/fwupd-catalog.patch" | cut -d ' ' -f1 | sed 's/^/catalog_patch_sha256=/'
     (cd "$DESTDIR" && sha256sum usr/libexec/fwupd/fwupd usr/bin/dbus-daemon)
 } > "$work/provenance"
 install -Dm644 "$work/provenance" "$DESTDIR/usr/share/fvca/firmware-build.txt"

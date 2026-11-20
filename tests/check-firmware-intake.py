@@ -58,6 +58,16 @@ def qualify(client, output):
     cabinet_name = f"fvca-firmware-{digest(archive)}.cab"
     cabinet = output / cabinet_name
     cabinet.write_bytes(archive)
+    catalog = {}
+    catalog_targets = {}
+    for field, extension in (("metadata", "bin"), ("signature", "jcat")):
+        content = f"FVCA catalog fixture {field}\n".encode()
+        checksum = digest(content)
+        name = f"fvca-firmware-catalog-{checksum}.{extension}"
+        path = output / name
+        path.write_bytes(content)
+        catalog[field] = {"bytes": len(content), "sha256": checksum}
+        catalog_targets[name] = path
     platform = {"system_uuid": "1dc9e837-914b-497a-83bc-63c93e741acc", "vendor": "LENOVO",
                 "product": "UNIT-TEST", "board": "fixture board", "board_revision": "fixture revision"}
     bios = {"component": "system-firmware", "device_id": "1" * 40,
@@ -73,11 +83,12 @@ def qualify(client, output):
 
     def offer(identity, version, target, sequence):
         return {
-            "schema": "fvca-firmware-offer-v1", "role": "hypervisor", "channel": "stable",
+            "schema": "fvca-firmware-offer-v2", "role": "hypervisor", "channel": "stable",
             "sequence": sequence, "valid_from": stamp - 60, "expires": stamp + 3600,
             "system_uuid": platform["system_uuid"], "fwupd_version": "2.1.10",
             "device": identity, "remote": "lvfs", "epoch": 3, "from": version, "to": target,
             "archive": {"sha256": digest(archive), "bytes": len(archive)}, "payload_sha256": "1" * 64,
+            "catalog": deepcopy(catalog),
             "qualification": {
                 "distribution_evidence_sha256": "2" * 64, "vendor_authentication": "device-signature",
                 "vendor_evidence_sha256": "3" * 64, "transition_evidence_sha256": "4" * 64,
@@ -111,7 +122,7 @@ def qualify(client, output):
         proof = pointer.with_suffix(".sig")
         intake["write_json"](pointer, document)
         proof.write_bytes(bytes.fromhex(signer.sign(pointer.read_bytes()).signature))
-        sources = {pointer.name: pointer, proof.name: proof, cabinet.name: cabinet}
+        sources = {pointer.name: pointer, proof.name: proof, cabinet.name: cabinet, **catalog_targets}
         targets = {}
         for name, path in sources.items():
             reference = TargetFile.from_file(name, str(path), ["sha256"])
@@ -156,6 +167,20 @@ def qualify(client, output):
 
     run("capsule-staged", snapshot(initial))
     run("exact-retry", snapshot(initial))
+    catalog_state = output / "tampered-catalog-state"
+    catalog_state.mkdir(mode=0o700)
+    metadata = next(name for name in catalog_targets if name.endswith(".bin"))
+    files[metadata].write_bytes(b"x" * catalog["metadata"]["bytes"])
+    run("tampered-catalog-bytes", snapshot(initial), "Hash mismatch", directory=catalog_state)
+    assert not (catalog_state / "staged").exists()
+    publish(initial)
+    wrong_catalog = deepcopy(initial)
+    wrong_catalog["catalog"]["signature"]["bytes"] += 1
+    publish(wrong_catalog)
+    length_state = output / "wrong-length-state"
+    length_state.mkdir(mode=0o700)
+    run("wrong-catalog-length", snapshot(initial), "firmware catalog target length", directory=length_state)
+    publish(initial)
     bad = snapshot(initial)
     bad["esrt"][0]["fw_version"] += 1
     run("wrong-esrt-version", bad, "ESRT does not match")

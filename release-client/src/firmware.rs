@@ -21,6 +21,8 @@ use crate::{
 };
 
 const ARCHIVE_LIMIT: u64 = 256 * 1024 * 1024;
+const CATALOG_LIMIT: u64 = 32 * 1024 * 1024;
+const JCAT_LIMIT: u64 = 1024 * 1024;
 const OBSERVATION_LIMIT: u64 = 1024 * 1024;
 const OBSERVATION_AGE: i64 = 300;
 const OFFER: &str = "offer.json";
@@ -285,6 +287,48 @@ struct Qualification {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Catalog {
+    metadata: Member,
+    signature: Member,
+}
+
+impl Catalog {
+    fn valid(&self) -> bool {
+        [
+            (&self.metadata, CATALOG_LIMIT),
+            (&self.signature, JCAT_LIMIT),
+        ]
+        .into_iter()
+        .all(|(member, limit)| (1..=limit).contains(&member.bytes) && valid_digest(&member.sha256))
+    }
+
+    fn identity(&self) -> String {
+        format!("{}:{}", self.metadata.sha256, self.signature.sha256)
+    }
+
+    async fn download(&self, repo: &Repository) -> Result<[Vec<u8>; 2]> {
+        let mut payloads = [Vec::new(), Vec::new()];
+        for (bytes, (member, extension)) in payloads
+            .iter_mut()
+            .zip([(&self.metadata, "bin"), (&self.signature, "jcat")])
+        {
+            let name = format!("fvca-firmware-catalog-{}.{}", member.sha256, extension);
+            if check_target(repo, &TargetName::new(&name)?, member.bytes, &member.sha256)?
+                != member.bytes
+            {
+                return Err(invalid(
+                    "firmware catalog target length differs from its signed offer",
+                )
+                .into());
+            }
+            *bytes = target(repo, name, member.bytes).await?;
+        }
+        Ok(payloads)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Offer {
     schema: String,
     role: Role,
@@ -300,13 +344,14 @@ struct Offer {
     from: Version,
     to: Version,
     archive: Member,
+    catalog: Catalog,
     payload_sha256: String,
     qualification: Qualification,
 }
 
 impl Offer {
     fn require_scope(&self, policy: &Policy, now: i64) -> Result<()> {
-        if self.schema != "fvca-firmware-offer-v1"
+        if self.schema != "fvca-firmware-offer-v2"
             || self.role != Role::Hypervisor
             || self.channel != policy.channel
             || self.sequence == 0
@@ -319,6 +364,7 @@ impl Offer {
             || self.epoch < policy.minimum_epoch
             || !(1..=policy.max_archive_bytes).contains(&self.archive.bytes)
             || !valid_digest(&self.archive.sha256)
+            || !self.catalog.valid()
             || !valid_digest(&self.payload_sha256)
         {
             return Err(invalid("firmware offer is outside the signed Host policy").into());
@@ -527,6 +573,11 @@ pub enum ObservationSource<'a> {
     Live,
 }
 
+enum SnapshotSource {
+    File(Box<Observation>, String),
+    Live(live::Session),
+}
+
 pub async fn stage(
     trusted_root: &Path,
     depot_config: &Path,
@@ -567,7 +618,7 @@ pub async fn stage(
     let work = tempfile::Builder::new()
         .prefix(".firmware-tuf-")
         .tempdir_in(directory)?;
-    let depot = Depot::from_config(&config, policy.max_archive_bytes.max(MANIFEST_BYTES))?;
+    let depot = Depot::from_config(&config, policy.max_archive_bytes.max(CATALOG_LIMIT))?;
     let repo = load_repository(depot, directory, root, work.path()).await?;
     if repo.root().signed.keys.values().any(|key| {
         matches!(key, Key::Ed25519 { keyval, .. } if keyval.public.as_ref() == owner || keyval.public.as_ref() == qualification)
@@ -597,28 +648,14 @@ pub async fn stage(
     .into_iter()
     .min()
     .expect("fixed list of expiry dates");
-    let captured: Option<(Observation, String)> = match source {
-        ObservationSource::File(path) => {
-            let bytes = state::read(path, OBSERVATION_LIMIT)?;
-            Some((serde_json::from_slice(&bytes)?, digest(&bytes)))
-        }
-        ObservationSource::Live => None,
-    };
-    let check = |observed: &Observation| -> Result<()> {
+    let require_current = || {
         let now = Timestamp::now().as_second();
         if !(verified_at..expires).contains(&now) {
-            return Err(invalid("firmware authorization expired or the clock regressed").into());
+            return Err(invalid(
+                "firmware authorization expired or the clock regressed",
+            ));
         }
-        offer.require_observation(&policy, observed, now)
-    };
-    let observe = || {
-        if let Some((observed, sha256)) = &captured {
-            check(observed)?;
-            return Ok(sha256.clone());
-        }
-        let observed = live::read(&offer.device)?;
-        check(&observed)?;
-        Ok(digest(&serde_json::to_vec(&observed)?))
+        Ok(now)
     };
     checkpoint(
         directory,
@@ -626,6 +663,29 @@ pub async fn stage(
         offer.sequence,
         &offer_bytes,
     )?;
+    let payloads = offer.catalog.download(&repo).await?;
+    require_current()?;
+    let source = match source {
+        ObservationSource::File(path) => {
+            let bytes = state::read(path, OBSERVATION_LIMIT)?;
+            SnapshotSource::File(serde_json::from_slice(&bytes)?, digest(&bytes))
+        }
+        ObservationSource::Live => {
+            SnapshotSource::Live(live::Session::open(&policy, &offer, &payloads)?)
+        }
+    };
+    drop(payloads);
+    let observe = || match &source {
+        SnapshotSource::File(observed, sha256) => {
+            offer.require_observation(&policy, observed, require_current()?)?;
+            Ok(sha256.clone())
+        }
+        SnapshotSource::Live(live) => {
+            let observed = live.read(&offer.device)?;
+            offer.require_observation(&policy, &observed, require_current()?)?;
+            Ok(digest(&serde_json::to_vec(&observed)?))
+        }
+    };
     observe()?;
     let parent = directory.join("staged");
     state::staged(&parent)?;

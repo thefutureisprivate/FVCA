@@ -1,21 +1,22 @@
-//! Read the selected physical device and its cached upgrades from a pinned fwupd peer.
+//! Admit a catalog and read the selected physical device from a pinned fwupd peer.
 
 use std::ffi::{CStr, CString};
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Seek, Write};
+use std::os::fd::AsFd;
 use std::path::Path;
 
 use jiff::Timestamp;
+use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, memfd_create};
 
 use super::bus::{Bus, Message};
 use super::{
-    DeviceIdentity, Devices, Esrt, Observation, ObservedDevice, ObservedRelease, Platform,
+    DeviceIdentity, Devices, Esrt, Observation, ObservedDevice, ObservedRelease, Offer, Platform,
+    Policy,
 };
 use crate::{Result, invalid, state};
 
-#[cfg(feature = "appliance")]
 const ADDRESS: &CStr = c"unix:path=/run/fvca/firmware-bus";
-#[cfg(not(feature = "appliance"))]
-const ADDRESS: &CStr = c"unix:path=/run/dbus/system_bus_socket";
 const DAEMON: &str = "/usr/libexec/fwupd/fwupd";
 const FWUPD: &CStr = c"org.freedesktop.fwupd";
 const DBUS: &CStr = c"org.freedesktop.DBus";
@@ -81,6 +82,10 @@ impl Peer {
             return Err(invalid("fwupd is tainted or permits untrusted firmware").into());
         }
         self.property(c"DaemonVersion", c"s", Message::string)
+    }
+
+    fn catalog(&self) -> Result<String> {
+        self.property(c"FvcaCatalog", c"s", Message::string)
     }
 
     fn devices(&self) -> Result<Devices> {
@@ -275,14 +280,84 @@ fn esrt(path: &Path) -> Result<Vec<Esrt>> {
     Ok(entries)
 }
 
-pub(super) fn read(identity: &DeviceIdentity) -> Result<Observation> {
-    let peer = Peer::connect(ADDRESS, 0, Path::new(DAEMON))?;
-    snapshot(
-        &peer,
-        &identity.device_id,
-        Path::new(DMI),
-        identity.component.esrt_type().map(|_| Path::new(ESRT)),
-    )
+fn sealed(name: &CStr, bytes: &[u8]) -> Result<File> {
+    let mut file = File::from(memfd_create(
+        name,
+        MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING | MemfdFlags::NOEXEC_SEAL,
+    )?);
+    file.write_all(bytes)?;
+    fcntl_add_seals(
+        &file,
+        SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
+    )?;
+    file.rewind()?;
+    Ok(file)
+}
+
+fn matches_catalog(receipt: &str, expected: &str) -> bool {
+    receipt
+        .split_once(':')
+        .is_some_and(|(generation, identity)| {
+            generation.parse::<u64>().is_ok_and(|number| number != 0) && identity == expected
+        })
+}
+
+pub(super) struct Session {
+    peer: Peer,
+    catalog: String,
+}
+
+impl Session {
+    pub(super) fn open(policy: &Policy, offer: &Offer, payloads: &[Vec<u8>; 2]) -> Result<Self> {
+        if offer.remote != "lvfs" || platform(Path::new(DMI))? != policy.platform {
+            return Err(
+                invalid("live catalog import requires the enrolled Host and LVFS remote").into(),
+            );
+        }
+        let peer = Peer::connect(ADDRESS, 0, Path::new(DAEMON))?;
+        if peer.version()? != policy.fwupd_version {
+            return Err(
+                invalid("live fwupd version differs from the signed firmware policy").into(),
+            );
+        }
+        Self::import(peer, &offer.catalog.identity(), payloads)
+    }
+
+    fn import(peer: Peer, expected: &str, payloads: &[Vec<u8>; 2]) -> Result<Self> {
+        let mut catalog = peer.catalog()?;
+        if !matches_catalog(&catalog, expected) {
+            let metadata = sealed(c"fvca-lvfs-metadata", &payloads[0])?;
+            let signature = sealed(c"fvca-lvfs-signature", &payloads[1])?;
+            peer.bus
+                .import_lvfs(&peer.owner, metadata.as_fd(), signature.as_fd())?;
+            catalog = peer.catalog()?;
+            if !matches_catalog(&catalog, expected) {
+                return Err(
+                    invalid("fwupd did not admit the exact signed firmware catalog").into(),
+                );
+            }
+        }
+        Ok(Self { peer, catalog })
+    }
+
+    fn require_catalog(&self) -> Result<()> {
+        if self.peer.catalog()? != self.catalog {
+            return Err(invalid("fwupd firmware catalog changed during intake").into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn read(&self, identity: &DeviceIdentity) -> Result<Observation> {
+        self.require_catalog()?;
+        let observed = snapshot(
+            &self.peer,
+            &identity.device_id,
+            Path::new(DMI),
+            identity.component.esrt_type().map(|_| Path::new(ESRT)),
+        )?;
+        self.require_catalog()?;
+        Ok(observed)
+    }
 }
 
 fn snapshot(peer: &Peer, id: &str, dmi: &Path, esrt_path: Option<&Path>) -> Result<Observation> {
@@ -389,6 +464,19 @@ mod tests {
                 .raw_os_error(),
             Some(rustix::io::Errno::NXIO.raw_os_error())
         );
+
+        fs::write(&mode, "normal")?;
+        let payloads = [b"exact catalog".to_vec(), b"exact JCat".to_vec()];
+        let identity = format!(
+            "{}:{}",
+            crate::channel::digest(&payloads[0]),
+            crate::channel::digest(&payloads[1]),
+        );
+        let session = Session::import(peer, &identity, &payloads)?;
+        session.require_catalog()?;
+        fs::write(&mode, "catalog-replaced")?;
+        let error = session.require_catalog().err().unwrap();
+        assert!(error.to_string().contains("catalog changed during intake"));
         Ok(())
     }
 }

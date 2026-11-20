@@ -3,6 +3,8 @@
 
 import argparse
 from contextlib import contextmanager
+import fcntl
+from hashlib import sha256
 import os
 from pathlib import Path
 import select
@@ -22,6 +24,8 @@ def serve(address, mode):
     device_id = "a" * 40
 
     class Fwupd(dbus.service.Object):
+        catalog = ""
+
         @dbus.service.method("org.freedesktop.DBus.Properties", in_signature="ss", out_signature="v")
         def Get(self, name, prop):
             assert name == interface
@@ -30,7 +34,23 @@ def serve(address, mode):
                 "OnlyTrusted": dbus.Boolean(setting != "untrusted"),
                 "Tainted": dbus.Boolean(setting == "tainted"),
                 "DaemonVersion": dbus.String("2.0.20"),
+                "FvcaCatalog": dbus.String(
+                    self.catalog.replace("1:", "2:", 1) if setting == "catalog-replaced" else self.catalog
+                ),
             }[prop]
+
+        @dbus.service.method(interface, in_signature="shh", out_signature="")
+        def UpdateMetadata(self, remote, metadata, signature):
+            assert remote == "lvfs"
+            digests = []
+            for descriptor in (metadata, signature):
+                with os.fdopen(descriptor.take(), "rb") as stream:
+                    seals = fcntl.fcntl(stream, fcntl.F_GET_SEALS)
+                    required = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+                    assert seals & required == required
+                    assert not os.fstat(stream.fileno()).st_mode & 0o111
+                    digests.append(sha256(stream.read()).hexdigest())
+            self.catalog = "1:" + ":".join(digests)
 
         @dbus.service.method(interface, in_signature="", out_signature="aa{sv}")
         def GetDevices(self):

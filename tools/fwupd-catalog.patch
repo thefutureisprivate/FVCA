@@ -1,0 +1,199 @@
+--- a/src/fu-dbus-daemon.c
++++ b/src/fu-dbus-daemon.c
+@@ -12,0 +13 @@
++#include <fcntl.h>
+@@ -13,0 +15 @@
++#include <sys/stat.h>
+@@ -45,0 +48,2 @@
++	guint64 fvca_catalog_generation;
++	gchar *fvca_catalog;
+@@ -1918,61 +1922,21 @@
+-static void
+-fu_dbus_daemon_authorize_update_metadata_cb(GObject *source, GAsyncResult *res, gpointer user_data)
+-{
+-	g_autoptr(FuMainAuthHelper) helper = (FuMainAuthHelper *)user_data;
+-	g_autoptr(GError) error = NULL;
+-	FuEngine *engine = fu_daemon_get_engine(FU_DAEMON(helper->self));
+-	GDBusMessage *message;
+-	GUnixFDList *fd_list;
+-	g_autofd gint fd_data = -1;
+-	g_autofd gint fd_sig = -1;
+-
+-	/* get result */
+-	if (!fu_polkit_authority_check_finish(FU_POLKIT_AUTHORITY(source), res, &error)) {
+-		fu_dbus_daemon_method_invocation_return_gerror(helper->invocation, error);
+-		return;
+-	}
+-
+-	/* get the fds from the message */
+-	message = g_dbus_method_invocation_get_message(helper->invocation);
+-	fd_list = g_dbus_message_get_unix_fd_list(message);
+-	if (fd_list == NULL) {
+-		g_set_error_literal(&error,
+-				    FWUPD_ERROR,
+-				    FWUPD_ERROR_INTERNAL,
+-				    "no file descriptors are associated");
+-		fu_dbus_daemon_method_invocation_return_gerror(helper->invocation, error);
+-		return;
+-	}
+-	if (g_unix_fd_list_get_length(fd_list) != 2) {
+-		g_set_error(&error,
+-			    FWUPD_ERROR,
+-			    FWUPD_ERROR_INTERNAL,
+-			    "wrong number of file descriptors: %i",
+-			    g_unix_fd_list_get_length(fd_list));
+-		fu_dbus_daemon_method_invocation_return_gerror(helper->invocation, error);
+-		return;
+-	}
+-	fd_data = g_unix_fd_list_get(fd_list, 0, &error);
+-	if (fd_data < 0) {
+-		fu_dbus_daemon_method_invocation_return_gerror(helper->invocation, error);
+-		return;
+-	}
+-	fd_sig = g_unix_fd_list_get(fd_list, 1, &error);
+-	if (fd_sig < 0) {
+-		fu_dbus_daemon_method_invocation_return_gerror(helper->invocation, error);
+-		return;
+-	}
+-
+-	/* store new metadata (will close the fds when done) */
+-	if (!fu_engine_update_metadata(engine,
+-				       helper->remote_id,
+-				       g_steal_fd(&fd_data),
+-				       g_steal_fd(&fd_sig),
+-				       &error)) {
+-		g_prefix_error(&error, "Failed to update metadata for %s: ", helper->remote_id);
+-		fu_dbus_daemon_method_invocation_return_gerror(helper->invocation, error);
+-		return;
+-	}
+-	g_dbus_method_invocation_return_value(helper->invocation, NULL);
+-}
+-#endif /* HAVE_GIO_UNIX */
++static GBytes *
++fu_dbus_daemon_read_catalog_fd(gint fd, goffset limit, GError **error)
++{
++	const gint required = F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL | F_SEAL_EXEC;
++	const gint seals = fcntl(fd, F_GET_SEALS);
++	struct stat st;
++	g_autoptr(FuInputStream) stream = NULL;
++
++	if (seals < 0 || (seals & required) != required || fstat(fd, &st) != 0 ||
++	    !S_ISREG(st.st_mode) || (st.st_mode & 0111) != 0 || st.st_size <= 0 ||
++	    st.st_size > limit) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++				    "expected a bounded, sealed, non-executable catalog descriptor");
++		return NULL;
++	}
++	stream = fu_unix_seekable_input_stream_new(fd, FALSE, error);
++	if (stream == NULL)
++		return NULL;
++	return fu_input_stream_read_bytes(stream, 0, (gsize)st.st_size, NULL, error);
++}
++#endif
+@@ -1987,21 +1951,51 @@
+-	const gchar *remote_id = NULL;
+-	gint fd_data;
+-	gint fd_sig;
+-	g_autoptr(FuMainAuthHelper) helper = NULL;
+-
+-	g_variant_get(parameters, "(&shh)", &remote_id, &fd_data, &fd_sig);
+-
+-	/* authenticate */
+-	fu_daemon_set_status(FU_DAEMON(self), FWUPD_STATUS_WAITING_FOR_AUTH);
+-	helper = g_new0(FuMainAuthHelper, 1);
+-	helper->self = self;
+-	helper->request = g_object_ref(request);
+-	helper->invocation = g_object_ref(invocation);
+-	helper->remote_id = g_strdup(remote_id);
+-	fu_polkit_authority_check(self->authority,
+-				  fu_engine_request_get_sender(request),
+-				  "org.freedesktop.fwupd.refresh-remote",
+-				  fu_dbus_daemon_engine_request_get_authority_check_flags(request),
+-				  NULL,
+-				  fu_dbus_daemon_authorize_update_metadata_cb,
+-				  g_steal_pointer(&helper));
++	FuEngine *engine = fu_daemon_get_engine(FU_DAEMON(self));
++	GDBusMessage *message = g_dbus_method_invocation_get_message(invocation);
++	GUnixFDList *list = g_dbus_message_get_unix_fd_list(message);
++	const gchar *remote = NULL;
++	gint data_idx, signature_idx;
++	g_autofd gint data_fd = -1;
++	g_autofd gint signature_fd = -1;
++	g_autoptr(GBytes) data = NULL;
++	g_autoptr(GBytes) signature = NULL;
++	g_autoptr(GError) error = NULL;
++	g_autofree gchar *data_sha256 = NULL;
++	g_autofree gchar *signature_sha256 = NULL;
++
++	g_variant_get(parameters, "(&shh)", &remote, &data_idx, &signature_idx);
++	if (!fu_engine_request_has_converter_flag(request, FWUPD_CODEC_FLAG_TRUSTED) ||
++	    g_strcmp0(remote, "lvfs") != 0 || list == NULL ||
++	    g_unix_fd_list_get_length(list) != 2 || data_idx != 0 || signature_idx != 1 ||
++	    self->fvca_catalog_generation == G_MAXUINT64) {
++		g_dbus_method_invocation_return_error_literal(invocation, G_DBUS_ERROR,
++							      G_DBUS_ERROR_ACCESS_DENIED,
++							      "FVCA accepts only the LVFS catalog pair from the root broker");
++		return;
++	}
++	data_fd = g_unix_fd_list_get(list, data_idx, &error);
++	if (data_fd < 0)
++		goto fail;
++	signature_fd = g_unix_fd_list_get(list, signature_idx, &error);
++	if (signature_fd < 0)
++		goto fail;
++	data = fu_dbus_daemon_read_catalog_fd(data_fd, 32 * FU_MB, &error);
++	if (data == NULL)
++		goto fail;
++	signature = fu_dbus_daemon_read_catalog_fd(signature_fd, FU_MB, &error);
++	if (signature == NULL)
++		goto fail;
++
++	/* Publish a generation only after the native JCat check and metadata reload. */
++	g_clear_pointer(&self->fvca_catalog, g_free);
++	if (!fu_engine_update_metadata_bytes(engine, "lvfs", data, signature, &error))
++		goto fail;
++	data_sha256 = g_compute_checksum_for_bytes(G_CHECKSUM_SHA256, data);
++	signature_sha256 = g_compute_checksum_for_bytes(G_CHECKSUM_SHA256, signature);
++	self->fvca_catalog_generation++;
++	self->fvca_catalog = g_strdup_printf("%" G_GUINT64_FORMAT ":%s:%s",
++					    self->fvca_catalog_generation,
++					    data_sha256,
++					    signature_sha256);
++	g_dbus_method_invocation_return_value(invocation, NULL);
++	return;
++fail:
++	fu_dbus_daemon_method_invocation_return_gerror(invocation, error);
+@@ -2785 +2779,2 @@
+-	    g_strcmp0(method_name, "GetUpgrades") != 0) {
++	    g_strcmp0(method_name, "UpdateMetadata") != 0 &&
++	    (g_strcmp0(method_name, "GetUpgrades") != 0 || self->fvca_catalog == NULL)) {
+@@ -2875,0 +2871,2 @@
++	if (g_strcmp0(property_name, "FvcaCatalog") == 0)
++		return g_variant_new_string(self->fvca_catalog != NULL ? self->fvca_catalog : "");
+@@ -3291,0 +3289 @@
++	g_clear_pointer(&self->fvca_catalog, g_free);
+--- a/src/fu-engine.c
++++ b/src/fu-engine.c
+@@ -5025,2 +5025,15 @@
+-		if (!fu_engine_validate_result_timestamp(jcat_result, jcat_result_old, error))
+-			return FALSE;
++		g_autoptr(GError) timestamp_error = NULL;
++		if (!fu_engine_validate_result_timestamp(jcat_result, jcat_result_old, &timestamp_error)) {
++			/* An exact retry can recover a restart between writing and reloading the cache. */
++			g_autoptr(GBytes) old_data = NULL;
++			g_autoptr(GBytes) old_signature = NULL;
++			if (g_error_matches(timestamp_error, FWUPD_ERROR, FWUPD_ERROR_NOTHING_TO_DO)) {
++				old_data = fu_bytes_get_contents(fwupd_remote_get_filename_cache(remote), NULL);
++				old_signature = fu_bytes_get_contents(fwupd_remote_get_filename_cache_sig(remote), NULL);
++			}
++			if (old_data == NULL || old_signature == NULL || !g_bytes_equal(old_data, bytes_raw) ||
++			    !g_bytes_equal(old_signature, bytes_sig)) {
++				g_propagate_error(error, g_steal_pointer(&timestamp_error));
++				return FALSE;
++			}
++		}
+--- a/src/org.freedesktop.fwupd.xml
++++ b/src/org.freedesktop.fwupd.xml
+@@ -158,0 +159,2 @@
++    <property name='FvcaCatalog' type='s' access='read'/>
++
