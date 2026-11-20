@@ -81,6 +81,13 @@ def qualify(client, output):
     revision = 0
     files = {}
     transition_targets = {}
+    operational_targets = {}
+    evidence_fields = {
+        "distribution": "distribution_evidence_sha256",
+        "vendor": "vendor_evidence_sha256",
+        "reboot-policy": "reboot_policy_sha256",
+        "recovery": "recovery_evidence_sha256",
+    }
 
     def transition_for(document):
         selected = document["offer"]
@@ -107,6 +114,19 @@ def qualify(client, output):
         transition_targets[checksum] = path
         document["offer"]["qualification"]["transition_evidence_sha256"] = checksum
 
+    def bind_operational(document, kind, evidence, transition=None):
+        qualification = document["offer"]["qualification"]
+        body = json.dumps({
+            "schema": f"fvca-firmware-{kind}-v1",
+            "transition_sha256": transition or qualification["transition_evidence_sha256"],
+            "evidence": evidence,
+        }, sort_keys=True).encode() + b"\n"
+        checksum = digest(body)
+        path = output / f"fvca-firmware-{kind}-{checksum}.json"
+        path.write_bytes(body)
+        operational_targets[checksum] = path
+        qualification[evidence_fields[kind]] = checksum
+
     def offer(identity, version, target, sequence):
         document = {
             "schema": "fvca-firmware-channel-v1", "role": "hypervisor", "channel": "stable",
@@ -116,14 +136,23 @@ def qualify(client, output):
                 "device": identity, "remote": "lvfs", "epoch": 3, "from": version, "to": target,
                 "archive": {"sha256": digest(archive), "bytes": len(archive)}, "payload_sha256": "1" * 64,
                 "catalog": deepcopy(catalog),
-                "qualification": {
-                    "distribution_evidence_sha256": "2" * 64, "vendor_authentication": "device-signature",
-                    "vendor_evidence_sha256": "3" * 64,
-                    "reboot_policy_sha256": "5" * 64, "recovery_evidence_sha256": "6" * 64,
-                },
+                "qualification": {"vendor_authentication": "device-signature"},
             },
         }
         bind_transition(document, transition_for(document))
+        bind_operational(document, "distribution", {
+            "remote": "lvfs", "metadata_sha256": catalog["metadata"]["sha256"],
+            "signature_sha256": catalog["signature"]["sha256"],
+        })
+        bind_operational(document, "vendor", {"authentication": "device-signature", "procedure": "Fixture vendor qualification"})
+        bind_operational(document, "reboot-policy", {
+            "urgency": "routine",
+            "delivery": "offline-nvme" if identity["component"] == "nvme" else "capsule-on-disk",
+            "power": "no-additional-requirement", "steps": ["reboot"],
+        })
+        bind_operational(document, "recovery", {
+            "method": "vendor-procedure", "procedure": "Fixture recovery", "qualified_retries": 0,
+        })
         return document
 
     def snapshot(document, serial=None):
@@ -161,6 +190,11 @@ def qualify(client, output):
             path = transition_source or transition_targets.get(evidence)
             if path is not None:
                 sources[f"fvca-firmware-transition-{evidence}.json"] = path
+            for kind, field in evidence_fields.items():
+                evidence = document["offer"]["qualification"][field]
+                path = operational_targets.get(evidence)
+                if path is not None:
+                    sources[f"fvca-firmware-{kind}-{evidence}.json"] = path
         targets = {}
         for name, path in sources.items():
             reference = TargetFile.from_file(name, str(path), ["sha256"])
@@ -184,7 +218,7 @@ def qualify(client, output):
         "max_archive_bytes": 4096, "allowed_devices": [bios, nvme], "allowed_remotes": ["lvfs"], "minimum_epoch": 3,
     }
 
-    def run(name, observed, want=None, settings=policy, directory=state, *, disposition="staged"):
+    def run(name, observed, want=None, settings=policy, directory=state, *, disposition="staged", urgency="routine"):
         intake["write_json"](observation, observed)
         intake["write_json"](policy_path, settings)
         signature.write_bytes(bytes.fromhex(owner.sign(policy_path.read_bytes()).signature))
@@ -205,9 +239,11 @@ def qualify(client, output):
                 stage = Path(status["staged"])
                 assert {path.name for path in stage.iterdir()} == {
                     "firmware.cab", "offer.json", "offer.sig", "transition.json",
+                    "distribution.json", "vendor.json", "reboot-policy.json", "recovery.json",
                 }
                 assert (stage / "firmware.cab").read_bytes() == archive
                 assert digest((stage / "transition.json").read_bytes()) == status["transition_evidence_sha256"]
+                assert status["urgency"] == urgency and "operational_preflight" not in status
                 assert list((directory / "staged").iterdir()) == [stage]
             else:
                 assert "staged" not in status and not any((directory / "staged").iterdir())
@@ -215,6 +251,52 @@ def qualify(client, output):
 
     run("capsule-staged", snapshot(initial))
     run("exact-retry", snapshot(initial))
+    bad_window = {"timezone": "Europe/Berlin", "start_minute": 240, "end_minute": 240}
+    run("invalid-signed-maintenance-window", snapshot(initial), "invalid maintenance window",
+        settings=dict(policy, maintenance=bad_window))
+    missing_vendor = deepcopy(initial)
+    missing_vendor["offer"]["qualification"]["vendor_evidence_sha256"] = "f" * 64
+    cases = [("missing-vendor-proof", missing_vendor, "missing or oversized TUF channel target")]
+    foreign_vendor = deepcopy(initial)
+    bind_operational(foreign_vendor, "vendor",
+                     {"authentication": "device-signature", "procedure": "Fixture other transition"}, "f" * 64)
+    cases.append(("foreign-vendor-proof", foreign_vendor, "differs from the qualified transition"))
+    wrong_vendor = deepcopy(initial)
+    bind_operational(wrong_vendor, "vendor", {
+        "authentication": "independently-verified-vendor-signature", "procedure": "Fixture weaker evidence",
+        "signer_sha256": "a" * 64,
+    })
+    cases.append(("vendor-authentication-mismatch", wrong_vendor, "invalid qualified vendor authentication evidence"))
+    wrong_distribution = deepcopy(initial)
+    bind_operational(wrong_distribution, "distribution", {
+        "remote": "lvfs", "metadata_sha256": "a" * 64, "signature_sha256": catalog["signature"]["sha256"],
+    })
+    cases.append(("distribution-catalog-mismatch", wrong_distribution, "differs from the selected catalog"))
+    wrong_route = deepcopy(initial)
+    bind_operational(wrong_route, "reboot-policy", {
+        "urgency": "routine", "delivery": "offline-nvme", "power": "mains-required", "steps": ["reboot"],
+    })
+    cases.append(("unsupported-device-route", wrong_route, "differs from the selected device protocol"))
+    unsafe_recovery = deepcopy(initial)
+    bind_operational(unsafe_recovery, "recovery", {
+        "method": "physical-repair", "procedure": "Fixture repair only", "qualified_retries": 1,
+    })
+    cases.append(("physical-repair-cannot-retry", unsafe_recovery, "invalid qualified firmware recovery procedure"))
+    for name, modified, reason in cases:
+        isolated = output / (name + "-state")
+        isolated.mkdir(mode=0o700)
+        publish(modified)
+        run(name, snapshot(initial), reason, directory=isolated)
+        assert not any((isolated / "staged").iterdir())
+    security = deepcopy(initial)
+    bind_operational(security, "reboot-policy", {
+        "urgency": "security", "delivery": "capsule-on-disk", "power": "continuity-required", "steps": ["reboot"],
+    })
+    security_state = output / "security-state"
+    security_state.mkdir(mode=0o700)
+    publish(security)
+    run("signed-security-urgency", snapshot(initial), directory=security_state, urgency="security")
+    publish(initial)
     stored = next((state / "staged").iterdir()) / "transition.json"
     assert stored.stat().st_mode & 0o777 == 0o400
     original = stored.read_bytes()

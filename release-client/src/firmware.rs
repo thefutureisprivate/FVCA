@@ -5,6 +5,7 @@ mod boot;
 mod bus;
 mod capsule;
 mod live;
+mod qualification;
 mod result;
 mod transition;
 
@@ -19,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tough::schema::key::Key;
 use tough::{Repository, TargetName};
 
-use crate::channel::{checkpoint, digest, save, target, verify};
+use crate::channel::{Window, checkpoint, digest, save, target, verify};
 use crate::depot::{CONFIG_BYTES, Depot, EnrolledDepot, METADATA_BYTES};
 use crate::{
     MANIFEST_BYTES, Member, Result, Role, check_target, download, handoff, invalid,
@@ -168,6 +169,8 @@ struct Policy {
     allowed_devices: Vec<DeviceIdentity>,
     allowed_remotes: Vec<String>,
     minimum_epoch: u64,
+    #[serde(default)]
+    maintenance: Window,
 }
 
 impl Policy {
@@ -211,6 +214,7 @@ impl Policy {
         {
             return Err(invalid("invalid or expired standing Host firmware policy").into());
         }
+        self.maintenance.timezone()?;
         Ok(())
     }
 }
@@ -305,7 +309,7 @@ impl Version {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum VendorAuthentication {
     DeviceSignature,
@@ -868,6 +872,7 @@ async fn refresh(
         return Ok(None);
     };
     let (transition_bytes, transition) = transition::download(&repo, &head, offer).await?;
+    let qualified = qualification::download(&repo, offer).await?;
     let payloads = offer.catalog.download(&repo).await?;
     require_current()?;
     let snapshot = match source {
@@ -887,15 +892,18 @@ async fn refresh(
                 sha256: sha256.clone(),
                 esrt: None,
                 payload_bytes,
+                requires_ac: false,
             })
         }
         SnapshotSource::Live(live) => {
             let observed = live.read(&offer.device)?;
             let esrt = offer.require_observation(&policy, &observed, require_current()?)?;
+            let device = unique_device(&observed.devices, &offer.device.device_id)?;
             Ok(AdmittedObservation {
                 sha256: digest(&serde_json::to_vec(&observed)?),
                 esrt: esrt.cloned(),
                 payload_bytes,
+                requires_ac: has(&device.flags, "require-ac"),
             })
         }
     };
@@ -912,15 +920,21 @@ async fn refresh(
         };
         observe(payload_bytes)
     };
+    let mut records = vec![
+        (OFFER, head_bytes.as_slice()),
+        (SIGNATURE, signature.as_slice()),
+        (transition::FILE, transition_bytes.as_slice()),
+    ];
+    records.extend(
+        qualification::FILES
+            .into_iter()
+            .zip(qualified.records.iter().map(Vec::as_slice)),
+    );
     let (staged, observed) = stage_archive(
         &repo,
         &parent,
         offer,
-        [
-            (OFFER, &head_bytes),
-            (SIGNATURE, &signature),
-            (transition::FILE, &transition_bytes),
-        ],
+        &records,
         &approval_sha256,
         &check_cabinet,
     )
@@ -940,13 +954,20 @@ async fn refresh(
         }
         _ => None,
     };
+    let now = Timestamp::from_second(require_current()?)?;
+    let operational_preflight = boot_transition
+        .as_ref()
+        .map(|boot| {
+            qualified.reboot.preflight(
+                boot,
+                capsule_delivery.as_ref(),
+                observed.requires_ac,
+                &policy.maintenance,
+                now,
+            )
+        })
+        .transpose()?;
     require_current()?;
-    let vendor_authentication = match offer.qualification.vendor_authentication {
-        VendorAuthentication::DeviceSignature => "device-signature",
-        VendorAuthentication::IndependentlyVerifiedVendorSignature => {
-            "independently-verified-vendor-signature"
-        }
-    };
     Ok(Some(Staged {
         offer_sha256: approval_sha256,
         archive_sha256: offer.archive.sha256.clone(),
@@ -956,7 +977,9 @@ async fn refresh(
         capsule_delivery,
         transition_evidence_sha256: offer.qualification.transition_evidence_sha256.clone(),
         boot_transition,
-        qualified_vendor_authentication: vendor_authentication,
+        qualified_vendor_authentication: offer.qualification.vendor_authentication,
+        urgency: qualified.reboot.urgency,
+        operational_preflight,
         staged,
     }))
 }
@@ -965,6 +988,7 @@ struct AdmittedObservation {
     sha256: String,
     esrt: Option<Esrt>,
     payload_bytes: Option<u64>,
+    requires_ac: bool,
 }
 
 #[derive(Serialize)]
@@ -981,7 +1005,10 @@ struct Staged {
     transition_evidence_sha256: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     boot_transition: Option<transition::Status>,
-    qualified_vendor_authentication: &'static str,
+    qualified_vendor_authentication: VendorAuthentication,
+    urgency: qualification::Urgency,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operational_preflight: Option<qualification::Status>,
     staged: PathBuf,
 }
 
@@ -1010,11 +1037,12 @@ fn retire_stages(parent: &Path, retain: Option<&str>, scheduled: bool) -> Result
         }
         let files = fs::read_dir(&path)?.collect::<io::Result<Vec<_>>>()?;
         for file in &files {
-            if !matches!(
-                file.file_name().to_str(),
-                Some(ARCHIVE | OFFER | SIGNATURE | transition::FILE)
-            ) || !file.file_type()?.is_file()
-            {
+            let name = file.file_name();
+            let recognized = name.to_str().is_some_and(|name| {
+                matches!(name, ARCHIVE | OFFER | SIGNATURE | transition::FILE)
+                    || qualification::FILES.contains(&name)
+            });
+            if !recognized || !file.file_type()?.is_file() {
                 return Err(invalid("unrecognized firmware staging file").into());
             }
         }
@@ -1034,7 +1062,7 @@ async fn stage_archive(
     repo: &Repository,
     parent: &Path,
     offer: &Offer,
-    records: [(&str, &[u8]); 3],
+    records: &[(&str, &[u8])],
     approval_sha256: &str,
     check_cabinet: &dyn Fn(&Path) -> Result<AdmittedObservation>,
 ) -> Result<(PathBuf, AdmittedObservation)> {
@@ -1053,7 +1081,7 @@ async fn stage_archive(
                     invalid("existing firmware stage does not match the signed offer").into(),
                 );
             }
-            for (name, bytes) in records {
+            for &(name, bytes) in records {
                 if state::read(&destination.join(name), bytes.len() as u64)? != bytes {
                     return Err(
                         invalid("existing firmware stage does not match the signed offer").into(),
@@ -1072,7 +1100,7 @@ async fn stage_archive(
         .tempdir_in(parent)?;
     let path = temporary.path();
     download(repo, &target, &path.join(ARCHIVE), offer.archive.bytes).await?;
-    for (name, bytes) in records {
+    for &(name, bytes) in records {
         let mut file = output_file(&path.join(name))?;
         file.write_all(bytes)?;
         file.sync_all()?;

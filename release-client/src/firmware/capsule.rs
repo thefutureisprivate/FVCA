@@ -41,6 +41,12 @@ pub(super) struct Delivery {
     route: Route,
 }
 
+impl Delivery {
+    pub(super) fn matched(&self) -> bool {
+        matches!(self.route, Route::Matched { .. })
+    }
+}
+
 #[derive(Serialize)]
 #[serde(tag = "disposition", rename_all = "kebab-case")]
 enum Route {

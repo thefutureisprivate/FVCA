@@ -68,7 +68,7 @@ struct Policy {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Window {
+pub(super) struct Window {
     timezone: String,
     start_minute: u16,
     end_minute: u16,
@@ -85,7 +85,7 @@ impl Default for Window {
 }
 
 impl Window {
-    fn timezone(&self) -> Result<TimeZone> {
+    pub(super) fn timezone(&self) -> Result<TimeZone> {
         if self.start_minute >= 1440
             || self.end_minute > 1440
             || self.end_minute == self.start_minute
@@ -95,7 +95,7 @@ impl Window {
         Ok(TimeZoneDatabase::bundled().get(&self.timezone)?)
     }
 
-    fn contains(&self, now: Timestamp, zone: TimeZone) -> bool {
+    pub(super) fn contains(&self, now: Timestamp, zone: TimeZone) -> bool {
         let local = now.to_zoned(zone);
         let minute = (i16::from(local.hour()) * 60 + i16::from(local.minute())) as u16;
         if self.start_minute < self.end_minute {

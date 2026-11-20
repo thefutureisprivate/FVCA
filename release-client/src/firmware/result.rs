@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use super::{
     Esrt, HEAD_SCHEMA, Head, OFFER, Offer, Version, activation::Activation, boot, boot_id, live,
-    transition, uuid,
+    qualification, transition, uuid,
 };
 use crate::{MANIFEST_BYTES, Result, Role, channel::digest, invalid};
 
@@ -28,6 +28,7 @@ pub(super) enum Evidence {
         assessment: Assessment,
         boot_evidence: boot::Evidence,
         boot_transition: transition::Status,
+        qualified_recovery: Box<qualification::Recovery>,
         #[serde(flatten)]
         observed: Observed,
     },
@@ -80,10 +81,11 @@ pub(super) fn inspect(directory: &File, activation: &Activation) -> Evidence {
     };
     let observed = collect(directory, activation);
     match observed {
-        Ok((assessment, observed, expected_boot)) => {
+        Ok((assessment, observed, expected_boot, qualified_recovery)) => {
             let boot_evidence = boot::inspect(directory, &boot);
             Evidence::Observed {
                 boot_transition: transition::compare(&expected_boot, &boot_evidence),
+                qualified_recovery: Box::new(qualified_recovery),
                 boot_evidence,
                 boot_id: boot,
                 assessment,
@@ -100,15 +102,22 @@ pub(super) fn inspect(directory: &File, activation: &Activation) -> Evidence {
 fn collect(
     directory: &File,
     activation: &Activation,
-) -> Result<(Assessment, Observed, boot::Policy)> {
+) -> Result<(Assessment, Observed, boot::Policy, qualification::Recovery)> {
     let bytes = staged_record(directory, activation, OFFER, MANIFEST_BYTES)?;
     let (head, offer) = parse_offer(&bytes, &activation.offer_sha256, &activation.device_id)?;
     let evidence = staged_record(directory, activation, transition::FILE, transition::LIMIT)?;
     let qualified = transition::Transition::parse(&evidence, &head, &offer)?;
+    let recovery = staged_record(
+        directory,
+        activation,
+        qualification::RECOVERY_FILE,
+        qualification::LIMIT,
+    )?;
+    let recovery = qualification::Recovery::parse(&recovery, &offer)?;
     require_baseline(&offer, activation.esrt_before.as_ref())?;
     let observed = live::read_result(&offer, &head.system_uuid, &head.fwupd_version, activation)?;
     let assessment = assess(&offer, &observed);
-    Ok((assessment, observed, qualified.after))
+    Ok((assessment, observed, qualified.after, recovery))
 }
 
 fn staged_record(
