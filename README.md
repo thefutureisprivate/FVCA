@@ -114,6 +114,57 @@ Run `tests/check-release-intake.py` with Python TUF 7.0.1 and securesystemslib 1
 
 Use the same Python environment for `tests/check-release-https.py --client FILE --fixture INTAKE_TEST_OUTPUT --output NEW_DIRECTORY`. It serves the signed fixtures over loopback TLS and checks CA and server-name validation, proxy and redirect handling, size and time bounds, recovery from an interrupted transfer, and persisted rollback checks.
 
+### Discover an OS release under standing policy
+
+Use a private release state directory for each role. The trusted boot controller supplies `active-os-release.json` with `role`, `sequence`, `epoch`, and `manifest_sha256` from the active release. Pin the owner public key in the verified deployment configuration. Sign the exact standing policy bytes with the owner key. The client expects a 32-byte raw Ed25519 public key and a 64-byte detached signature.
+
+```json
+{
+  "schema": "fvca-os-update-policy-v1",
+  "revision": 1,
+  "role": "hypervisor",
+  "channel": "stable",
+  "enabled": true,
+  "valid_from": 1795154400,
+  "expires": 1797746400,
+  "tuf_root_sha256": "INITIAL_TRUSTED_ROOT_SHA256",
+  "depot_config_sha256": "DEPOT_CONFIG_SHA256",
+  "qualification_key_ed25519": "RAW_32_BYTE_PUBLIC_KEY_AS_LOWERCASE_HEX",
+  "compatibility_sha256": "REVIEWED_COMPATIBILITY_PROFILE_SHA256",
+  "minimum_epoch": 17,
+  "max_release_bytes": 4294967296,
+  "max_staged_bytes": 17179869184
+}
+```
+
+Publish the selection as TUF targets `fvca-os-ROLE-CHANNEL.json` and `fvca-os-ROLE-CHANNEL.sig`. The policy's independent qualification key signs the exact channel JSON bytes after reviewing the release and its evidence. Use distinct owner, qualification, and TUF keys. The qualification authority allocates increasing sequence numbers within each role across its channels. The release digest covers the full role manifest, which binds every payload and the qualification evidence. [The Update Framework specification](https://theupdateframework.github.io/specification/latest/)
+
+```json
+{
+  "schema": "fvca-os-channel-v1",
+  "role": "hypervisor",
+  "channel": "stable",
+  "sequence": 42,
+  "valid_from": 1795154400,
+  "expires": 1795240800,
+  "compatibility_sha256": "REVIEWED_COMPATIBILITY_PROFILE_SHA256",
+  "release": {
+    "epoch": 17,
+    "manifest_sha256": "QUALIFIED_CANDIDATE_MANIFEST_SHA256",
+    "activation": {"urgency": "security", "activate_by": 1795183200}
+  }
+}
+```
+
+Use Unix seconds for validity, hold expiry, and security deadlines. Limit channel authorizations to seven days. A signed empty channel uses `"release": null`. Routine updates use `"activation": {"urgency": "routine"}` and default to 04:00–05:00 Europe/Berlin. Adjust the daily window with a signed `maintenance` object containing an IANA `timezone`, a `start_minute` and an `end_minute` measured from local midnight. An optional signed `hold` names a `manifest_sha256` and an expiry `until`. Security releases bypass the routine window and any matching hold ends by the signed security deadline.
+
+```sh
+fvca-release-client --discover-os-release trusted-root.json depot.json intake-state \
+  policy.json policy.sig owner.public
+```
+
+On success the client writes and prints `fvca-os-update-status-v1` with the active identity, optional staged candidate, eligibility, last successful refresh, and earliest authorization expiry. A failed refresh exits with an error. The status file records the last successful observation. Activation requires fresh authorization. The client reuses TUF's persisted freshness state, rejects signed sequence rollback or conflicting records at a previously observed sequence, and retains existing staged releases when the staging quota is full. Run `python3 tests/check-release-channel.py --client CLIENT --output NEW_DIRECTORY` with the reference TUF fixture environment. Discovery and staging are available for both roles. Scheduled execution, lifecycle leasing, activation and health-controlled recovery remain release gates.
+
 ### Prepare a file-backed A/B slot
 
 Use a private `0700` Btrfs slot store per role. To provision the initial boot tuple, append `--initialize-slots SLOT_STORE` to the intake command. This creates `slot-a` in an empty store and verifies the same slot on retry. Use the existing role boot verifier when booting the installed images.

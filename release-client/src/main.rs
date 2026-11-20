@@ -1,3 +1,4 @@
+mod channel;
 mod depot;
 mod gpt;
 mod install;
@@ -11,7 +12,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use futures_util::{TryStreamExt, pin_mut};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tough::schema::{Metafile, RoleType, Root, Signed, key::Key};
@@ -34,7 +35,7 @@ fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum Role {
     Hypervisor,
@@ -272,10 +273,9 @@ fn check_target(repo: &Repository, name: &TargetName, limit: u64, sha256: &str) 
 async fn load_repository(
     depot: Depot,
     state_dir: &Path,
-    root_path: &Path,
+    initial_root: Vec<u8>,
     work: &Path,
 ) -> Result<Repository> {
-    let initial_root = state::read(root_path, METADATA_BYTES)?;
     let bootstrap = hex::encode(Sha256::digest(&initial_root));
     let root = MetadataState::restore(state_dir, work, &bootstrap, initial_root)?;
     let limits = Limits {
@@ -445,8 +445,17 @@ async fn intake(
     let scratch = tempfile::Builder::new()
         .prefix(".tuf-")
         .tempdir_in(state_dir)?;
-    let depot = Depot::open(depot, selection.max_release_bytes)?;
-    let repo = load_repository(depot, state_dir, root, scratch.path()).await?;
+    let depot = Depot::from_config(
+        &state::read(depot, depot::CONFIG_BYTES)?,
+        selection.max_release_bytes,
+    )?;
+    let repo = load_repository(
+        depot,
+        state_dir,
+        state::read(root, METADATA_BYTES)?,
+        scratch.path(),
+    )
+    .await?;
     let location = stage(&repo, &selection, &staging).await?;
     match operation {
         Some(Operation::FileBacked(operation)) => {
@@ -475,6 +484,13 @@ fn run() -> Result<()> {
         && option.as_os_str() == "--inspect-hypervisor-gpt"
     {
         return gpt::inspect(disk, sector.to_str().ok_or_else(usage)?.parse()?);
+    }
+    if let [option, root, depot, state, policy, signature, owner] = operands.as_slice()
+        && option.as_os_str() == "--discover-os-release"
+    {
+        return runtime()?.block_on(channel::discover(
+            root, depot, state, policy, signature, owner,
+        ));
     }
     if let [option, state, approval, signature, authority, certificate] = operands.as_slice()
         && option.as_os_str() == "--verify-hypervisor-floor-approval"
@@ -521,16 +537,19 @@ fn run() -> Result<()> {
         }
         _ => return Err(usage().into()),
     };
+    runtime()?.block_on(intake(root, depot, state, selection, operation))
+}
+
+fn runtime() -> io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .build()?
-        .block_on(intake(root, depot, state, selection, operation))
+        .build()
 }
 
 fn usage() -> io::Error {
     invalid(
-        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE\n       fvca-release-client --verify-hypervisor-floor-approval PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE\n       fvca-release-client --advance-hypervisor-floor PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE INCREMENT_TPM_PUBLIC POLICY_REFERENCE",
+        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --discover-os-release TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE STANDING_POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE\n       fvca-release-client --verify-hypervisor-floor-approval PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE\n       fvca-release-client --advance-hypervisor-floor PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE INCREMENT_TPM_PUBLIC POLICY_REFERENCE",
     )
 }
 

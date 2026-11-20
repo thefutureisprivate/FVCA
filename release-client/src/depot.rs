@@ -18,7 +18,7 @@ use url::Url;
 use crate::{Result, invalid, state};
 
 pub const METADATA_BYTES: u64 = 1024 * 1024;
-const CONFIG_BYTES: u64 = 64 * 1024;
+pub const CONFIG_BYTES: u64 = 64 * 1024;
 
 #[derive(Deserialize)]
 #[serde(tag = "transport", rename_all = "kebab-case", deny_unknown_fields)]
@@ -61,8 +61,8 @@ struct Entry<'a> {
 }
 
 impl Depot {
-    pub fn open(config: &Path, max_target_bytes: u64) -> Result<Self> {
-        let config: Config = serde_json::from_slice(&state::read(config, CONFIG_BYTES)?)?;
+    pub fn from_config(config: &[u8], max_target_bytes: u64) -> Result<Self> {
+        let config: Config = serde_json::from_slice(config)?;
         let (metadata, targets, backend) = match config {
             Config::Local { path } => {
                 if !path.is_absolute() {
