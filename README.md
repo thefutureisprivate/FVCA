@@ -867,6 +867,8 @@ The broker delegates only the 32-byte challenge to the SELinux-confined collecto
 
 The [off-node OpenTofu provider and module](opentofu/README.md) use this protocol for authenticated Guest configuration preflight and separate release observations.
 
+Send `{"type":"host-storage-health"}` with the enrolled read operator key to inspect the mounted Hypervisor Btrfs pool. The result `host-storage-health` returns the filesystem UUID, RAID1 profile and observed read-only state under `pool`. The `data`, `metadata` and `system` records each report logical `total_bytes` and `used_bytes` in allocated chunks. Each of the two `members` reports its Btrfs device ID, byte span visible to Btrfs, allocated bytes, and the kernel's cumulative write, read, flush, corruption and generation error counters. The request takes no arguments. A `host-storage-health-unavailable` refusal means a complete observation could not be made. [Linux Btrfs UAPI](https://github.com/torvalds/linux/blob/master/include/uapi/linux/btrfs.h)
+
 #### Host workload uplink
 
 For a connected Service Guest, pass `--workload-uplink FILE` along with `--guest-boot` to `compose-hypervisor.py`. Start the file with the dedicated workload NIC's PCI address and permanent MAC. Use the complete [Guest workload network record](#service-guest-workload-uplink) immediately after that header, starting on the next line. For a Hypervisor-managed Guest, use `pci=0000:00:06.0` in the Guest record. The Hypervisor checks the digest against the registered Guest release before signing and again on boot and trial admission.

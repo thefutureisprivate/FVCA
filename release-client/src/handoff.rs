@@ -41,7 +41,7 @@ fn private_directory(file: &File) -> io::Result<()> {
     Ok(())
 }
 
-fn host_data() -> Result<(File, u64)> {
+pub(crate) fn host_data() -> Result<(File, u64)> {
     let host = File::from(fs::open(HOST_DATA, DIRECTORY, Mode::empty())?);
     let parent = fs::statx(
         CWD,

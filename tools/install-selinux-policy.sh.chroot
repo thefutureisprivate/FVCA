@@ -36,7 +36,7 @@ if [[ "${FVCA_HYPERVISOR_STORAGE:-}" == yes ]]; then
         -i "$SRCDIR/policy/selinux/fvca_backup.cil" \
         -i "$SRCDIR/policy/selinux/fvca_management.cil" \
         -i "$SRCDIR/policy/selinux/fvca_host_workload.cil"
-    install -Dm644 /dev/null /usr/lib/fvca/management-policy-v2
+    install -Dm644 /dev/null /usr/lib/fvca/management-policy-v3
 fi
 if [[ "${FVCA_HYPERVISOR_STORAGE:-}" == yes || "${FVCA_GUEST_OCI:-}" == yes ]]; then
     semodule -n -X 400 -i "$SRCDIR/policy/selinux/fvca_initrd_network.cil"

@@ -100,6 +100,11 @@
 (allow fvca_management_broker_t fvca_firmware_state_t (file (getattr)))
 (allow fvca_management_broker_t fvca_host_data_t (dir (getattr open read search)))
 (allow fvca_management_broker_t fvca_host_data_t (file (getattr open read)))
+; Only filesystem/space/device information and read-only device statistics.
+; The broker has no CAP_SYS_ADMIN to reset device statistics.
+(allow fvca_management_broker_t fvca_host_data_t (dir (ioctl)))
+(allowx fvca_management_broker_t fvca_host_data_t (ioctl dir (0x9414 0x941e 0x941f 0x9434)))
+(allow fvca_management_broker_t sysfs_t (dir (open read)))
 
 (type fvca_management_intents_t)
 (typeattributeset file_type (fvca_management_intents_t))

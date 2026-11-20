@@ -6,6 +6,7 @@ mod listener;
 mod protocol;
 #[cfg(not(feature = "appliance"))]
 pub(crate) mod quote_client;
+mod storage_health;
 
 use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -232,6 +233,9 @@ enum Outcome {
     BootQuote {
         evidence: attestation::Evidence,
     },
+    HostStorageHealth {
+        pool: serde_json::Value,
+    },
     Refused {
         code: Refusal,
     },
@@ -259,6 +263,10 @@ async fn dispatch(
                 .map_err(|_| Refusal::BootQuoteUnavailable)?;
             Ok(Outcome::BootQuote { evidence })
         }
+        Operation::HostStorageHealth {} => {
+            let pool = storage_health::read().await?;
+            Ok(Outcome::HostStorageHealth { pool })
+        }
         Operation::ApplyConfiguration { plan } => {
             let receipt = intent::submit(enrollment, plan, packet)?;
             Ok(Outcome::ConfigurationOperation { receipt })
@@ -267,7 +275,7 @@ async fn dispatch(
             let receipt = intent::status(enrollment, operation_id)?;
             Ok(Outcome::ConfigurationOperation { receipt })
         }
-        Operation::Status => {
+        Operation::Status {} => {
             let active = HostState::read().map_err(|_| Refusal::HostStateUnavailable)?;
             Ok(Outcome::Status {
                 boot_configuration: Settings::new(active.binding, active.resources),
