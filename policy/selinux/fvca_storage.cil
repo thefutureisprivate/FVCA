@@ -11,3 +11,13 @@
 (allow init_t fvca_host_data_t (dir (add_name create getattr ioctl open read remove_name search setattr write)))
 (allow init_t fvca_host_data_t (file (create getattr ioctl lock open read relabelfrom relabelto rename setattr unlink write)))
 (allow init_t virt_image_t (file (relabelfrom relabelto)))
+
+; Cold restore moves two recorded VM subvolume roots between private parents.
+; The launcher gives only those roots a movable label before the exchange.
+(type fvca_vm_slot_t)
+(typeattributeset file_type (fvca_vm_slot_t))
+(roletype object_r fvca_vm_slot_t)
+(allow fvca_vm_slot_t fs_t (filesystem (associate)))
+(allow init_t fvca_host_data_t (dir (relabelfrom)))
+(allow init_t fvca_vm_slot_t (dir (getattr ioctl open read relabelfrom relabelto rename reparent rmdir search write)))
+(allowx init_t fvca_vm_slot_t (ioctl dir (0x9411 0x943c)))

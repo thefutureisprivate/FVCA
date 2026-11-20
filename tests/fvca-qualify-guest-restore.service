@@ -1,0 +1,43 @@
+[Unit]
+Description=Qualify cold restore of the disposable Service Guest
+After=fvca-base-ready.service
+OnFailure=emergency.target
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+TimeoutStartSec=240s
+NoNewPrivileges=yes
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/bin/systemctl start fvca-capture-live@b43ad128-b5a0-4d85-b3f0-29fb32b08b8a.service
+ExecStart=-/usr/bin/systemctl start fvca-restore-guest@b43ad128-b5a0-4d85-b3f0-29fb32b08b8a.cf92ad0c-6ccd-4562-8663-c39e31ede807.service
+ExecStart=/usr/bin/test ! -e /run/fvca/host-data/captures/restores/cf92ad0c-6ccd-4562-8663-c39e31ede807/intent
+ExecStart=/usr/bin/systemctl --quiet is-active fvca-service-guest.service
+ExecStart=/usr/bin/systemctl stop fvca-service-guest.service
+ExecStart=/usr/bin/systemctl start fvca-capture-stopped@9c0db5ae-03da-4136-a93a-f981c71dedfb.service
+ExecStart=/usr/bin/mv /run/fvca/host-data/captures/sets/9c0db5ae-03da-4136-a93a-f981c71dedfb/manifest /run/fvca/host-data/captures/sets/9c0db5ae-03da-4136-a93a-f981c71dedfb/qualification-saved
+ExecStart=-/usr/bin/systemctl start fvca-restore-guest@9c0db5ae-03da-4136-a93a-f981c71dedfb.a4bbcc0d-c47d-4031-ad38-ba76ef3ebe9a.service
+ExecStart=/usr/bin/test ! -e /run/fvca/host-data/captures/restores/active
+ExecStart=/usr/bin/test ! -e /run/fvca/host-data/captures/restores/a4bbcc0d-c47d-4031-ad38-ba76ef3ebe9a/branch
+ExecStart=/usr/bin/mv /run/fvca/host-data/captures/sets/9c0db5ae-03da-4136-a93a-f981c71dedfb/qualification-saved /run/fvca/host-data/captures/sets/9c0db5ae-03da-4136-a93a-f981c71dedfb/manifest
+ExecStart=/usr/bin/systemctl start fvca-restore-guest@b43ad128-b5a0-4d85-b3f0-29fb32b08b8a.cf92ad0c-6ccd-4562-8663-c39e31ede807.service
+ExecStart=/usr/bin/systemctl start fvca-restore-guest@b43ad128-b5a0-4d85-b3f0-29fb32b08b8a.cf92ad0c-6ccd-4562-8663-c39e31ede807.service
+ExecStart=/usr/bin/systemctl --quiet is-active fvca-service-guest.service
+ExecStart=/usr/bin/test -s /run/fvca/host-data/captures/restores/cf92ad0c-6ccd-4562-8663-c39e31ede807/branch/data.raw
+ExecStart=/usr/bin/test -s /run/fvca/host-data/captures/restores/cf92ad0c-6ccd-4562-8663-c39e31ede807/verified
+ExecStart=/usr/bin/systemctl stop fvca-service-guest.service
+ExecStart=/usr/bin/systemctl start fvca-restore-guest@9c0db5ae-03da-4136-a93a-f981c71dedfb.a4bbcc0d-c47d-4031-ad38-ba76ef3ebe9a.service
+ExecStart=/usr/bin/systemctl --quiet is-active fvca-service-guest.service
+ExecStart=/usr/bin/test -s /run/fvca/host-data/captures/restores/a4bbcc0d-c47d-4031-ad38-ba76ef3ebe9a/branch/data.raw
+ExecStart=/usr/bin/test -s /run/fvca/host-data/captures/restores/a4bbcc0d-c47d-4031-ad38-ba76ef3ebe9a/verified
+ExecStart=/usr/bin/systemctl stop fvca-service-guest.service
+ExecStart=/usr/bin/mv /run/fvca/host-data/vms/service-guest /run/fvca/host-data/vms/qualification-original
+ExecStart=/usr/bin/systemctl start fvca-restore-guest@9c0db5ae-03da-4136-a93a-f981c71dedfb.863333ec-9e20-4f6a-8f08-d636cd99e466.service
+ExecStart=/usr/bin/systemctl --quiet is-active fvca-service-guest.service
+ExecStart=/usr/bin/test ! -e /run/fvca/host-data/captures/restores/863333ec-9e20-4f6a-8f08-d636cd99e466/branch
+ExecStart=/usr/bin/test -s /run/fvca/host-data/captures/restores/863333ec-9e20-4f6a-8f08-d636cd99e466/verified
+ExecStart=/usr/bin/test ! -e /run/fvca/host-data/captures/restores/active
+ExecStart=/usr/bin/systemctl start fvca-capture-live@9b5c817b-c896-4d9a-b664-b962468fd00c.service
+ExecStart=/usr/bin/test -s /run/fvca/host-data/captures/sets/9b5c817b-c896-4d9a-b664-b962468fd00c/manifest
+ExecStart=/usr/bin/echo FVCA_COLD_RESTORE_VERIFIED

@@ -1,0 +1,13 @@
+[Unit]
+Description=Report a failed normal FVCA Service Guest launch
+ConditionPathExists=!/run/fvca/host-data/captures/restores/active
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/bin/systemctl --no-block start emergency.target
+TimeoutStartSec=10s
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+StandardOutput=journal+console
+StandardError=journal+console

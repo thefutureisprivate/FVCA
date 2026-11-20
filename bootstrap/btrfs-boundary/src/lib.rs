@@ -1,6 +1,6 @@
 //! Narrow x86-64 Linux UAPI for the selected Btrfs storage profile.
 
-use std::ffi::{c_int, c_ulong};
+use std::ffi::{CStr, c_char, c_int, c_uint, c_ulong};
 use std::fs::{self, File};
 use std::io;
 use std::os::fd::AsRawFd;
@@ -11,6 +11,10 @@ const TREE_SEARCH: c_ulong = 0xd000_9411;
 const INODE_ITEM: u32 = 1;
 const NODATASUM_OR_NODATACOW: u64 = 3;
 const SNAP_CREATE_V2: c_ulong = 0x5000_9417;
+const SUBVOL_CREATE_V2: c_ulong = 0x5000_9418;
+const FICLONE: c_ulong = 0x4004_9409;
+const RENAME_NOREPLACE: c_uint = 1;
+const RENAME_EXCHANGE: c_uint = 2;
 const GET_SUBVOL_INFO: c_ulong = 0x81f8_943c;
 const SPACE_INFO: c_ulong = 0xc010_9414;
 const FS_INFO: c_ulong = 0x8400_941f;
@@ -107,6 +111,8 @@ const _: () = assert!(size_of::<DevInfo>() == 4096);
 
 unsafe extern "C" {
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+    fn renameat2(old_dir: c_int, old_name: *const c_char, new_dir: c_int, new_name: *const c_char,
+                 flags: c_uint) -> c_int;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -144,17 +150,47 @@ pub fn subvolume(file: &File) -> io::Result<Subvolume> {
 }
 
 pub fn snapshot_read_only(source: &File, destination: &File, name: &str) -> io::Result<()> {
+    create(SNAP_CREATE_V2, i64::from(source.as_raw_fd()), destination, name, READ_ONLY)
+}
+
+pub fn create_subvolume(destination: &File, name: &str) -> io::Result<()> {
+    create(SUBVOL_CREATE_V2, 0, destination, name, 0)
+}
+
+fn create(request: c_ulong, source_fd: i64, destination: &File, name: &str, flags: u64) -> io::Result<()> {
     if name.is_empty() || name.len() > 255 || name.starts_with('.') ||
         !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid Btrfs snapshot name"));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid Btrfs subvolume name"));
     }
     let mut args = SnapshotArgs {
-        source_fd: i64::from(source.as_raw_fd()), transid: 0, flags: READ_ONLY, unused: [0; 4], name: [0; 4040],
+        source_fd, transid: 0, flags, unused: [0; 4], name: [0; 4040],
     };
     args.name[..name.len()].copy_from_slice(name.as_bytes());
     // Both descriptors and the NUL-terminated UAPI name outlive the ioctl.
-    if unsafe { ioctl(destination.as_raw_fd(), SNAP_CREATE_V2, &args as *const SnapshotArgs) } < 0 {
+    if unsafe { ioctl(destination.as_raw_fd(), request, &args as *const SnapshotArgs) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub fn reflink(source: &File, destination: &File) -> io::Result<()> {
+    // FICLONE takes the source descriptor as a scalar int, not a pointer.
+    if unsafe { ioctl(destination.as_raw_fd(), FICLONE, source.as_raw_fd()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub fn place_subvolume(old_dir: &File, old_name: &CStr, new_dir: &File, new_name: &CStr, exchange: bool) -> io::Result<()> {
+    for name in [old_name, new_name] {
+        if name.to_bytes().is_empty() || name.to_bytes().starts_with(b".") || name.to_bytes().contains(&b'/') {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected a direct subvolume name"));
+        }
+    }
+    let flags = if exchange { RENAME_EXCHANGE } else { RENAME_NOREPLACE };
+    // Both directory descriptors and both names are live for the atomic operation.
+    if unsafe { renameat2(old_dir.as_raw_fd(), old_name.as_ptr(), new_dir.as_raw_fd(), new_name.as_ptr(), flags) } < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())

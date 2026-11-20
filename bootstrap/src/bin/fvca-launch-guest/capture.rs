@@ -21,6 +21,8 @@ const O_NOFOLLOW: i32 = 0o400000;
 
 #[path = "live.rs"]
 pub(super) mod live;
+#[path = "restore.rs"]
+pub(super) mod restore;
 
 #[derive(Clone, Copy)]
 enum Consistency {
@@ -265,19 +267,23 @@ fn live_disk(path: &Path) -> io::Result<File> {
     Ok(disk)
 }
 
+fn only_data_member(root: &Path) -> io::Result<PathBuf> {
+    let mut entries = fs::read_dir(root)?;
+    if entries.next().transpose()?.is_none_or(|entry| entry.file_name() != "data.raw")
+        || entries.next().transpose()?.is_some()
+    {
+        return Err(invalid("the recovery subvolume has unexpected members"));
+    }
+    Ok(root.join("data.raw"))
+}
+
 fn snapshot(store: &Store, plan: &Plan<'_>) -> io::Result<(Subvolume, PathBuf)> {
     let path = store.path.join("snapshot");
     let info = btrfs::subvolume(&private_directory(&path)?)?;
     if !info.read_only || info.parent_uuid != plan.source || info.uuid == plan.source {
         return Err(invalid("the Btrfs snapshot does not match the sealed source"));
     }
-    let mut members = fs::read_dir(&path)?;
-    if members.next().transpose()?.as_ref().is_none_or(|entry| entry.file_name() != "data.raw")
-        || members.next().transpose()?.is_some()
-    {
-        return Err(invalid("the captured subvolume has unexpected members"));
-    }
-    let data = path.join("data.raw");
+    let data = only_data_member(&path)?;
     let disk = match store.consistency {
         Consistency::CleanStopped => raw_disk(&data)?,
         Consistency::Filesystem => live_disk(&data)?,
@@ -300,38 +306,46 @@ fn seal(store: &Store, id: &str, text: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn finalize(store: &Store, id: &str) -> io::Result<()> {
+fn disk_digest(path: &Path) -> io::Result<String> {
+    let output = Command::new("/usr/bin/sha256sum").env_clear()
+        .current_dir(path.parent().expect("capture member has a parent"))
+        .arg("data.raw").output()?;
+    if !output.status.success() {
+        return Err(invalid("could not hash the capture member"));
+    }
+    let answer = String::from_utf8(output.stdout).map_err(io::Error::other)?;
+    Ok(runtime::hash(answer.strip_suffix("  data.raw\n")
+        .ok_or_else(|| invalid("unexpected captured disk digest output"))?)?.to_owned())
+}
+
+fn complete_record(store: &Store, id: &str, allow_stopped_seal: bool) -> io::Result<(String, String, PathBuf)> {
     let dir = &store.path;
-    let _pin = lease(&dir.join("lock"))?;
     let text = read_record(&dir.join("plan"))?;
     let plan = parse_plan(&text, id, store)?;
     let (info, data) = snapshot(store, &plan)?;
     let state = snapshot_record(&info);
     let sealed = format!("CAPTURE_SEALED_PENDING_VALIDATION\n{state}{text}");
-    match store.consistency {
-        Consistency::CleanStopped => publish(dir, "sealed", &sealed)?,
-        Consistency::Filesystem => {
-            if read_record(&dir.join("live-seal-verified"))? != "1\n" || read_record(&dir.join("sealed"))? != sealed {
-                return Err(invalid("the live capture has no matching sealed record"));
-            }
-        }
+    if allow_stopped_seal && matches!(store.consistency, Consistency::CleanStopped) {
+        publish(dir, "sealed", &sealed)?;
+    } else if read_record(&dir.join("sealed"))? != sealed
+        || (matches!(store.consistency, Consistency::Filesystem) && read_record(&dir.join("live-seal-verified"))? != "1\n")
+    {
+        return Err(invalid("the capture has no matching sealed record"));
     }
     let selection = guest_boot::parse(plan.launch)?;
     verify_escrow(&store.releases.join(selection.bundle), plan.launch, &selection)?;
-    let output = Command::new("/usr/bin/sha256sum").env_clear()
-        .current_dir(data.parent().expect("captured disk is below its snapshot"))
-        .arg("data.raw").output()?;
-    if !output.status.success() {
-        return Err(invalid("could not hash the sealed raw disk"));
-    }
-    let digest = String::from_utf8(output.stdout).map_err(io::Error::other)?;
-    let digest = runtime::hash(digest.strip_suffix("  data.raw\n")
-        .ok_or_else(|| invalid("unexpected captured disk digest output"))?)?;
+    let digest = disk_digest(&data)?;
     if snapshot(store, &plan)?.0 != info {
         return Err(invalid("Btrfs snapshot identity changed during finalization"));
     }
     let manifest = format!("CAPTURE_COMPLETE\n{state}disk_sha256={digest}\n{text}");
-    publish(dir, "manifest", &manifest)?;
+    Ok((manifest, digest, data))
+}
+
+fn finalize(store: &Store, id: &str) -> io::Result<()> {
+    let _pin = lease(&store.path.join("lock"))?;
+    let (manifest, digest, _) = complete_record(store, id, true)?;
+    publish(&store.path, "manifest", &manifest)?;
     println!("FVCA_CAPTURE_COMPLETE {id} {digest}");
     Ok(())
 }
@@ -339,6 +353,7 @@ fn finalize(store: &Store, id: &str) -> io::Result<()> {
 pub(super) fn stopped(id: &str, restart: bool) -> io::Result<()> {
     let guard = lease(Path::new(CAPTURE_LOCK))?;
     live::require_idle()?;
+    restore::require_idle()?;
     let store = Store::open(id, Consistency::CleanStopped)?;
     let path = &store.path;
     if path.try_exists()? {

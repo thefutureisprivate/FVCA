@@ -40,7 +40,7 @@ pub(crate) fn record_launch(bundle: &str) -> io::Result<()> {
     publish(Path::new(RUN), "guest-live-instance", &format!("{bundle}\n{vm}"))
 }
 
-fn require_instance(bundle: &str) -> io::Result<String> {
+pub(super) fn require_instance(bundle: &str) -> io::Result<String> {
     let vm = instance()?;
     if read_record(Path::new(INSTANCE))? != format!("{bundle}\n{vm}") {
         return Err(invalid("the running VM does not match its verified launch receipt"));
@@ -105,6 +105,7 @@ fn arm(store: &Store, id: &str) -> io::Result<()> {
 pub(crate) fn capture(id: &str) -> io::Result<()> {
     uuid(id)?;
     let capture_lock = lease(Path::new(CAPTURE_LOCK))?;
+    super::restore::require_idle()?;
     let store = Store::open(id, Consistency::Filesystem)?;
     let timer = format!("fvca-live-recover@{id}.timer");
     let recovery = format!("fvca-live-recover@{id}.service");

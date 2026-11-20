@@ -6,7 +6,7 @@ Before=fvca-base-ready.service
 AssertPathExists=/run/fvca/guest-launch
 AssertSecurity=uefi-secureboot
 AssertSecurity=selinux
-OnFailure=emergency.target
+OnFailure=fvca-guest-failure.service
 
 [Service]
 Type=oneshot

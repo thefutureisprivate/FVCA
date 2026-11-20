@@ -264,7 +264,15 @@ Start `fvca-capture-live@CAPTURE_UUID.service` as a privileged Hypervisor operat
 
 The worker has a 20-second window. A separate recovery unit resumes the original VM, reactivates the disk through libvirt, thaws the filesystem, and checks the Guest agent. A systemd timer starts recovery at the deadline even if the capture service is still running. Unresolved recovery keeps the Guest operation lease visible at `/run/fvca/guest-live-active`. An operator can retry recovery with `fvca-live-recover@CAPTURE_UUID.service`. A blocked kernel or provider call can delay recovery. [libvirt manual storage snapshots](https://libvirt.org/formatsnapshot.html)
 
-The coordinator validates and hashes the read-only snapshot after recovery. Running the capture service again with the same UUID can finalize an acknowledged seal. The nested test uses `tests/nested-guest-shutdown-initrd.sh` with the `live` argument and `tests/check-storage.py --nested-guest-live-capture` with the same disposable Btrfs lab as the stopped capture test. Retention, restore, and encrypted S3 backup remain pending.
+The coordinator validates and hashes the read-only snapshot after recovery. Running the capture service again with the same UUID can finalize an acknowledged seal. The nested test uses `tests/nested-guest-shutdown-initrd.sh` with the `live` argument and `tests/check-storage.py --nested-guest-live-capture` with the same disposable Btrfs lab as the stopped capture test.
+
+### Cold-restore the registered Service Guest
+
+Stop `fvca-service-guest.service` and start `fvca-restore-guest@CAPTURE_UUID.RESTORE_UUID.service` with a finalized capture UUID and a fresh restore UUID. The restore coordinator verifies the manifest, retained release, and sealed disk digest. It stages a writable Btrfs reflink with fresh file ownership, then atomically installs it in the registered VM slot. If the slot had a previous disk, the coordinator retains that subvolume under `/run/fvca/host-data/captures/restores/RESTORE_UUID/branch`.
+
+The isolated Guest cold-boots with the currently authorized Guest bundle. The coordinator publishes a verified receipt after the ordinary Guest readiness check and confirms that the running instance owns the restored disk attachment. A rejected trial boot puts the previous volume back and leaves the Guest stopped. Reuse the same restore UUID to reconcile an interrupted transaction. The terminal receipt makes a duplicate request idempotent.
+
+The nested restore test uses the `restore` fixture and `tests/check-storage.py --nested-guest-restore` with the stopped capture lab. Retention and encrypted S3 backup remain pending.
 
 ## Off-node Stalwart workload derivation
 

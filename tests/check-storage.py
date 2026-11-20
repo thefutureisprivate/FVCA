@@ -199,7 +199,10 @@ def check_nested_guest(args):
         finished = b"FVCA_STOPPED_CAPTURE_VERIFIED"
     if args.nested_guest_live_capture:
         finished = b"FVCA_LIVE_CAPTURE_VERIFIED"
-    prompts, log = boot(args, "guest", password, *members, timeout=225 if args.nested_guest_capture else 155,
+    if args.nested_guest_restore:
+        finished = b"FVCA_COLD_RESTORE_VERIFIED"
+    timeout = 300 if args.nested_guest_restore else (225 if args.nested_guest_capture else 155)
+    prompts, log = boot(args, "guest", password, *members, timeout=timeout,
                         ready_marker=finished)
     # Kernel audit printing can interrupt a userspace line on the shared console.
     # Validate the reconstructed markers and retain the original log on disk.
@@ -209,11 +212,12 @@ def check_nested_guest(args):
         required += (b"FVCA_SERVICE_GUEST_STOPPED", finished)
     if args.nested_guest_capture:
         required += (b"FVCA_SERVICE_GUEST_STOPPED", finished)
-    if args.nested_guest_live_capture:
+    if args.nested_guest_live_capture or args.nested_guest_restore:
         required += (finished,)
     guests = re.findall(rb"launch-guest\[[0-9]+\]: FVCA_KVM_GUEST_CONFINED", log)
     probe = re.search(rb"qualify-libvirt\[[0-9]+\]: FVCA_KVM_GUEST_CONFINED", log)
-    if (prompts != 2 or len(guests) != (2 if args.nested_guest_capture else 1) or probe is None
+    expected_launches = 4 if args.nested_guest_restore else (2 if args.nested_guest_capture else 1)
+    if (prompts != 2 or len(guests) != expected_launches or probe is None
             or FAIL in log or any(marker not in log for marker in required)):
         raise ValueError("the Hypervisor did not reach readiness with its authorized nested Guest")
     print("nested-guest passed")
@@ -243,6 +247,19 @@ def check_nested_guest(args):
                 or log.count(guest_ready) != 1 or b"FVCA_SERVICE_GUEST_STOPPED" in log):
             raise ValueError("live capture ordering, finalization recovery or running-state preservation failed")
         print("nested-guest-live-capture passed")
+    if args.nested_guest_restore:
+        live = b"b43ad128-b5a0-4d85-b3f0-29fb32b08b8a.cf92ad0c-6ccd-4562-8663-c39e31ede807"
+        stopped = b"9c0db5ae-03da-4136-a93a-f981c71dedfb.a4bbcc0d-c47d-4031-ad38-ba76ef3ebe9a"
+        empty = b"9c0db5ae-03da-4136-a93a-f981c71dedfb.863333ec-9e20-4f6a-8f08-d636cd99e466"
+        verified = b"FVCA_RESTORE_VERIFIED "
+        captured = b"FVCA_CAPTURE_COMPLETE 9b5c817b-c896-4d9a-b664-b962468fd00c"
+        if (log.count(verified + live) != 2 or log.count(verified + stopped) != 1
+                or log.count(verified + empty) != 1 or log.count(captured) != 1
+                or not log.find(verified + live) < log.find(verified + stopped) < log.find(verified + empty) < log.find(captured)
+                or b"cold restore requires the Service Guest to be stopped" not in log
+                or log.count(guest_ready) != expected_launches):
+            raise ValueError("cold restore failed its identity, idempotency or running-Guest checks")
+        print("nested-guest-cold-restore passed")
 
     prompts, log = boot(args, "missing-bundle", password, *members, attach_guest=False)
     if (prompts != 2 or b"authorized Guest boot bundle partitions are missing" not in log or FAIL not in log
@@ -445,6 +462,8 @@ if __name__ == "__main__":
                                help="require a stopped capture and restart with the disposable qualification initramfs")
     qualification.add_argument("--nested-guest-live-capture", action="store_true",
                                help="require live capture and thaw with the disposable qualification initramfs")
+    qualification.add_argument("--nested-guest-restore", action="store_true",
+                               help="require cold restore from live and stopped captures")
     parser.add_argument("--wrong-runtime", type=Path, help="unselected runtime for a Guest rejection test")
     parser.add_argument("--workload", action="store_true", help="qualify workload activation with approved.raw and tampered.raw")
     parser.add_argument("--stalwart-lifecycle", action="store_true", help="check the disposable Stalwart lifecycle fixture")
@@ -481,7 +500,8 @@ if __name__ == "__main__":
         parser.error("--replacement-disk requires the Hypervisor development passphrase test")
     if args.nested_guest is not None and (args.guest or any(tpm_options) or args.replacement_disk is not None):
         parser.error("--nested-guest requires the Hypervisor development passphrase test")
-    if (args.nested_guest_shutdown or args.nested_guest_capture or args.nested_guest_live_capture) and args.nested_guest is None:
+    if (args.nested_guest_shutdown or args.nested_guest_capture or args.nested_guest_live_capture
+            or args.nested_guest_restore) and args.nested_guest is None:
         parser.error("nested Guest qualification requires --nested-guest")
     try:
         if args.tpm_state is not None:

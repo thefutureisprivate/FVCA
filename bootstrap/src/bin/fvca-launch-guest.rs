@@ -178,6 +178,7 @@ fn wait_for_boot(domain: &Domain<'_>, runtime: &str, events: &EventLoop) -> io::
 fn launch() -> io::Result<()> {
     let payload = fs::read_to_string(guest_boot::SELECTION)?;
     let selection = guest_boot::parse(&payload)?;
+    capture::restore::authorize_launch(selection.bundle)?;
     let xml = verified_definition(&selection)?;
     let events = EventLoop::register()?;
     let connection = Connection::connect()?;
@@ -269,6 +270,7 @@ fn activate() -> io::Result<()> {
         [option, id] if option == "--capture-live" => capture::live::capture(id),
         [option, id] if option == "--live-window" => capture::live::capture_window(id),
         [option, id] if option == "--recover-live" => capture::live::recover(id),
+        [option, request] if option == "--restore" => capture::restore::cold_restore(request),
         _ => Err(invalid("unsupported Service Guest operation")),
     }
 }
