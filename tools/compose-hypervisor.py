@@ -20,7 +20,8 @@ import hypervisor_gpt
 from runtime_boot import (
     DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_CHANGE_SUPPORT,
     GUEST_CONFIG_KEY, GUEST_CONFIG_KEY_ARGUMENT, GUEST_LAUNCH_FILES, GUEST_VM_SETTINGS,
-    GUEST_VM_SUPPORT, MANAGEMENT_ARGUMENT, MANAGEMENT_POLICY, MANAGEMENT_SUPPORT, WORKLOAD_TRUST_FILES,
+    GUEST_VM_SUPPORT, MANAGEMENT_ADDRESS_ARGUMENT, MANAGEMENT_ARGUMENT, MANAGEMENT_POLICY,
+    MANAGEMENT_POLICY_SUPPORT, MANAGEMENT_SUPPORT, WORKLOAD_TRUST_FILES,
     composition_archive, prepare_core, run, verify_initrd, write_disk,
 )
 from runtime_image import verify as verify_runtime
@@ -329,7 +330,7 @@ def management_selection(args, authorities):
                 f"[{ip}]:{int(port)}" if ip.version == 6 else f"{ip}:{int(port)}")
             or "%" in address):
         raise ValueError("management requires an explicit private IP and unprivileged port")
-    if any(type(policy[field]) is not int or not 1 <= policy[field] < 2**32 - 1
+    if any(type(policy[field]) is not int or policy[field] != 62000
            for field in ("gateway_uid", "gateway_gid")):
         raise ValueError("invalid management gateway account")
     writers = ("apply_operator_public_key",) if "apply_operator_public_key" in policy else ()
@@ -350,11 +351,15 @@ def management_selection(args, authorities):
         if key in used or bytes.fromhex("302a300506032b6570032100") + key in certificate_keys:
             raise ValueError("management requests require distinct Ed25519 operator keys")
         used.add(key)
-    return ((MANAGEMENT_POLICY, raw),), (f"{MANAGEMENT_ARGUMENT}={hashlib.sha256(raw).hexdigest()}",), operators
+    binding = (f"{MANAGEMENT_ARGUMENT}={hashlib.sha256(raw).hexdigest()}",
+               f"{MANAGEMENT_ADDRESS_ARGUMENT}={address}")
+    return ((MANAGEMENT_POLICY, raw),), binding, operators
 
 
 def assemble(args, work):
     storage = host_storage.selection(args.storage) if args.storage is not None else None
+    if args.management_enrollment is not None and (storage is None or storage.protection != host_storage.AUTHENTICATED):
+        raise ValueError("management enrollment requires authenticated Hypervisor storage")
     resources, resource_arguments = guest_vm_settings(args.guest_vm_settings)
     if args.guest_trial_public_key is not None and (storage is None or storage.protection != host_storage.AUTHENTICATED):
         raise ValueError("Guest trial enrollment requires authenticated Host storage")
@@ -414,10 +419,10 @@ def assemble(args, work):
         if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
             raise ValueError("the signed VM runtime lacks Guest configuration change support")
     if args.management_enrollment is not None:
-        required += (str(MANAGEMENT_SUPPORT), "usr/bin/sha256sum")
+        required += (str(MANAGEMENT_POLICY_SUPPORT), "usr/bin/sha256sum", "usr/bin/chcon")
         marker = runtime_work / "tree" / MANAGEMENT_SUPPORT
         if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
-            raise ValueError("the signed VM runtime lacks management API support")
+            raise ValueError("the signed VM runtime lacks confined management services")
     if storage is not None:
         required += ("usr/lib/fvca/host-storage-support-v4", "usr/bin/dmsetup",
                      "usr/lib/udev/rules.d/12-fvca-host-storage.rules")
@@ -518,9 +523,10 @@ def assemble(args, work):
                *authorities, *update_selection(args, (*authorities, *operators))),
     )
     if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT, TRIAL_WATCHDOG_ARGUMENT,
-                                    GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_KEY_ARGUMENT, MANAGEMENT_ARGUMENT)
+                                    GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_KEY_ARGUMENT, MANAGEMENT_ARGUMENT,
+                                    MANAGEMENT_ADDRESS_ARGUMENT)
            for arg in cmdline.split()):
-        raise ValueError("shared core already configures a Hypervisor epoch, trial or Guest configuration")
+        raise ValueError("shared core already configures a Hypervisor epoch, trial, Guest configuration or management")
     cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments,
                         *trial_key_arguments, *watchdog_arguments, *resource_arguments, *configuration_key_arguments,
                         *management_arguments))

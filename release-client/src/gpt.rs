@@ -9,6 +9,7 @@ pub use floor::verify_floor;
 use std::collections::HashSet;
 use std::fs::{self, File, Permissions};
 use std::io::{self, Write};
+use std::net::SocketAddr;
 use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -160,7 +161,7 @@ struct ReleaseEpoch<'a> {
 struct VerifiedLoader {
     sha256: [u8; 32],
     guest_configuration: GuestPolicy,
-    management_enrollment: Option<String>,
+    management_enrollment: Option<ManagementBinding>,
 }
 
 impl VerifiedLoader {
@@ -207,7 +208,10 @@ impl VerifiedLoader {
             }
             let args = state::read(Path::new("/proc/cmdline"), 32 * 1024)?;
             if fvca_trial_authorization::management_binding(std::str::from_utf8(&args)?)?
-                != self.management_enrollment.as_deref()
+                != self
+                    .management_enrollment
+                    .as_ref()
+                    .map(|(digest, address)| (digest.as_str(), *address))
             {
                 return Err(invalid(
                     "the installed stable UKI differs from the running management enrollment",
@@ -299,7 +303,12 @@ fn tool(program: &str, args: &[&Path]) -> Result<()> {
     Ok(())
 }
 
-fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<(GuestPolicy, Option<String>)> {
+type ManagementBinding = (String, SocketAddr);
+
+fn verify_epoch(
+    efi: &File,
+    expected: &ReleaseEpoch<'_>,
+) -> Result<(GuestPolicy, Option<ManagementBinding>)> {
     let uki::Policy { cmdline, pcrsig } = uki::read(efi)?;
     let mut epochs = cmdline
         .split_ascii_whitespace()
@@ -374,7 +383,8 @@ fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<(GuestPolicy,
     }
     Ok((
         GuestPolicy::parse(&cmdline)?,
-        fvca_trial_authorization::management_binding(&cmdline)?.map(str::to_owned),
+        fvca_trial_authorization::management_binding(&cmdline)?
+            .map(|(digest, address)| (digest.to_owned(), address)),
     ))
 }
 
@@ -1018,7 +1028,8 @@ mod tests {
         let unchanged = candidate(Some(binding(9, "a")), enrolled);
         stable.require_host_configuration(&unchanged, false, None)?;
         let mut changed_enrollment = candidate(Some(binding(9, "a")), enrolled);
-        changed_enrollment.management_enrollment = Some("e".repeat(64));
+        changed_enrollment.management_enrollment =
+            Some(("e".repeat(64), "127.0.0.1:9443".parse().unwrap()));
         assert!(
             stable
                 .require_host_configuration(&changed_enrollment, false, None)

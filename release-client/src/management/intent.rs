@@ -5,6 +5,7 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use fvca_trial_authorization::{
+    MANAGEMENT_INTENTS,
     guest::SERVICE_GUEST_UUID,
     guest_config::{Binding, Change, Configuration, Resources, host_memory_kib},
 };
@@ -16,7 +17,6 @@ use crate::{Result, channel, guest_configuration, handoff, invalid, state, valid
 
 use super::protocol::{self, Enrollment, Operation, Plan, Refusal, Settings};
 
-const DIRECTORY: &str = "/run/fvca/host-data/os-update";
 const RECORD: &str = "guest-configuration-intent";
 const RECORD_SCHEMA: &[u8] = b"FVCA-GUEST-CONFIGURATION-QUEUE-1\n";
 const LIMIT: usize = RECORD_SCHEMA.len() + 8 + protocol::REQUEST_BYTES;
@@ -153,7 +153,7 @@ pub(super) fn status(enrollment: &Enrollment, id: &str) -> std::result::Result<R
     if !valid_digest(id) {
         return Err(Refusal::UnknownConfigurationOperation);
     }
-    let directory = handoff::require_pool_directory(Path::new(DIRECTORY))
+    let directory = handoff::require_pool_directory(Path::new(MANAGEMENT_INTENTS))
         .map_err(|_| Refusal::HostStateUnavailable)?;
     let selected = read(&directory, enrollment)
         .map_err(|_| Refusal::HostStateUnavailable)?
@@ -183,7 +183,7 @@ pub(super) fn submit(
             Refusal::HostStateUnavailable
         }
     })?;
-    let directory = handoff::require_pool_directory(Path::new(DIRECTORY))
+    let directory = handoff::require_pool_directory(Path::new(MANAGEMENT_INTENTS))
         .map_err(|_| Refusal::HostStateUnavailable)?;
     let (running, current) =
         guest_configuration::running().map_err(|_| Refusal::HostStateUnavailable)?;
@@ -254,7 +254,7 @@ pub(super) fn submit(
 }
 
 pub(super) fn require_release_intent(enrollment: &Enrollment, change: &Change) -> Result<()> {
-    let directory = handoff::require_pool_directory(Path::new(DIRECTORY))?;
+    let directory = handoff::require_pool_directory(Path::new(MANAGEMENT_INTENTS))?;
     if !read(&directory, enrollment)?.is_some_and(|intent| intent.matches_release(change)) {
         return Err(invalid(
             "qualified release differs from the broker-admitted Guest configuration intent",

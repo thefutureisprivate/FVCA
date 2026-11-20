@@ -1,0 +1,37 @@
+[Unit]
+Description=FVCA authenticated management gateway
+Requires=fvca-management-broker.socket
+After=fvca-base-ready.service fvca-management-broker.socket
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+
+[Service]
+Type=exec
+User=fvca-management
+Group=fvca-management
+SELinuxContext=system_u:system_r:fvca_management_gateway_t:s0
+ExecStart=/usr/libexec/fvca/release-client --serve-management
+LoadCredential=tls.crt:/run/fvca/host-data/management/tls.crt
+LoadCredential=tls.key:/run/fvca/host-data/management/tls.key
+CapabilityBoundingSet=
+InaccessiblePaths=/run/fvca/host-data -/run/dbus -/run/systemd/private -/run/libvirt
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=disconnected
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+NoExecPaths=/run /tmp /var
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+TasksMax=16
+UMask=0077

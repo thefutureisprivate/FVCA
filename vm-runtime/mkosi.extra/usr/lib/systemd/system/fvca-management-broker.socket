@@ -1,0 +1,19 @@
+[Unit]
+Description=Private FVCA configuration broker socket
+DefaultDependencies=no
+After=fvca-base-ready.service
+Before=shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/run/fvca/management.json
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+AssertPathIsMountPoint=/run/fvca/host-data
+
+[Socket]
+ListenStream=/run/fvca-management-broker/broker.sock
+ExecStartPost=/usr/bin/chcon --no-dereference system_u:object_r:fvca_management_socket_t:s0 /run/fvca-management-broker/broker.sock
+FileDescriptorName=management-broker
+SocketGroup=fvca-management
+DirectoryMode=0755
+SocketMode=0660
+Backlog=16

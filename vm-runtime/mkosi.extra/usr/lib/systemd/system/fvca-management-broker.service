@@ -1,0 +1,36 @@
+[Unit]
+Description=FVCA Guest configuration policy broker
+After=fvca-base-ready.service
+AssertPathIsMountPoint=/run/fvca/host-data
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+
+[Service]
+Type=exec
+SELinuxContext=system_u:system_r:fvca_management_broker_t:s0
+ExecStart=/usr/libexec/fvca/release-client --serve-management-broker
+CapabilityBoundingSet=
+InaccessiblePaths=-/run/credentials -/run/dbus -/run/systemd/private -/run/libvirt -/run/fvca/host-data/management
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=disconnected
+ProtectSystem=strict
+ReadOnlyPaths=/run/fvca
+# Keep the Host pool and intent directory on the same mount for identity checks.
+ReadWritePaths=/run/fvca/host-data
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+NoExecPaths=/run /tmp /var
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+TasksMax=16
+UMask=0077

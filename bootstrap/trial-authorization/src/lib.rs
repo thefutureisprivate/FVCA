@@ -4,6 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 
 pub mod efi;
 pub mod firmware;
@@ -25,20 +26,54 @@ pub const STANDING_TRIAL: &str = "FVCA-HYPERVISOR-STANDING-TRIAL-2";
 pub const STANDING_PROMOTION: &str = "FVCA-HYPERVISOR-STANDING-PROMOTION-2";
 pub const WATCHDOG_ARGUMENT: &str = "fvca.trial_watchdog_seconds";
 pub const MANAGEMENT_ARGUMENT: &str = "fvca.management";
+pub const MANAGEMENT_ADDRESS_ARGUMENT: &str = "fvca.management_address";
 pub const MANAGEMENT_POLICY: &str = "/run/fvca/management.json";
+pub const MANAGEMENT_INTENTS: &str = "/run/fvca/host-data/os-update/management-intents";
 pub const MANAGEMENT_POLICY_BYTES: usize = 4096;
+pub const MANAGEMENT_UID: u32 = 62000;
 
-pub fn management_binding(cmdline: &str) -> io::Result<Option<&str>> {
+fn management_argument<'a>(cmdline: &'a str, argument: &str) -> io::Result<Option<&'a str>> {
     let mut markers = cmdline
         .split_ascii_whitespace()
-        .filter(|arg| arg.split('=').next() == Some(MANAGEMENT_ARGUMENT));
+        .filter(|arg| arg.split('=').next() == Some(argument));
     let Some(marker) = markers.next() else {
         return Ok(None);
     };
     if markers.next().is_some() {
         return Err(invalid("duplicate management enrollment binding"));
     }
-    Ok(Some(digest(marker, "fvca.management=")?))
+    marker
+        .split_once('=')
+        .map(|(_, value)| Some(value))
+        .ok_or_else(|| invalid("invalid management enrollment binding"))
+}
+
+pub fn private_management_address(address: SocketAddr) -> bool {
+    let private = match address.ip() {
+        IpAddr::V4(ip) => ip.is_private() || ip.is_loopback(),
+        IpAddr::V6(ip) => ip.is_unique_local() || ip.is_loopback(),
+    };
+    private
+        && address.port() >= 1024
+        && !matches!(address, SocketAddr::V6(value) if value.scope_id() != 0 || value.flowinfo() != 0)
+}
+
+pub fn management_binding(cmdline: &str) -> io::Result<Option<(&str, SocketAddr)>> {
+    let digest_value = management_argument(cmdline, MANAGEMENT_ARGUMENT)?;
+    let address = management_argument(cmdline, MANAGEMENT_ADDRESS_ARGUMENT)?;
+    match (digest_value, address) {
+        (None, None) => Ok(None),
+        (Some(value), Some(address)) => {
+            let address = address.parse().map_err(io::Error::other)?;
+            if !private_management_address(address) {
+                return Err(invalid("management requires an enrolled private listener"));
+            }
+            Ok(Some((digest(value, "")?, address)))
+        }
+        _ => Err(invalid(
+            "management requires both enrollment digest and private address",
+        )),
+    }
 }
 
 pub struct Promotion<'a> {
@@ -411,6 +446,42 @@ impl Standing<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn management_listener_requires_a_unique_private_binding() -> io::Result<()> {
+        let digest = "a".repeat(64);
+        let binding = format!("{MANAGEMENT_ARGUMENT}={digest}");
+        assert_eq!(management_binding("quiet")?, None);
+        for listener in ["192.168.1.12:9443", "[fd12::1]:9443", "[::1]:9443"] {
+            let cmdline = format!("quiet {binding} {MANAGEMENT_ADDRESS_ARGUMENT}={listener}");
+            assert_eq!(
+                management_binding(&cmdline)?,
+                Some((digest.as_str(), listener.parse().unwrap()))
+            );
+            assert!(management_binding(&format!("{cmdline} {binding}")).is_err());
+            assert!(
+                management_binding(&format!(
+                    "{cmdline} {MANAGEMENT_ADDRESS_ARGUMENT}={listener}"
+                ))
+                .is_err()
+            );
+        }
+        assert!(management_binding(&binding).is_err());
+        for listener in [
+            "0.0.0.0:9443",
+            "192.168.1.12:443",
+            "8.8.8.8:9443",
+            "[fe80::1%3]:9443",
+        ] {
+            assert!(
+                management_binding(&format!(
+                    "{binding} {MANAGEMENT_ADDRESS_ARGUMENT}={listener}"
+                ))
+                .is_err()
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn standing_promotion_binds_exact_trial_and_advances_sequence() -> io::Result<()> {

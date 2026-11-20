@@ -9,8 +9,9 @@ use std::path::Path;
 use std::process::Command;
 
 use fvca_trial_authorization::{
-    GUEST_CAPTURE_LOCK, GUEST_OPERATION_LOCK, MANAGEMENT_POLICY, MANAGEMENT_POLICY_BYTES,
-    PEER_ENROLLMENT, PROMOTION_ENROLLMENT, management_binding, peer_partitions,
+    GUEST_CAPTURE_LOCK, GUEST_OPERATION_LOCK, MANAGEMENT_INTENTS, MANAGEMENT_POLICY,
+    MANAGEMENT_POLICY_BYTES, PEER_ENROLLMENT, PROMOTION_ENROLLMENT, management_binding,
+    peer_partitions,
 };
 
 use crate::{invalid, run};
@@ -28,20 +29,33 @@ pub fn publish_management_enrollment(cmdline: &str) -> io::Result<()> {
     let path = Path::new(SIGNED).join("management.json");
     let mut file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound && selected.is_none() => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && selected.is_none() => {
+            return Ok(());
+        }
         Err(error) => return Err(error),
     };
     let meta = file.metadata()?;
     if !meta.is_file() || !(1..=MANAGEMENT_POLICY_BYTES as u64).contains(&meta.len()) {
         return Err(invalid("invalid signed Hypervisor management enrollment"));
     }
+    let (expected, address) =
+        selected.ok_or_else(|| invalid("missing signed management arguments"))?;
     let actual = crate::recovery::sha256(file.try_clone()?)?;
-    if selected != Some(&actual) {
-        return Err(invalid("Hypervisor management enrollment differs from its signed UKI"));
+    if expected != actual {
+        return Err(invalid(
+            "Hypervisor management enrollment differs from its signed UKI",
+        ));
     }
-    let support = fs::symlink_metadata("/sysroot/usr/lib/fvca/management-api-v1")?;
-    if !support.is_file() || support.len() != 0 {
-        return Err(invalid("the verified Hypervisor runtime lacks management API support"));
+    for marker in [
+        "/usr/lib/fvca/management-policy-v1",
+        "/sysroot/usr/lib/fvca/management-services-v1",
+    ] {
+        let support = fs::symlink_metadata(marker)?;
+        if !support.is_file() || support.len() != 0 {
+            return Err(invalid(
+                "the verified Hypervisor lacks confined management services",
+            ));
+        }
     }
     file.rewind()?;
     let mut enrollment = OpenOptions::new()
@@ -50,7 +64,86 @@ pub fn publish_management_enrollment(cmdline: &str) -> io::Result<()> {
         .mode(0o644)
         .open(MANAGEMENT_POLICY)?;
     io::copy(&mut file, &mut enrollment)?;
-    enrollment.flush()
+    enrollment.flush()?;
+    run(Command::new("/usr/bin/chcon").args([
+        "--no-dereference",
+        "system_u:object_r:fvca_management_enrollment_t:s0",
+        MANAGEMENT_POLICY,
+    ]))?;
+    let state = Path::new(HOST_DATA).join(HOST_STATE);
+    if owner_for(HOST_STATE)?.is_some() && state.try_exists()? {
+        prepare_lock(Path::new(GUEST_CAPTURE_LOCK))?;
+        let device = fs::metadata(HOST_DATA)?.dev();
+        if !private_directory(&state.symlink_metadata()?, device) {
+            return Err(invalid(
+                "management intent state requires the authenticated Host pool",
+            ));
+        }
+        let directory = Path::new(MANAGEMENT_INTENTS);
+        match fs::DirBuilder::new().mode(0o700).create(directory) {
+            Ok(()) => File::open(state)?.sync_all()?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error),
+        }
+        if !private_directory(&directory.symlink_metadata()?, device) {
+            return Err(invalid("invalid private management intent directory"));
+        }
+        run(Command::new("/usr/bin/chcon").args([
+            "--no-dereference",
+            "system_u:object_r:fvca_management_intents_t:s0",
+            MANAGEMENT_INTENTS,
+        ]))?;
+    }
+    if let Err(error) = management_credentials() {
+        eprintln!("FVCA_MANAGEMENT_CREDENTIALS_UNAVAILABLE {error}");
+        return Ok(());
+    }
+    let dropin = Path::new(UNITS).join("fvca-management.socket.d");
+    fs::create_dir_all(&dropin)?;
+    fs::write(
+        dropin.join("20-listener.conf"),
+        format!("[Socket]\nListenStream={address}\n"),
+    )?;
+    let wants = Path::new(UNITS).join("fvca-base.target.wants");
+    fs::create_dir_all(&wants)?;
+    symlink(
+        "/usr/lib/systemd/system/fvca-management.socket",
+        wants.join("fvca-management.socket"),
+    )?;
+    println!("FVCA_MANAGEMENT_SOCKET_ENROLLED {address}");
+    Ok(())
+}
+
+fn private_management_file(meta: &fs::Metadata, device: u64) -> bool {
+    meta.is_file()
+        && meta.uid() == 0
+        && meta.gid() == 0
+        && meta.nlink() == 1
+        && meta.dev() == device
+        && meta.mode() & 0o7777 == 0o600
+}
+
+fn management_credentials() -> io::Result<()> {
+    let data = Path::new(HOST_DATA);
+    let device = data.metadata()?.dev();
+    let credentials = data.join("management");
+    if !private_directory(&credentials.symlink_metadata()?, device) {
+        return Err(invalid(
+            "management credentials require a private Host pool directory",
+        ));
+    }
+    for name in ["tls.crt", "tls.key"] {
+        let meta = credentials.join(name).symlink_metadata()?;
+        if !private_management_file(&meta, device) || !(1..=16 * 1024).contains(&meta.len()) {
+            return Err(invalid("invalid private management credential file"));
+        }
+    }
+    run(Command::new("/usr/bin/chcon")
+        .args([
+            "--no-dereference",
+            "system_u:object_r:fvca_management_credentials_t:s0",
+        ])
+        .arg(credentials))
 }
 
 fn private_directory(meta: &fs::Metadata, device: u64) -> bool {

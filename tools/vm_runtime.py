@@ -37,6 +37,14 @@ GUEST_TRIAL_FILES = (
 GUEST_UPDATE_UNITS = tuple(
     Path(f"usr/lib/systemd/system/fvca-guest-os-update.{kind}") for kind in ("service", "timer")
 )
+MANAGEMENT_UNITS = {
+    Path(f"usr/lib/systemd/system/fvca-{daemon}.{kind}")
+    for daemon in ("management", "management-broker")
+    for kind in ("service", "socket")
+}
+MANAGEMENT_USERDB = Path("usr/lib/userdb")
+MANAGEMENT_RECORDS = tuple(f"fvca-management.{kind}" for kind in ("user", "group"))
+MANAGEMENT_IDS = tuple(f"62000.{kind}" for kind in ("user", "group"))
 FIRMWARE_UPDATE_UNITS = tuple(
     Path(f"usr/lib/systemd/system/{unit}") for unit in (
         "fvca-firmware-update.service", "fvca-firmware-update.timer", "fvca-firmware-recovery.service",
@@ -49,6 +57,8 @@ EXTENSION_RELEASE = Path("usr/lib/extension-release.d/extension-release.vm-runti
 REQUIRED_FILES = {
     *(Path("usr/bin") / name for name in EXECUTABLES),
     *LIBVIRT_UNITS,
+    *MANAGEMENT_UNITS,
+    *(MANAGEMENT_USERDB / record for record in MANAGEMENT_RECORDS),
     *DOMAIN_SCHEMAS,
     Path("usr/lib/tmpfiles.d/fvca-libvirt.conf"),
     Path("usr/libexec/fvca/qualify-libvirt"),
@@ -105,6 +115,7 @@ FIRMWARE_DATA = {
 def allowed(path):
     return (
         path in REQUIRED_FILES
+        or (path.parent == MANAGEMENT_USERDB and path.name in MANAGEMENT_IDS)
         or path == MCOPY
         or path in (TRIAL_HEALTH, TRIAL_HEALTH_WATCHDOG)
         or path in GUEST_TRIAL_FILES
@@ -125,5 +136,9 @@ def inspect_tree(root, base, *, prune):
     if os.path.lexists(base / "usr/lib/fvca/role"):
         raise ValueError("VM runtime requires the common core")
     runtime_tree.inspect_tree(root, base, allowed=allowed, required=REQUIRED_FILES, prune=prune)
+    for numeric, record in zip(MANAGEMENT_IDS, MANAGEMENT_RECORDS, strict=True):
+        alias = root / MANAGEMENT_USERDB / numeric
+        if not alias.is_symlink() or os.readlink(alias) != record:
+            raise ValueError("invalid management service account lookup link")
     if not (root / MCOPY).is_symlink() or os.readlink(root / MCOPY) != "mtools":
         raise ValueError("the EFI reader must be the signed relative mtools link")

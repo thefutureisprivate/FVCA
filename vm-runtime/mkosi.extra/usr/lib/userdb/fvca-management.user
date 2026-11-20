@@ -1,0 +1,9 @@
+{
+  "userName": "fvca-management",
+  "uid": 62000,
+  "gid": 62000,
+  "disposition": "system",
+  "homeDirectory": "/nonexistent",
+  "shell": "/usr/sbin/nologin",
+  "locked": true
+}

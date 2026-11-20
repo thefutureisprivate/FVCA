@@ -1,9 +1,10 @@
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fvca_trial_authorization::guest::SERVICE_GUEST_UUID;
 use fvca_trial_authorization::guest_config::{Binding, Configuration, Resources};
+use fvca_trial_authorization::{MANAGEMENT_UID, private_management_address};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -29,17 +30,12 @@ pub(super) struct Enrollment {
 
 impl Enrollment {
     pub fn validate(&self) -> Result<()> {
-        let private = match self.address.ip() {
-            IpAddr::V4(ip) => ip.is_private() || ip.is_loopback(),
-            IpAddr::V6(ip) => ip.is_unique_local() || ip.is_loopback(),
-        };
         if self.schema != "fvca-hypervisor-management-v1"
             || !uuid(&self.host)
             || self.host.as_bytes() == SERVICE_GUEST_UUID.to_bytes()
-            || !private
-            || self.address.port() < 1024
-            || !(1..u32::MAX).contains(&self.gateway_uid)
-            || !(1..u32::MAX).contains(&self.gateway_gid)
+            || !private_management_address(self.address)
+            || self.gateway_uid != MANAGEMENT_UID
+            || self.gateway_gid != MANAGEMENT_UID
             || !valid_digest(&self.tls_certificate_sha256)
             || !valid_digest(&self.operator_public_key)
             || self.operator_public_key.bytes().all(|byte| byte == b'0')

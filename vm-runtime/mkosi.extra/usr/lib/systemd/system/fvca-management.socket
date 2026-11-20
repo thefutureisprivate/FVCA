@@ -1,0 +1,20 @@
+[Unit]
+Description=Signed FVCA management listener
+DefaultDependencies=no
+Requires=fvca-management-broker.socket
+After=fvca-base-ready.service fvca-management-broker.socket
+Before=shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/run/fvca/management.json
+ConditionPathExists=/run/fvca/host-data/management/tls.crt
+ConditionPathExists=/run/fvca/host-data/management/tls.key
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+AssertPathIsMountPoint=/run/fvca/host-data
+
+[Socket]
+# ListenStream is supplied by initramfs after checking the signed enrollment.
+FileDescriptorName=management-tls
+Service=fvca-management.service
+FreeBind=yes
+Backlog=16

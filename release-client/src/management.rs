@@ -1,9 +1,9 @@
 //! Authenticate requests on the network and authorize them again at the Host broker.
 
 mod intent;
+mod listener;
 mod protocol;
 
-use std::fs;
 use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use fvca_trial_authorization::{
     MANAGEMENT_POLICY, MANAGEMENT_POLICY_BYTES, guest::SERVICE_GUEST_UUID, guest_config::Change,
     guest_config::Resources, management_binding,
 };
-use rustix::process::{Gid, getegid, geteuid};
+use rustix::process::{getegid, geteuid};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use rustls::{ServerConfig, version::TLS13};
 use serde::Serialize;
@@ -35,7 +35,7 @@ const DEADLINE: Duration = Duration::from_secs(3);
 fn enrollment() -> Result<Option<Enrollment>> {
     let cmdline = state::read(Path::new("/proc/cmdline"), 32 * 1024)?;
     let selected = management_binding(std::str::from_utf8(&cmdline)?)?;
-    let Some(expected) = selected else {
+    let Some((expected, address)) = selected else {
         return Ok(None);
     };
     let file = state::open_regular(Path::new(MANAGEMENT_POLICY))?;
@@ -56,6 +56,9 @@ fn enrollment() -> Result<Option<Enrollment>> {
     }
     let value: Enrollment = serde_json::from_slice(&data)?;
     value.validate()?;
+    if value.address != address {
+        return Err(invalid("management address differs from its signed UKI").into());
+    }
     Ok(Some(value))
 }
 
@@ -119,7 +122,9 @@ async fn forward(stream: TcpStream, enrollment: &Enrollment, acceptor: TlsAccept
     }
     let data = protocol::read_frame(&mut tls, protocol::REQUEST_BYTES).await?;
     protocol::authorize(enrollment, &data, protocol::current_time()?)?;
-    let mut broker = UnixStream::connect(SOCKET).await?;
+    let mut broker = UnixStream::connect(SOCKET).await.inspect_err(|error| {
+        eprintln!("FVCA_MANAGEMENT_BROKER_UNAVAILABLE {error}");
+    })?;
     if broker.peer_cred()?.uid() != 0 {
         return Err(invalid("invalid management broker peer identity").into());
     }
@@ -138,8 +143,17 @@ pub(super) async fn gateway() -> Result<()> {
             invalid("the management gateway requires its enrolled unprivileged account").into(),
         );
     }
+    listener::require_context("fvca_management_gateway_t")?;
+    let activated = std::net::TcpListener::from(listener::take("management-tls")?);
+    if activated.local_addr()? != enrollment.address {
+        return Err(
+            invalid("management activation socket differs from the enrolled address").into(),
+        );
+    }
+    activated.set_nonblocking(true)?;
+    let listener = TcpListener::from_std(activated)?;
     let tls = tls(&enrollment)?;
-    let listener = TcpListener::bind(enrollment.address).await?;
+    println!("FVCA_MANAGEMENT_GATEWAY_READY");
     let available = Arc::new(Semaphore::new(CONNECTIONS));
     loop {
         let (stream, _) = listener.accept().await?;
@@ -290,10 +304,14 @@ pub(super) async fn broker() -> Result<()> {
         .into());
     }
     let enrollment = load_enrollment()?;
-    let path = Path::new(SOCKET);
-    let listener = UnixListener::bind(path)?;
-    rustix::fs::chown(path, None, Some(Gid::from_raw(enrollment.gateway_gid)))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o660))?;
+    listener::require_context("fvca_management_broker_t")?;
+    let activated = std::os::unix::net::UnixListener::from(listener::take("management-broker")?);
+    if activated.local_addr()?.as_pathname() != Some(Path::new(SOCKET)) {
+        return Err(invalid("management broker received an unexpected socket").into());
+    }
+    activated.set_nonblocking(true)?;
+    let listener = UnixListener::from_std(activated)?;
+    println!("FVCA_MANAGEMENT_BROKER_READY");
     let available = Arc::new(Semaphore::new(CONNECTIONS));
     loop {
         let (stream, _) = listener.accept().await?;
