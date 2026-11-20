@@ -4,9 +4,10 @@ use std::alloc::System;
 use std::fs;
 use std::io;
 use std::os::unix::fs::FileTypeExt;
-use std::process::ExitCode;
+use std::path::Path;
+use std::process::{Command, ExitCode};
 
-use fvca_initrd_bootstrap::{backup_job, backup_policy, guest_boot, hypervisor_slot::Slot, hypervisor_trial, invalid, recovery, retention_policy};
+use fvca_initrd_bootstrap::{backup_job, backup_policy, guest_boot, hypervisor_slot::Slot, hypervisor_trial, invalid, recovery, retention_policy, run};
 use fvca_initrd_bootstrap::runtime::{self, Runtime, hash};
 
 #[path = "fvca-activate-runtime/storage.rs"]
@@ -25,9 +26,16 @@ fn activate() -> io::Result<()> {
         return Err(invalid("Intel KVM must be available with nested virtualization disabled"));
     }
     let slot = Slot::load()?;
+    let protected_epoch = Path::new("/usr/lib/fvca/hypervisor-epoch").try_exists()?;
+    if protected_epoch {
+        if slot.is_none() {
+            return Err(invalid("a protected Hypervisor epoch requires a verified GPT slot"));
+        }
+        run(&mut Command::new("/usr/lib/fvca/check-hypervisor-epoch"))?;
+    }
     let verified_runtime = runtime::activate(Runtime::Vm, slot.as_ref().map(|slot| &slot.runtime))?;
     runtime::install_development_probe("fvca-vm-runtime-probe.service", PROBE)?;
-    storage::activate_if_selected()?;
+    storage::activate_if_selected(protected_epoch)?;
     backup_policy::activate_if_selected()?;
     retention_policy::activate_if_selected()?;
     let recovering = recovery::activate_if_selected()?;

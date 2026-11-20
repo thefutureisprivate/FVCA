@@ -164,6 +164,7 @@ def retention_selection(path, backup):
 TRIAL_FILE = "hypervisor-trial"
 TRIAL_CANDIDATE_FILE = "hypervisor-trial-candidate"
 TRIAL_SUPPORT = "hypervisor-trial-support-v2"
+EPOCH_FILE = "hypervisor-epoch"
 PROMOTION_KEY = "hypervisor-promotion-key"
 PROMOTION_SUPPORT = "hypervisor-promotion-support-v1"
 
@@ -211,6 +212,19 @@ def trial_selection(path, ids, guest, *, candidate):
     return ((TRIAL_FILE, policy),)
 
 
+def epoch_selection(path, storage, tpm):
+    if path is None:
+        return ()
+    if storage is None or storage.protection != host_storage.AUTHENTICATED or not tpm:
+        raise ValueError("a protected Hypervisor epoch requires authenticated TPM-bound Host storage")
+    with path.open("rb") as source:
+        policy = source.read(257)
+    match = re.fullmatch(rb"FVCA-HYPERVISOR-EPOCH-1\nepoch=([1-9][0-9]{0,19})\npolicy_sha256=([0-9a-f]{64})\n", policy)
+    if match is None or int(match[1]) >= 2**64 or int(match[2], 16) == 0:
+        raise ValueError("invalid signed Hypervisor epoch policy")
+    return ((EPOCH_FILE, policy),)
+
+
 def assemble(args, work):
     storage = host_storage.selection(args.storage) if args.storage is not None else None
     digests = [member.token_digest for member in storage.members] if storage is not None else (None, None)
@@ -218,6 +232,7 @@ def assemble(args, work):
     token_paths = (args.tpm_token_a, args.tpm_token_b)
     if tpm != (args.pcr_key is not None) or any(tpm != (path is not None) for path in token_paths):
         raise ValueError("TPM storage requires a separate PCR signing key and both exported LUKS2 tokens")
+    epoch = epoch_selection(args.epoch_policy, storage, tpm)
     pcr_options = []
     if tpm:
         boot_public = run("openssl", "pkey", "-in", args.boot_key, "-pubout", "-outform", "DER",
@@ -245,7 +260,7 @@ def assemble(args, work):
         "hypervisor.composition", "vm-runtime.p7s", "host-storage",
         *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, *BACKUP_FILES, BACKUP_JOB_FILE,
         RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE, TRIAL_FILE,
-        TRIAL_CANDIDATE_FILE, PROMOTION_KEY,
+        TRIAL_CANDIDATE_FILE, PROMOTION_KEY, EPOCH_FILE,
     ))
     required = ACTIVATION_FILES
     if storage is not None:
@@ -253,6 +268,8 @@ def assemble(args, work):
                      "usr/lib/udev/rules.d/12-fvca-host-storage.rules")
     if args.gpt_slot:
         required += (f"usr/lib/fvca/{hypervisor_gpt.SUPPORT}",)
+    if epoch:
+        required += ("usr/lib/fvca/check-hypervisor-epoch",)
     if args.boot_trial is not None or args.boot_trial_candidate is not None:
         required += (f"usr/lib/fvca/{TRIAL_SUPPORT}", "usr/lib/fvca/set-boot-next")
     if args.boot_promotion_public_key is not None:
@@ -272,7 +289,7 @@ def assemble(args, work):
     guest, guest_hash = guest_selection(args, work)
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
-        extra=(*extra, *guest, *backup, *backup_job_selection(args.backup_job, backup),
+        extra=(*extra, *epoch, *guest, *backup, *backup_job_selection(args.backup_job, backup),
                *restore_selection(args.restore_authorization, backup),
                *retention_selection(args.retention_policy, backup),
                *trial_selection(args.boot_trial, ids, guest_hash, candidate=False),
@@ -311,6 +328,7 @@ def main():
     parser.add_argument("--guest-boot", type=Path, help="verified Guest boot bundle disk to authorize")
     parser.add_argument("--guest-release-certificate", type=Path, help="trusted Guest release signer")
     parser.add_argument("--gpt-slot", type=UUID, help="assign one unique UUID to a self-contained Hypervisor GPT slot image")
+    parser.add_argument("--epoch-policy", type=Path, help="signed release epoch and enrolled TPM counter policy")
     parser.add_argument("--gpt-sector-size", type=int, choices=(512, 4096), help="GPT slot logical sector size (default 4096)")
     parser.add_argument("--host-data-disk", type=Path, help="include one prepared GPT LUKS2 member in the slot image")
     parser.add_argument("--host-data-sector-size", type=int, choices=(512, 4096),
@@ -339,6 +357,8 @@ def main():
         parser.error("output disk already exists")
     if args.gpt_slot is not None and args.guest_boot is None:
         parser.error("a GPT slot requires its authorized Guest boot bundle")
+    if args.epoch_policy is not None and args.gpt_slot is None:
+        parser.error("a protected Hypervisor epoch requires a GPT slot")
     if args.gpt_sector_size is not None and args.gpt_slot is None:
         parser.error("sector size is only configurable for a GPT slot image")
     if args.host_data_disk is not None and (args.gpt_slot is None or args.storage is None):

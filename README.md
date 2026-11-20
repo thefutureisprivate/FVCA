@@ -301,7 +301,7 @@ Run `tests/storage-lab.sh --authenticated build/host-integrity-lab` to provision
 
 The initramfs disables udev filesystem probing on the storage mappings. It confirms that rule took effect, reads the active kernel tables, and verifies the AES-XTS and HMAC-SHA256 crypt target, the 32-byte tags, and journaled dm-integrity beneath both members before probing Btrfs. It checks that each stack ends at its selected physical partition and emits `FVCA_HOST_STORAGE_AUTHENTICATED` only once both stacks pass. The profile keeps discards disabled and prevents a same-UUID ordinary LUKS2 member from satisfying the authenticated selection. [Linux dm-integrity](https://docs.kernel.org/admin-guide/device-mapper/dm-integrity.html) · [Linux dm-crypt](https://docs.kernel.org/admin-guide/device-mapper/dm-crypt.html)
 
-The disposable fixture flips ciphertext beneath each member's primary Btrfs superblock and requires both decrypted reads to fail with zero bytes returned. It cuts VM power after a flushed record and subsequent writes, then verifies the retained record and scrubs the remounted pool. It also exercises single-member recovery and replacement. Use the same `tests/check-storage.py` command with the authenticated lab and its signed images to check Secure Boot activation, rejection of the plain member, and boot with the replacement. Physical NVMe interruption and performance qualification, TPM enrollment with this profile, and protected rollback state remain release gates.
+The disposable fixture flips ciphertext beneath each member's primary Btrfs superblock and requires both decrypted reads to fail with zero bytes returned. It cuts VM power after a flushed record and subsequent writes, then verifies the retained record and scrubs the remounted pool. It also exercises single-member recovery and replacement. Use the same `tests/check-storage.py` command with the authenticated lab and its signed images to check Secure Boot activation, rejection of the plain member, and boot with the replacement. Physical NVMe interruption, TPM enrollment on the target platform, and performance qualification remain release gates.
 
 ### Development TPM and PIN unlock
 
@@ -325,9 +325,25 @@ done
 
 The lab check takes `--firmware` for the measured Secure Boot firmware, `--variables` for its enrolled variables, `--tpm-state` for the enrolled software TPM, and `--pin-file` for the disposable 24-hex-character PIN. It exercises the signed Hypervisor with the correct PIN, wrong PIN, unrelated TPM, extra measured command line, and absent TPM.
 
-The Hypervisor initramfs omits systemd's stock NvPCR definitions. The storage PCR authority authorizes only LUKS2 unsealing. Future TPM-backed release state requires its own initialization policy.
+The Hypervisor initramfs omits systemd's stock NvPCR definitions. The storage PCR authority authorizes only LUKS2 unsealing.
 
 The shared SELinux policy switches Fedora's PCR measurement domain to enforcing. Both the initramfs and the core verify the domain against the policy loaded in the kernel. On a measured boot, systemd prepares the root-only, separately labeled log at `/run/log/systemd/tpm2-measure.log` before the first userspace PCR measurements.
+
+### Enforce the Hypervisor epoch floor at boot
+
+Compose the stable slot and its recovery release with `--epoch-policy FILE`, GPT slots, and the authenticated TPM and PIN storage profile. Use a dedicated Secure Boot authority for this deployment. Enroll only authorities whose trusted boot paths enforce the epoch gate. Every signed Hypervisor boot path, including recovery, must carry the policy. Keep control of the TPM owner hierarchy separate from release and storage signing.
+
+```text
+FVCA-HYPERVISOR-EPOCH-1
+epoch=2
+policy_sha256=ENROLLED_TPM_POLICY_DIGEST_AS_64_LOWERCASE_HEX_DIGITS
+```
+
+The signed initramfs selects a release epoch and the public authorization policy of TPM NV counter `0x01504656`. The counter must be initialized, use SHA-256 and eight bytes, and permit writes only through a TPM policy session. The epoch counts from the actual value read after TPM initialization. The initramfs verifies the selected GPT slot first, then reads and checks the counter before activating the VM runtime or prompting for the Host PIN. A missing TPM, missing or uninitialized counter, policy mismatch, or release below the floor stops boot. Restoring disks or EFI variables leaves hardware TPM NV state in place. [TCG TPM 2.0 Library Architecture](https://trustedcomputinggroup.org/wp-content/uploads/TPM-2.0-1.83-Part-1-Architecture.pdf) · [TPM NV attributes](https://tpm2-tools.readthedocs.io/en/latest/man/common/nv-attrs/)
+
+`tests/prepare-hypervisor-epoch-tpm.sh` creates disposable copies of an enrolled software TPM at the initial floor, the next floor, and with an uninitialized counter. It exercises a separate authority for `NV_Increment`, checks an unauthorized increment fails, and checks the old floor precondition after the advance. Compose two signed slots from the generated epoch policies and a third with a different policy digest. Run `tests/check-hypervisor-epoch.py` with those slots, the original TPM-enrolled encrypted members, and the same enrolled firmware. The test opens its own software TPM copies and captures serial logs for each boot.
+
+Production advancement still requires an independent approval that binds the next counter value and the exact candidate and eligible recovery releases. Verify the recovery release before advancing the floor and serialize counter updates. The current implementation enforces the floor during boot, and the disposable fixture exercises TPM authorization separately.
 
 ## Development Service Guest storage
 

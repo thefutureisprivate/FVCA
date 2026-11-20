@@ -32,6 +32,7 @@ semodule -n -X 400 -i "$work/systemd.cil" \
 if [[ "${FVCA_HYPERVISOR_STORAGE:-}" == yes ]]; then
     semodule -n -X 400 -i "$SRCDIR/policy/selinux/fvca_storage.cil" \
         -i "$SRCDIR/policy/selinux/fvca_boot_trial.cil" \
+        -i "$SRCDIR/policy/selinux/fvca_hypervisor_epoch.cil" \
         -i "$SRCDIR/policy/selinux/fvca_backup.cil"
 fi
 if [[ "${FVCA_SERVICE_GUEST:-}" == yes ]]; then

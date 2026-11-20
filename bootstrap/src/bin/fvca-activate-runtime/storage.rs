@@ -177,13 +177,16 @@ fn open_data(selection: &Selection<'_>, sources: &[PathBuf; 2]) -> io::Result<()
     result
 }
 
-pub(super) fn activate_if_selected() -> io::Result<()> {
+pub(super) fn activate_if_selected(protected_epoch: bool) -> io::Result<()> {
     let policy = match fs::read_to_string(POLICY) {
         Ok(policy) => policy,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !protected_epoch => return Ok(()),
         Err(error) => return Err(error),
     };
     let selection = selection(&policy)?;
+    if protected_epoch && (!selection.authenticated || selection.tokens.is_none()) {
+        return Err(invalid("a protected Hypervisor epoch requires authenticated TPM-bound Host storage"));
+    }
     let sources = find_members(&selection.members)?;
     bind_readiness_probe()?;
     open_data(&selection, &sources)?;
