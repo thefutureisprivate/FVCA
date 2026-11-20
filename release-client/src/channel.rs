@@ -535,9 +535,7 @@ pub async fn discover(
     {
         return Err(invalid("release root or depot differs from standing OS update policy").into());
     }
-    if active.role != policy.role
-        || active.sequence == 0
-        || !valid_digest(&active.manifest_sha256)
+    if active.role != policy.role || active.sequence == 0 || !valid_digest(&active.manifest_sha256)
     {
         return Err(invalid("active release is outside standing OS update policy").into());
     }
@@ -667,6 +665,16 @@ pub async fn discover(
             .map(|candidate| candidate.manifest_sha256.as_str());
         require_fresh(Timestamp::now())?;
         guest::retire_staging(directory, retain)?;
+        if retain.is_none() {
+            guest::withdraw(
+                &active,
+                head.sequence,
+                trial_key
+                    .as_deref()
+                    .expect("validated Guest trial authority"),
+                &|| Ok(require_fresh(Timestamp::now())?),
+            )?;
+        }
     }
     let mut request_result = Ok(());
     status.disposition = match &head.release {

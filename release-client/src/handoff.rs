@@ -203,12 +203,31 @@ pub fn publish_record(
     envelope: &[u8],
     authorize: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
+    write_record(inbox, name, envelope, fs::RenameFlags::NOREPLACE, authorize)
+}
+
+pub fn replace_record(
+    inbox: &File,
+    name: &str,
+    envelope: &[u8],
+    authorize: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    write_record(inbox, name, envelope, fs::RenameFlags::empty(), authorize)
+}
+
+fn write_record(
+    inbox: &File,
+    name: &str,
+    envelope: &[u8],
+    flags: fs::RenameFlags,
+    authorize: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     let pinned = PathBuf::from(format!("/proc/self/fd/{}", inbox.as_raw_fd()));
     let mut record = tempfile::NamedTempFile::new_in(&pinned)?;
     record.write_all(envelope)?;
     record.as_file().sync_all()?;
     authorize()?;
-    fs::renameat_with(CWD, record.path(), inbox, name, fs::RenameFlags::NOREPLACE)?;
+    fs::renameat_with(CWD, record.path(), inbox, name, flags)?;
     inbox.sync_all()?;
     Ok(())
 }
