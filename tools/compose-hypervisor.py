@@ -191,6 +191,7 @@ def retention_selection(path, backup):
 
 TRIAL_FILE = "hypervisor-trial"
 TRIAL_CANDIDATE_FILE = "hypervisor-trial-candidate"
+TRIAL_WATCHDOG_FILE = "hypervisor-trial-watchdog"
 TRIAL_SUPPORT = "hypervisor-trial-support-v3"
 TRIAL_ARGUMENT = "fvca.hypervisor_trial"
 EPOCH_FILE = "hypervisor-epoch"
@@ -303,7 +304,7 @@ def assemble(args, work):
         "hypervisor.composition", "vm-runtime.p7s", "host-storage",
         *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, *BACKUP_FILES, BACKUP_JOB_FILE,
         RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE, TRIAL_FILE,
-        TRIAL_CANDIDATE_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY, EPOCH_FILE, *UPDATE_FILES, UPDATE_PEER,
+        TRIAL_CANDIDATE_FILE, TRIAL_WATCHDOG_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY, EPOCH_FILE, *UPDATE_FILES, UPDATE_PEER,
     ))
     required = ACTIVATION_FILES
     if storage is not None:
@@ -331,6 +332,14 @@ def assemble(args, work):
         recorder = runtime_work / "tree" / vm_runtime.TRIAL_HEALTH
         if recorder.is_symlink() or not recorder.is_file() or recorder.stat().st_mode & 0o111 == 0:
             raise ValueError("the candidate VM runtime lacks its trial health recorder")
+    watchdog = ()
+    if args.boot_trial_watchdog_seconds is not None:
+        marker = runtime_work / "tree" / vm_runtime.TRIAL_HEALTH_WATCHDOG
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
+            raise ValueError("the candidate VM runtime cannot record watchdog-bounded trial health")
+        required += ("usr/lib/fvca/hypervisor-trial-watchdog-v1",)
+        deadline = f"FVCA-HYPERVISOR-TRIAL-WATCHDOG-1\nseconds={args.boot_trial_watchdog_seconds}\n"
+        watchdog = ((TRIAL_WATCHDOG_FILE, deadline.encode("ascii")),)
     verify_initrd(args.initrd, uname, required, forbidden, "Hypervisor")
     extra = (("host-storage", storage.raw),) if storage is not None else ()
     ids = None
@@ -350,7 +359,7 @@ def assemble(args, work):
         extra=(*extra, *epoch, *guest, *backup, *backup_job_selection(args.backup_job, backup),
                *restore_selection(args.restore_authorization, backup),
                *retention_selection(args.retention_policy, backup),
-               *stable_trial, *candidate_trial,
+               *stable_trial, *candidate_trial, *watchdog,
                *authorities, *update_selection(args, authorities)),
     )
     if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT) for arg in cmdline.split()):
@@ -398,6 +407,8 @@ def main():
     trial = parser.add_mutually_exclusive_group()
     trial.add_argument("--boot-trial", type=Path, help="authorize a specific one-shot UEFI trial from the stable GPT slot")
     trial.add_argument("--boot-trial-candidate", type=Path, help="validate readiness during the authorized GPT trial")
+    parser.add_argument("--boot-trial-watchdog-seconds", type=int, metavar="SECONDS",
+                        help="sign a 10–300 second standing trial deadline for the i6300ESB watchdog")
     parser.add_argument("--boot-trial-public-key", type=Path, help="pin the independent Ed25519 standing trial authority")
     parser.add_argument("--os-update-owner", type=Path, help="enroll the raw Ed25519 owner key for scheduled Host updates")
     parser.add_argument("--os-update-peer-slot", type=UUID, help="grant live installation to the other provisioned GPT slot")
@@ -439,6 +450,11 @@ def main():
         parser.error("a boot trial requires a GPT slot")
     if args.boot_trial_candidate is not None and args.restore_authorization is not None:
         parser.error("a boot trial candidate requires ordinary Guest startup")
+    if args.boot_trial_watchdog_seconds is not None and (
+        args.boot_trial_candidate is None or args.boot_trial_public_key is None
+        or not 10 <= args.boot_trial_watchdog_seconds <= 300
+    ):
+        parser.error("the i6300ESB watchdog requires a standing candidate and a deadline of 10–300 seconds")
     if args.boot_trial_public_key is not None and (
         args.epoch_policy is None or args.boot_trial is not None or args.restore_authorization is not None
     ):

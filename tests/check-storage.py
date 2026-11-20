@@ -69,6 +69,8 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
         devices = ["-device", "virtio-rng-pci"]
     if getattr(args, "no_default_devices", False):
         devices.append("-nodefaults")
+    if getattr(args, "trial_watchdog", False):
+        devices += ["-device", "i6300esb", "-action", "watchdog=reset"]
     nvme = getattr(args, "nvme_boot", False)
     sector = getattr(args, "boot_sector_size", 512)
     geometry = f",logical_block_size={sector},physical_block_size={sector}" if nvme or sector != 512 else ""
@@ -91,6 +93,8 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
     ]
     if not allow_reboot:
         command.append("-no-reboot")
+    if getattr(args, "qmp_path", None) is not None:
+        command += ["-qmp", f"unix:{args.qmp_path},server=on,wait=off"]
     if args.runtime is not None and attach_runtime:
         companion = "nvme,drive=fvca-runtime,serial=fvca-slot-2" if nvme else "virtio-blk-pci,drive=fvca-runtime"
         command += [

@@ -19,6 +19,7 @@ dependencies = [
  "fvca-libvirt-boundary",
  "fvca-signature-boundary",
  "fvca-trial-authorization",
+ "fvca-watchdog-boundary",
 ]
 
 [[package]]
@@ -31,4 +32,8 @@ version = "0.1.0"
 
 [[package]]
 name = "fvca-trial-authorization"
+version = "0.1.0"
+
+[[package]]
+name = "fvca-watchdog-boundary"
 version = "0.1.0"

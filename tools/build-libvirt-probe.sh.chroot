@@ -15,3 +15,4 @@ cargo build --frozen --release --target "$target" --bin fvca-qualify-libvirt --b
 for program in qualify-libvirt launch-guest backup-worker trial-health; do
     install -Dm755 "$CARGO_TARGET_DIR/$target/release/fvca-$program" "$DESTDIR/usr/libexec/fvca/$program"
 done
+install -Dm644 /dev/null "$DESTDIR/usr/libexec/fvca/trial-health-watchdog-v1"

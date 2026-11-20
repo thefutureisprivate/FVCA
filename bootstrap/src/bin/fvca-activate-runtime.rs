@@ -23,6 +23,8 @@ const PROBE: &str = include_str!("../../../tests/fvca-vm-runtime-probe.service")
 
 fn activate() -> io::Result<()> {
     fvca_allocator_binding::require_allocator()?;
+    let cmdline = fs::read_to_string("/proc/cmdline")?;
+    hypervisor_trial::arm_candidate_watchdog(&cmdline)?;
     if fs::read_to_string("/sys/module/kvm_intel/parameters/nested")?.trim_end() != "N"
         || !fs::metadata("/dev/kvm")?.file_type().is_char_device()
     {
@@ -32,7 +34,6 @@ fn activate() -> io::Result<()> {
     }
     let slot = Slot::load()?;
     let protected_epoch = Path::new("/usr/lib/fvca/hypervisor-epoch").try_exists()?;
-    let cmdline = fs::read_to_string("/proc/cmdline")?;
     hypervisor_trial::verify_standing_key(&cmdline)?;
     let mut epochs = cmdline
         .split_ascii_whitespace()

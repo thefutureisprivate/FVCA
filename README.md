@@ -401,6 +401,10 @@ On the stable boot, the verifier checks the signature, running roots, epoch, TPM
 
 `tests/check-hypervisor-standing-trial.py` uses a disposable enrolled software TPM, two signed 4Kn boot images and matching authenticated Btrfs members. It exercises signature, expiry and stable-release refusal. Its approved run observes the stable initramfs reboot into the candidate, which unlocks storage without a PIN and records Guest health. A subsequent stable boot exercises replay of the consumed trial.
 
+For an i6300ESB standing trial, compose the candidate with `--boot-trial-watchdog-seconds SECONDS` to sign a health deadline of 10–300 seconds into its UKI. The signed Hypervisor initrd arms the timer after verifying EFI candidate selection and before checking the TPM floor or unlocking Host storage. Verified Guest readiness and the matching durable trial record are required to disarm it. A timeout resets the machine to the stable entry in the existing EFI boot order.
+
+`tests/check-hypervisor-watchdog.py` uses a signed 10-second candidate and a signed 180-second candidate with the emulated i6300ESB. It checks QMP for the hardware watchdog event, verifies stable recovery after expiry, and confirms that the healthy candidate disarms the timer before recording health.
+
 For live activation qualification, build the stable UKI with the initramfs produced by `tests/nested-guest-shutdown-initrd.sh INPUT_INITRAMFS OUTPUT_INITRAMFS online-trial`. Use the original initramfs for the candidate and pass `--online-handoff` to the standing trial test. The additional checks cover a tampered approval, capture contention, failure to queue the reboot, restart of the stable Guest, and a successful retry through candidate health.
 
 ### Promote an independently approved Hypervisor trial

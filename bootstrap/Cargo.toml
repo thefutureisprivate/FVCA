@@ -11,6 +11,7 @@ fvca-btrfs-boundary = { path = "btrfs-boundary", optional = true }
 fvca-libvirt-boundary = { path = "libvirt-boundary", optional = true }
 fvca-signature-boundary = { path = "signature-boundary", optional = true }
 fvca-trial-authorization = { path = "trial-authorization" }
+fvca-watchdog-boundary = { path = "watchdog-boundary" }
 
 [features]
 libvirt = ["dep:fvca-btrfs-boundary", "dep:fvca-libvirt-boundary"]

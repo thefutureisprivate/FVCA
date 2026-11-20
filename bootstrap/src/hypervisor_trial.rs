@@ -17,6 +17,7 @@ use crate::{find_partition, identity, invalid, recovery, runtime, sys_block};
 mod promotion;
 mod standing;
 mod standing_promotion;
+mod watchdog;
 
 pub const PROMOTION_KEY: &str = "/usr/lib/fvca/hypervisor-promotion-key";
 pub const TRIAL_KEY: &str = "/usr/lib/fvca/hypervisor-trial-key";
@@ -611,6 +612,51 @@ fn boot_id() -> io::Result<String> {
     Ok(recovery::uuid(id.trim_end())?.to_owned())
 }
 
+fn candidate<'a>(cmdline: &str, raw: &'a mut Vec<u8>) -> io::Result<Option<Trial<'a>>> {
+    let mut markers = cmdline
+        .split_ascii_whitespace()
+        .filter(|arg| arg.split('=').next() == Some(CANDIDATE_ARGUMENT));
+    let marker = markers.next();
+    *raw = match read(Path::new(CANDIDATE), 1024) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound && marker.is_none() => {
+            return Ok(None);
+        }
+        result => result?,
+    };
+    let trial = candidate_selection(std::str::from_utf8(raw).map_err(io::Error::other)?)?;
+    if markers.next().is_some()
+        || marker.and_then(|arg| arg.split_once('=').map(|(_, id)| id)) != Some(trial.transaction)
+    {
+        return Err(invalid(
+            "Hypervisor trial marker differs from the signed candidate policy",
+        ));
+    }
+    Ok(Some(trial))
+}
+
+pub fn arm_candidate_watchdog(cmdline: &str) -> io::Result<()> {
+    let Some(seconds) = watchdog::policy()? else {
+        return Ok(());
+    };
+    let mut raw = Vec::new();
+    let trial = candidate(cmdline, &mut raw)?
+        .ok_or_else(|| invalid("trial watchdog requires a signed candidate"))?;
+    let order = boot_order()?;
+    if selected()? != trial.candidate.id || boot_next()?.is_some() {
+        return Err(invalid(
+            "watchdog requires the selected candidate and consumed BootNext",
+        ));
+    }
+    if order.get(..2) == Some(&[trial.candidate.id, trial.stable.id]) {
+        return Ok(());
+    }
+    if order.get(..2) != Some(&[trial.stable.id, trial.candidate.id]) {
+        return Err(invalid("watchdog requires the authorized stable fallback"));
+    }
+    gpt_device(&trial.stable)?;
+    watchdog::arm(seconds, &boot_id()?, trial.transaction)
+}
+
 pub fn start_candidate(
     cmdline: &str,
     slot: Option<&crate::hypervisor_slot::Slot>,
@@ -619,23 +665,10 @@ pub fn start_candidate(
     recovering: bool,
     epoch: Option<&str>,
 ) -> io::Result<()> {
-    let mut markers = cmdline
-        .split_ascii_whitespace()
-        .filter(|arg| arg.split('=').next() == Some(CANDIDATE_ARGUMENT));
-    let marker = markers.next();
-    let raw = match read(Path::new(CANDIDATE), 1024) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound && marker.is_none() => return Ok(()),
-        Err(error) => return Err(error),
-        Ok(raw) => raw,
+    let mut raw = Vec::new();
+    let Some(trial) = candidate(cmdline, &mut raw)? else {
+        return Ok(());
     };
-    let trial = candidate_selection(std::str::from_utf8(&raw).map_err(io::Error::other)?)?;
-    if markers.next().is_some()
-        || marker.and_then(|arg| arg.split_once('=').map(|(_, id)| id)) != Some(trial.transaction)
-    {
-        return Err(invalid(
-            "Hypervisor trial marker differs from the signed candidate policy",
-        ));
-    }
     let slot = slot.ok_or_else(|| invalid("trial candidate requires its verified GPT slot"))?;
     if recovering
         || slot.esp != trial.candidate.esp
@@ -810,12 +843,14 @@ pub fn record_health() -> io::Result<()> {
         ));
     }
     let healthy = directory.join(format!("{transaction}.healthy"));
-    match publish(&healthy, &receipt) {
-        Err(error)
-            if error.kind() == io::ErrorKind::AlreadyExists
-                && read_record(&healthy)? == receipt => {}
-        result => result?,
+    match read_record(&healthy) {
+        Ok(prior) if prior == receipt => return Ok(()),
+        Ok(_) => return Err(invalid("durable candidate health differs from this boot")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error),
     }
+    watchdog::stop(evidence.boot, transaction)?;
+    publish(&healthy, &receipt)?;
     println!("FVCA_TRIAL_HEALTH_RECORDED {transaction}");
     Ok(())
 }
