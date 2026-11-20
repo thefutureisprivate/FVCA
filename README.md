@@ -334,7 +334,49 @@ Place the repository password and a dedicated read-only S3 key in `/run/fvca/hos
 
 Start `fvca-restore-s3@CAPTURE_UUID.NEW_RESTORE_UUID.service`. The worker fetches the authorized snapshot into isolated staging and checks the manifest against its approved digest before downloading the large files. The coordinator verifies the complete release inventory and disk digest, then installs the disk through the cold-restore transaction. The isolated Guest boots with the release authorized by the recovery UKI. Reuse the same instance to reconcile an interrupted restore. Check the `verified` receipt in `/run/fvca/host-data/captures/restores/NEW_RESTORE_UUID` before authorizing service exposure.
 
-Remote repository retention and independent Guest application backups are pending.
+### Verify and retain S3 recovery points off the appliance
+
+Provision separate S3 identities for routine upload, read-only restore, off-node audit and off-node maintenance. Generate an IAM identity policy for each role using `python3 tools/s3-repository-iam.py --destination FILE --ca FILE ROLE`. Attach only the generated policy to each role. The upload identity can clean up restic locks. Snapshot, index and data deletion require the maintenance identity. The audit identity uses exclusive restic locks during a pack check. Keep maintenance credentials outside the appliance and pause read-only recovery during maintenance. Lab qualification used RustFS 1.0.0-rc.3 and restic 0.19.1. Qualify permissions on the selected endpoint. Object PUT can still replace an existing key. [IAM policy evaluation](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html) · [restic retention](https://restic.readthedocs.io/en/v0.19.1/060_forget.html)
+
+On the maintenance machine, independently retain each `backup-REPOSITORY_ID` receipt and its `manifest` from a finalized Host capture. Authenticate the export through a trusted channel and keep it outside the S3 writer's control. Use `maintain-s3-repository.py ... enroll --receipt FILE --manifest FILE` to compare the exact stored manifest with this copy and persist it in the off-node SQLite ledger. Keep a protected, independent backup of the ledger. Repository entries without enrolled receipts never count toward the retention floor or qualify for expiry.
+
+Create a JSON policy with the exact SHA-256 digests of the registered destination policy, trust bundle and restic executable. `protect` contains full, independently enrolled restic snapshot IDs. Sign the policy with the separate maintenance authority and pin its certificate in the maintenance account's configuration.
+
+```json
+{
+  "schema": 1,
+  "destination_sha256": "SHA256_OF_BACKUP_POLICY",
+  "ca_sha256": "SHA256_OF_ENDPOINT_CA",
+  "restic_sha256": "SHA256_OF_RESTIC_EXECUTABLE",
+  "keep_min": 3,
+  "max_expire": 8,
+  "expire_after_seconds": 2592000,
+  "max_backup_age_seconds": 86400,
+  "bandwidth_kib": 32768,
+  "operation_timeout_seconds": 43200,
+  "protect": []
+}
+```
+
+```sh
+openssl cms -sign -binary -noattr -nocerts -outform DER \
+  -signer maintenance.crt -inkey maintenance.key -in retention.json -out retention.p7s
+
+audit=(python3 /opt/fvca/tools/maintain-s3-repository.py
+  --policy /etc/fvca/retention.json --signature /etc/fvca/retention.p7s
+  --authority /etc/fvca/maintenance.crt --destination /etc/fvca/destination.conf
+  --ca /etc/fvca/s3-ca.pem --restic /usr/bin/restic --state /var/lib/fvca-s3
+  --credentials /run/fvca-s3-audit)
+"${audit[@]}" enroll --receipt ./verified-backup-receipt --manifest ./verified-capture-manifest
+"${audit[@]}" verify
+"${audit[@]}" retain
+```
+
+Run all commands as the off-node `fvca-s3` service account against the same private `0700` state directory. Credential directories use mode `0700` and contain private `repository-password` and `s3-credentials` files with the same formats as the appliance. The example service and daily timer in `ops/s3/` use `/etc/fvca/s3-audit` and `/var/lib/fvca-s3`. Configure monitoring for nonzero exits and missed runs. `verify` reads every pack and logs the coverage separately from recovery-point age and receipt inventory. Keep restore-drill logs separately. A full pack check downloads the repository's data, so set bandwidth and time limits to fit the job window. [restic repository integrity checks](https://restic.readthedocs.io/en/v0.19.1/045_working_with_repos.html)
+
+`retain` previews eligible IDs using the original capture times in the ledger. For an authorized retention run, select the off-node maintenance credentials and run `retain --apply`. The tool requires the approved minimum of known recovery points and a fresh capture, verifies pack integrity, journals selected IDs, then calls restic forget and prune. A retry resumes the journaled set. Maintenance stops if an active snapshot disappears or a retired ID reappears. Schedule retention separately from independent copies and protect the full dependency set of any off-node copy.
+
+Independent Guest application backups and versioning or Object Lock profiles are pending.
 
 ## Off-node Stalwart workload derivation
 

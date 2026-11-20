@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule FVCA S3 full pack verification
+
+[Timer]
+OnCalendar=daily
+Persistent=yes
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

@@ -4,13 +4,13 @@
 import argparse
 import base64
 import hashlib
-import ipaddress
 import json
 from pathlib import Path
 import re
 import subprocess
 import tempfile
 
+import backup_destination
 import guest_boot_bundle
 from image_verity import VERITY_PARTITIONS, read_layout, verify_verity
 from runtime_boot import (
@@ -121,20 +121,7 @@ def backup_selection(args):
         return ()
     policy = args.backup_policy.read_bytes()
     ca = args.backup_ca.read_bytes()
-    label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
-    selected = re.fullmatch(
-        rf"FVCA-VM-BACKUP-1\nendpoint=(\[[a-fA-F0-9:]+\]|[0-9.]+):([0-9]{{1,5}})\n"
-        rf"bucket=([a-z0-9][a-z0-9-]{{1,61}}[a-z0-9])\nprefix=((?:{label}(?:/{label})*)?)\n"
-        r"region=([a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?)\nrepository=([0-9a-f]{64})\n",
-        policy.decode("ascii"),
-    )
-    if selected is None or len(policy) > 2048:
-        raise ValueError("invalid VM backup destination policy")
-    address = ipaddress.ip_address(selected[1].strip("[]"))
-    if address.is_unspecified or address.is_multicast or not 0 < int(selected[2]) <= 65535 or len(selected[4]) > 160:
-        raise ValueError("invalid VM backup endpoint or prefix")
-    if not ca.startswith(b"-----BEGIN CERTIFICATE-----") or len(ca) > 65_536:
-        raise ValueError("invalid VM backup CA bundle")
+    backup_destination.parse(policy, ca)
     return tuple(zip(BACKUP_FILES, (policy, ca), strict=True))
 
 

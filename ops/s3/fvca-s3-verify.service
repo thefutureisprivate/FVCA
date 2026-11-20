@@ -1,0 +1,19 @@
+[Unit]
+Description=Verify FVCA S3 repository packs and recovery points
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=fvca-s3
+StateDirectory=fvca-s3
+StateDirectoryMode=0700
+ExecStart=/usr/bin/python3 /opt/fvca/tools/maintain-s3-repository.py --policy /etc/fvca/retention.json --signature /etc/fvca/retention.p7s --authority /etc/fvca/maintenance.crt --destination /etc/fvca/destination.conf --ca /etc/fvca/s3-ca.pem --restic /usr/bin/restic --state /var/lib/fvca-s3 --credentials /etc/fvca/s3-audit verify
+TimeoutStartSec=13h
+MemoryMax=1G
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
