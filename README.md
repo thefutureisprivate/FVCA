@@ -291,6 +291,26 @@ repository=REPLACE_WITH_64_LOWERCASE_HEX_DIGITS
 
 Start `fvca-backup-live@CAPTURE_UUID.service` to capture a running Guest or `fvca-backup-stopped@CAPTURE_UUID.service` to use an orderly stop. Upload begins after Guest recovery. The isolated worker authenticates the authorized repository, reads back the exact snapshot inventory and manifest, then returns the full snapshot ID. The coordinator records the result in `backup-REPOSITORY_ID` beside the finalized capture manifest. After an upload failure, retry with the same capture UUID and the same capture mode to reuse the sealed disk. The pending record identifies the sealed disk and its SHA-256 digest.
 
+### Inventory and expire local captures
+
+Start `fvca-capture-list.service` to log the local capture catalog or `fvca-capture-inspect@CAPTURE_UUID.service` to inspect one capture. Finalized entries report capture time, disk SHA-256, Btrfs snapshot UUID and pending backup status. Expired entries retain their manifest and backup receipt for reference.
+
+To enable expiry, add `--retention-policy FILE` when composing the signed Hypervisor UKI. Use the repository ID already authorized in its backup policy. The optional `protect=` field accepts one capture UUID per line.
+
+```text
+FVCA-LOCAL-RETENTION-1
+repository=REPLACE_WITH_64_LOWERCASE_HEX_DIGITS
+keep_min=2
+keep_max=7
+max_age_seconds=604800
+min_data_bytes=536870912
+min_metadata_bytes=67108864
+```
+
+`fvca-capture-retention.timer` runs the policy periodically. Start `fvca-capture-retention.service` to run a pass immediately or `fvca-capture-expire@CAPTURE_UUID.service` to apply the same eligibility rules to one capture. A capture can expire when it reaches the age limit, the local count exceeds the target, or Btrfs falls below the required allocation headroom. The newest `keep_min` finalized local snapshots, protected UUIDs, unfinished restores, pending backups and captures without a matching backup receipt are kept. Those protections can leave the count above `keep_max`.
+
+Headroom is measured from allocated data and metadata space and the unallocated capacity available on both mirror members. A pass can expire one capture solely because of space pressure. Later passes measure again as Btrfs reclaims unreferenced extents. Expiry durably journals the local snapshot removal so an interrupted pass can finish on retry. The capture UUID stays retired and its S3 backup remains available for an authorized recovery.
+
 ### Recover a Service Guest from S3
 
 Provision and authorize a new encrypted Host Btrfs mirror. Authorize the Guest release that should boot on the recovery Hypervisor. Fence the source appliance before reusing its Guest identity. Use an independently retained receipt and manifest to approve the exact recovery set. Obtain the total logical byte count by summing the regular-file sizes in `restic ls --json FULL_SNAPSHOT_ID`. Include the raw disk, manifest, and all release members in that count.
@@ -314,7 +334,7 @@ Place the repository password and a dedicated read-only S3 key in `/run/fvca/hos
 
 Start `fvca-restore-s3@CAPTURE_UUID.NEW_RESTORE_UUID.service`. The worker fetches the authorized snapshot into isolated staging and checks the manifest against its approved digest before downloading the large files. The coordinator verifies the complete release inventory and disk digest, then installs the disk through the cold-restore transaction. The isolated Guest boots with the release authorized by the recovery UKI. Reuse the same instance to reconcile an interrupted restore. Check the `verified` receipt in `/run/fvca/host-data/captures/restores/NEW_RESTORE_UUID` before authorizing service exposure.
 
-Automated retention and independent Guest application backups are pending.
+Remote repository retention and independent Guest application backups are pending.
 
 ## Off-node Stalwart workload derivation
 

@@ -274,6 +274,10 @@ fn activate() -> io::Result<()> {
         [option, request] if option == "--restore-s3" => capture::restore::cold_restore(request, true),
         [option, id] if option == "--backup-live" => capture::backup::upload(id, true),
         [option, id] if option == "--backup-stopped" => capture::backup::upload(id, false),
+        [option] if option == "--capture-list" => capture::retention::inspect(None),
+        [option, id] if option == "--capture-inspect" => capture::retention::inspect(Some(id)),
+        [option, id] if option == "--capture-expire" => capture::retention::maintain(Some(id)),
+        [option] if option == "--capture-retention" => capture::retention::maintain(None),
         _ => Err(invalid("unsupported Service Guest operation")),
     }
 }

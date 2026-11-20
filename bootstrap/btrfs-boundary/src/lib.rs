@@ -12,6 +12,8 @@ const INODE_ITEM: u32 = 1;
 const NODATASUM_OR_NODATACOW: u64 = 3;
 const SNAP_CREATE_V2: c_ulong = 0x5000_9417;
 const SUBVOL_CREATE_V2: c_ulong = 0x5000_9418;
+const SNAP_DESTROY_V2: c_ulong = 0x5000_943f;
+const SYNC: c_ulong = 0x9408;
 const FICLONE: c_ulong = 0x4004_9409;
 const RENAME_NOREPLACE: c_uint = 1;
 const RENAME_EXCHANGE: c_uint = 2;
@@ -150,14 +152,28 @@ pub fn subvolume(file: &File) -> io::Result<Subvolume> {
 }
 
 pub fn snapshot_read_only(source: &File, destination: &File, name: &str) -> io::Result<()> {
-    create(SNAP_CREATE_V2, i64::from(source.as_raw_fd()), destination, name, READ_ONLY)
+    volume_by_name(SNAP_CREATE_V2, i64::from(source.as_raw_fd()), destination, name, READ_ONLY)
 }
 
 pub fn create_subvolume(destination: &File, name: &str) -> io::Result<()> {
-    create(SUBVOL_CREATE_V2, 0, destination, name, 0)
+    volume_by_name(SUBVOL_CREATE_V2, 0, destination, name, 0)
 }
 
-fn create(request: c_ulong, source_fd: i64, destination: &File, name: &str, flags: u64) -> io::Result<()> {
+pub fn remove_capture_snapshot(parent: &File) -> io::Result<()> {
+    // The only deletion target exposed by this boundary is the fixed capture
+    // member relative to its already verified parent directory.
+    volume_by_name(SNAP_DESTROY_V2, 0, parent, "snapshot", 0)
+}
+
+pub fn sync(pool: &File) -> io::Result<()> {
+    // BTRFS_IOC_SYNC takes no payload and commits the filesystem transaction.
+    if unsafe { ioctl(pool.as_raw_fd(), SYNC, 0) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn volume_by_name(request: c_ulong, source_fd: i64, destination: &File, name: &str, flags: u64) -> io::Result<()> {
     if name.is_empty() || name.len() > 255 || name.starts_with('.') ||
         !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     {
@@ -212,7 +228,25 @@ pub fn filesystem_uuid(pool: &File) -> io::Result<String> {
     Ok(uuid(filesystem(pool)?.uuid))
 }
 
-pub fn require_capture_space(pool: &File, data: u64) -> io::Result<()> {
+pub struct Headroom {
+    pub data: u64,
+    pub metadata: u64,
+    pub system: u64,
+    pub unallocated: u64,
+}
+
+impl Headroom {
+    pub fn affords(&self, data: u64, metadata: u64) -> bool {
+        // Shared unallocated bytes can fund future allocations once across
+        // both mirror members. Reserve space for system chunks and repair.
+        let deficit = data.saturating_sub(self.data)
+            .saturating_add(metadata.saturating_sub(self.metadata))
+            .saturating_add((16 * MIB).saturating_sub(self.system));
+        deficit <= self.unallocated.saturating_sub(32 * MIB)
+    }
+}
+
+pub fn headroom(pool: &File) -> io::Result<Headroom> {
     let info = filesystem(pool)?;
     let fsid = uuid(info.uuid);
     let mut unallocated = u64::MAX;
@@ -256,19 +290,18 @@ pub fn require_capture_space(pool: &File, data: u64) -> io::Result<()> {
             2 => 2, // SYSTEM
             _ => return Err(io::Error::other("unexpected Btrfs allocation profile during capture")),
         };
-        if free[index].replace(entry.total.saturating_sub(entry.used)).is_some() {
-            return Err(io::Error::other("duplicate Btrfs allocation profile during capture"));
+        if entry.used > entry.total || free[index].replace(entry.total - entry.used).is_some() {
+            return Err(io::Error::other("invalid or duplicate Btrfs allocation profile during capture"));
         }
     }
     let [Some(data_free), Some(metadata_free), Some(system_free)] = free else {
         return Err(io::Error::other("incomplete Btrfs space accounting during capture"));
     };
-    // Unallocated bytes are usable only on both members. Budget that space at
-    // most once, with independent allowances for metadata and system chunks.
-    let deficit = data.saturating_sub(data_free)
-        .saturating_add((64 * MIB).saturating_sub(metadata_free))
-        .saturating_add((16 * MIB).saturating_sub(system_free));
-    if deficit > unallocated.saturating_sub(32 * MIB) {
+    Ok(Headroom { data: data_free, metadata: metadata_free, system: system_free, unallocated })
+}
+
+pub fn require_capture_space(pool: &File, data: u64) -> io::Result<()> {
+    if !headroom(pool)?.affords(data, 64 * MIB) {
         return Err(io::Error::other("insufficient mirrored Btrfs data, metadata or system headroom for capture"));
     }
     Ok(())

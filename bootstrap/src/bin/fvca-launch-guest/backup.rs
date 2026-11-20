@@ -13,7 +13,7 @@ use super::{Consistency, Store, btrfs, complete_record, directory, disk_digest, 
             read_record, remove_stale_stage, run, runtime, stopped, verify_boot_files};
 
 const OUTGOING: &str = "/run/fvca/host-data/captures/outgoing";
-const BACKUP_LOCK: &str = "/run/fvca/guest-backup.lock";
+pub(super) const BACKUP_LOCK: &str = "/run/fvca/guest-backup.lock";
 
 pub(super) fn mountable_directory(path: &Path) -> io::Result<()> {
     match fs::DirBuilder::new().mode(0o755).create(path) {
@@ -66,6 +66,11 @@ fn snapshot_id(record: &str, repository: &str) -> io::Result<String> {
     Ok(runtime::hash(id)?.to_owned())
 }
 
+pub(super) fn received_snapshot(record: &str, capture: &str, digest: &str, repository: &str) -> io::Result<String> {
+    let prefix = format!("FVCA-S3-BACKUP-1\ncapture={capture}\ndisk_sha256={digest}\n");
+    snapshot_id(record.strip_prefix(&prefix).ok_or_else(|| invalid("backup receipt scope mismatch"))?, repository)
+}
+
 fn release_stage(store: &Store, id: &str, pending: &str, selection: &guest_boot::Selection<'_>) -> io::Result<()> {
     let staging = Path::new(OUTGOING).join(id);
     if staging.try_exists()? {
@@ -114,8 +119,7 @@ pub(crate) fn upload(id: &str, running: bool) -> io::Result<()> {
     let pending = format!("backup-pending-{}", policy.repository);
     if store.path.join(&receipt).try_exists()? {
         let saved = read_record(&store.path.join(&receipt))?;
-        let prefix = format!("FVCA-S3-BACKUP-1\ncapture={id}\ndisk_sha256={disk_hash}\n");
-        let snapshot = snapshot_id(saved.strip_prefix(&prefix).ok_or_else(|| invalid("backup receipt scope mismatch"))?, policy.repository)?;
+        let snapshot = received_snapshot(&saved, id, &disk_hash, policy.repository)?;
         println!("FVCA_S3_BACKUP_COMPLETE {id} {snapshot}");
         return release_stage(&store, id, &pending, &selection);
     }

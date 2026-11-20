@@ -1,0 +1,17 @@
+[Unit]
+Description=Apply the authorized FVCA local capture retention policy
+AssertPathExists=/run/fvca/vm-retention-policy
+AssertPathIsMountPoint=/run/fvca/host-data
+AssertSecurity=selinux
+AssertSecurity=uefi-secureboot
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/libexec/fvca/launch-guest --capture-retention
+TimeoutStartSec=10min
+UMask=0077
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+StandardOutput=journal+console
+StandardError=journal+console

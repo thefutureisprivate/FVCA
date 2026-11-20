@@ -107,6 +107,7 @@ pub(crate) fn capture(id: &str) -> io::Result<()> {
     let capture_lock = lease(Path::new(CAPTURE_LOCK))?;
     super::restore::require_idle()?;
     let store = Store::open(id, Consistency::Filesystem)?;
+    store.require_available()?;
     let timer = format!("fvca-live-recover@{id}.timer");
     let recovery = format!("fvca-live-recover@{id}.service");
     if store.path.try_exists()? {

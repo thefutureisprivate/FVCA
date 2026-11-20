@@ -25,6 +25,8 @@ pub(super) mod live;
 pub(super) mod restore;
 #[path = "backup.rs"]
 pub(super) mod backup;
+#[path = "retention.rs"]
+pub(super) mod retention;
 
 #[derive(Clone, Copy)]
 enum Consistency {
@@ -73,6 +75,13 @@ impl Store {
     fn prepare(&self, launch: &str, bytes: u64) -> io::Result<()> {
         escrow(&self.releases, launch, &self.pool, bytes)?;
         btrfs::require_capture_space(&self.pool, bytes)
+    }
+
+    fn require_available(&self) -> io::Result<()> {
+        if self.path.join("expire-intent").try_exists()? || self.path.join("expired").try_exists()? {
+            return Err(invalid("the capture has been retired from local storage"));
+        }
+        Ok(())
     }
 }
 
@@ -207,6 +216,7 @@ struct Plan<'a> {
     source: &'a str,
     source_id: u64,
     bytes: u64,
+    captured: u64,
     launch: &'a str,
 }
 
@@ -248,7 +258,7 @@ fn parse_plan_fields<'a>(text: &'a str, id: &str, consistency: Consistency, file
     if root_id < 256 || time == 0 || bytes == 0 || !bytes.is_multiple_of(512) || lines.next().is_some() {
         return Err(invalid("invalid capture metadata"));
     }
-    Ok(Plan { source, source_id: root_id, bytes, launch })
+    Ok(Plan { source, source_id: root_id, bytes, captured: time, launch })
 }
 
 fn plan_text(store: &Store, id: &str, source: &Subvolume, bytes: u64, launch: &str) -> io::Result<String> {
@@ -291,13 +301,17 @@ fn only_data_member(root: &Path) -> io::Result<PathBuf> {
 }
 
 fn snapshot(store: &Store, plan: &Plan<'_>) -> io::Result<(Subvolume, PathBuf)> {
-    let path = store.path.join("snapshot");
+    snapshot_at(&store.path, store.consistency, plan)
+}
+
+fn snapshot_at(path: &Path, consistency: Consistency, plan: &Plan<'_>) -> io::Result<(Subvolume, PathBuf)> {
+    let path = path.join("snapshot");
     let info = btrfs::subvolume(&private_directory(&path)?)?;
     if !info.read_only || info.parent_uuid != plan.source || info.uuid == plan.source {
         return Err(invalid("the Btrfs snapshot does not match the sealed source"));
     }
     let data = only_data_member(&path)?;
-    let disk = match store.consistency {
+    let disk = match consistency {
         Consistency::CleanStopped => raw_disk(&data)?,
         Consistency::Filesystem => live_disk(&data)?,
     };
@@ -332,6 +346,7 @@ fn disk_digest(path: &Path) -> io::Result<String> {
 }
 
 fn complete_record(store: &Store, id: &str, allow_stopped_seal: bool) -> io::Result<(String, String, PathBuf)> {
+    store.require_available()?;
     let dir = &store.path;
     let text = read_record(&dir.join("plan"))?;
     let plan = parse_plan(&text, id, store)?;
@@ -368,6 +383,7 @@ pub(super) fn stopped(id: &str, restart: bool) -> io::Result<()> {
     live::require_idle()?;
     restore::require_idle()?;
     let store = Store::open(id, Consistency::CleanStopped)?;
+    store.require_available()?;
     let path = &store.path;
     if path.try_exists()? {
         private_directory(path)?;

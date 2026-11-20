@@ -113,6 +113,7 @@ def guest_selection(args, work):
 
 BACKUP_FILES = ("vm-backup-policy", "vm-backup-ca.pem")
 RESTORE_FILE = "vm-restore-authorization"
+RETENTION_FILE = "vm-retention-policy"
 
 
 def backup_selection(args):
@@ -156,6 +157,26 @@ def restore_selection(path, backup):
     return ((RESTORE_FILE, authorization),)
 
 
+def retention_selection(path, backup):
+    if path is None:
+        return ()
+    policy = path.read_bytes()
+    number = r"([1-9][0-9]{0,19})"
+    uuid = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+    selected = re.fullmatch(
+        rf"FVCA-LOCAL-RETENTION-1\nrepository=([0-9a-f]{{64}})\nkeep_min={number}\nkeep_max={number}\n"
+        rf"max_age_seconds={number}\nmin_data_bytes={number}\nmin_metadata_bytes={number}\n((?:protect={uuid}\n)*)",
+        policy.decode("ascii"),
+    )
+    if selected is None or len(policy) > 8192 or backup[0][1].splitlines()[-1] != f"repository={selected[1]}".encode("ascii"):
+        raise ValueError("invalid local retention policy or repository scope")
+    keep_min, keep_max, *limits = map(int, selected.groups()[1:6])
+    protected = selected[7].splitlines()
+    if not 1 <= keep_min <= keep_max <= 4096 or max(limits) >= 2**64 or len(protected) != len(set(protected)):
+        raise ValueError("invalid local retention budgets or protected capture IDs")
+    return ((RETENTION_FILE, policy),)
+
+
 def assemble(args, work):
     storage, digests = storage_selection(args.storage) if args.storage is not None else (None, (None, None))
     tpm = digests[0] is not None
@@ -182,14 +203,15 @@ def assemble(args, work):
     runtime_hash = verify_runtime(args.runtime, args.runtime_certificate, prepared, runtime_work, vm_runtime)
     forbidden = tuple(f"usr/lib/fvca/{name}" for name in (
         "hypervisor.composition", "vm-runtime.p7s", "host-storage",
-        *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, *BACKUP_FILES, RESTORE_FILE,
+        *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, *BACKUP_FILES, RESTORE_FILE, RETENTION_FILE,
     ))
     verify_initrd(args.initrd, uname, ACTIVATION_FILES, forbidden, "Hypervisor")
     extra = (("host-storage", storage),) if storage is not None else ()
     backup = backup_selection(args)
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
-        extra=(*extra, *guest_selection(args, work), *backup, *restore_selection(args.restore_authorization, backup)),
+        extra=(*extra, *guest_selection(args, work), *backup, *restore_selection(args.restore_authorization, backup),
+               *retention_selection(args.retention_policy, backup)),
     )
     cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS))
     disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)
@@ -207,6 +229,7 @@ def main():
     parser.add_argument("--backup-policy", type=Path, help="S3 destination and repository ID to authorize in this UKI")
     parser.add_argument("--backup-ca", type=Path, help="PEM trust bundle for the selected S3 endpoint")
     parser.add_argument("--restore-authorization", type=Path, help="exact S3 recovery set to authorize in a recovery UKI")
+    parser.add_argument("--retention-policy", type=Path, help="authorize local capture expiry against the selected repository")
     parser.add_argument("--pcr-key", type=Path, help="separate RSA private key for the initrd PCR policy")
     for member in ("a", "b"):
         parser.add_argument(f"--tpm-token-{member}", type=Path, help=f"exported LUKS2 token for member {member}")
@@ -223,6 +246,8 @@ def main():
         parser.error("VM backup requires an authorized Guest, destination policy, and endpoint CA")
     if args.restore_authorization is not None and args.backup_policy is None:
         parser.error("S3 recovery requires an authorized repository and Guest")
+    if args.retention_policy is not None and args.backup_policy is None:
+        parser.error("local capture expiry requires the authorized backup repository")
     try:
         with tempfile.TemporaryDirectory(prefix=".fvca-hypervisor-", dir=args.output.parent) as directory:
             assemble(args, Path(directory))

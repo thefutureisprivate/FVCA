@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 
 pub mod backup_policy;
 pub mod recovery;
+pub mod retention_policy;
 pub mod btrfs;
 pub mod direct_boot;
 pub mod guest_boot;

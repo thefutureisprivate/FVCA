@@ -1,0 +1,15 @@
+[Unit]
+Description=List registered FVCA Guest capture records
+AssertPathIsMountPoint=/run/fvca/host-data
+AssertSecurity=selinux
+AssertSecurity=uefi-secureboot
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/libexec/fvca/launch-guest --capture-list
+TimeoutStartSec=60s
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+StandardOutput=journal+console
+StandardError=journal+console

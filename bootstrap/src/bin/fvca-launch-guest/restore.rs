@@ -1,5 +1,6 @@
 //! Cold-restore the registered Guest with a durable, reversible slot exchange.
 
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -15,7 +16,7 @@ use super::{Consistency, GUEST_UNIT, Store, attached_disk, backup, btrfs, comple
 use crate::{ALIAS, CAPTURE_LOCK, OPERATION_LOCK, PID, UUID, VM_DIRECTORY, verified_definition};
 
 const RESTORES: &str = "/run/fvca/host-data/captures/restores";
-const RESTORE_LOCK: &str = "/run/fvca/guest-restore.lock";
+pub(super) const RESTORE_LOCK: &str = "/run/fvca/guest-restore.lock";
 const DOWNLOADS: &str = "/run/fvca/host-data/captures/restore-downloads";
 const VM_PARENT: &str = "/run/fvca/host-data/vms";
 const HEADER: &str = "FVCA-GUEST-RESTORE-1";
@@ -107,6 +108,46 @@ pub(crate) fn require_idle() -> io::Result<()> {
     Ok(())
 }
 
+pub(super) fn pinned_captures() -> io::Result<BTreeSet<String>> {
+    let base = Path::new(RESTORES);
+    let entries = match fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) => return Err(error),
+    };
+    private_directory(base)?;
+    let mut captures = BTreeSet::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let id = name.to_str().ok_or_else(|| invalid("unexpected restore journal name"))?;
+        if id == ".active.tmp" {
+            // An interrupted publish may leave the staging file. The restore
+            // journal already pins its source before publishing the lease.
+            continue;
+        }
+        uuid(id)?;
+        let dir = entry.path();
+        private_directory(&dir)?;
+        if dir.join("s3-authorization").try_exists()? || dir.join("verified").try_exists()?
+            || dir.join("rolled-back").try_exists()?
+        {
+            continue;
+        }
+        let source_pin = dir.join("source-pin");
+        if source_pin.try_exists()? {
+            let text = read_record(&dir.join("request"))?;
+            let key = text.strip_suffix('\n').ok_or_else(|| invalid("invalid pinned restore request"))?;
+            let request = Request::parse(key)?;
+            if request.id != id || read_record(&source_pin)? != text {
+                return Err(invalid("invalid local restore source pin"));
+            }
+            captures.insert(request.capture.to_owned());
+        }
+    }
+    Ok(captures)
+}
+
 fn authorization() -> io::Result<Option<String>> {
     match fs::read_to_string(recovery::AUTHORIZATION) {
         Ok(text) => Ok(Some(text)),
@@ -164,8 +205,10 @@ fn current_bundle() -> io::Result<String> {
 
 fn stage_local(request: &Request<'_>, dir: &Path, bundle: &str) -> io::Result<()> {
     let mut store = Store::open(request.capture, Consistency::CleanStopped)?;
+    store.require_available()?;
     private_directory(&store.path)?;
     let _pin = lease(&store.path.join("lock"))?;
+    publish(dir, "source-pin", &format!("{}\n", request.key))?;
     let manifest = read_record(&store.path.join("manifest"))?;
     let plan = read_record(&store.path.join("plan"))?;
     if plan.lines().next() == Some(Consistency::Filesystem.header()) {

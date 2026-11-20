@@ -1,0 +1,8 @@
+[Unit]
+Description=Schedule authorized FVCA local capture retention
+ConditionPathExists=/run/fvca/vm-retention-policy
+
+[Timer]
+OnBootSec=15min
+OnUnitInactiveSec=1h
+RandomizedDelaySec=5min
