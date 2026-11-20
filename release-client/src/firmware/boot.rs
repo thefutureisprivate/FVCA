@@ -115,17 +115,7 @@ fn collect(pool: &File, boot_id: &str) -> Result<Evidence> {
     }
     fvca_btrfs_boundary::require_raid1_profiles(pool)?;
     let mirror_members = mirror_members(Path::new("/sys/fs/btrfs"), &filesystem)?;
-    if state::read(Path::new("/sys/fs/selinux/enforce"), 2)? != b"1"
-        || state::read(
-            Path::new("/sys/module/dm_verity/parameters/require_signatures"),
-            2,
-        )? != b"Y\n"
-    {
-        return Err(invalid(
-            "firmware recovery requires enforcing SELinux and signed verity roots",
-        )
-        .into());
-    }
+    require_enforced_boot()?;
     let boot_entry = capsule::verify_ordinary_boot()?;
     Ok(Evidence::Observed(Box::new(Observation {
         boot_entry,
@@ -143,6 +133,21 @@ fn collect(pool: &File, boot_id: &str) -> Result<Evidence> {
         storage_error_free: mirror_members.iter().all(MirrorMember::error_free),
         mirror_members,
     })))
+}
+
+pub(super) fn require_enforced_boot() -> Result<()> {
+    if state::read(Path::new("/sys/fs/selinux/enforce"), 2)? != b"1"
+        || state::read(
+            Path::new("/sys/module/dm_verity/parameters/require_signatures"),
+            2,
+        )? != b"Y\n"
+    {
+        return Err(invalid(
+            "firmware operation requires enforcing SELinux and signed verity roots",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn counter(text: &str) -> Result<u64> {

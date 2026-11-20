@@ -13,7 +13,7 @@ use rustix::thread::{
     no_new_privs, remove_capability_from_bounding_set, set_capabilities, unshare_unsafe,
 };
 
-use super::{activation::Activation, boot_id, capsule, enrolled_host};
+use super::{activation::Activation, boot, boot_id, capsule, enrolled_host};
 use crate::{Result, handoff, invalid, state};
 
 const SETUP: CapabilitySet = CapabilitySet::SYS_ADMIN.union(CapabilitySet::SETPCAP);
@@ -23,6 +23,7 @@ pub(crate) fn serve() -> Result<()> {
     let notify = std::env::var_os("NOTIFY_SOCKET")
         .ok_or_else(|| invalid("firmware writer requires its supervised service"))?;
     require_setup_privileges()?;
+    boot::require_enforced_boot()?;
     let (boot, _, pool) = enrolled_host()?;
     match handoff::install_lease()?.try_lock() {
         Err(TryLockError::WouldBlock) => (),
