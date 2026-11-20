@@ -69,10 +69,12 @@ fn activate() -> io::Result<()> {
         recovering,
         epoch,
     )?;
-    if let Err(error) =
-        hypervisor_trial::arm_if_authorized(esp, guest.as_deref(), &verified_runtime, epoch)
-    {
-        eprintln!("FVCA_TRIAL_REFUSED {error}");
+    match hypervisor_trial::arm_if_authorized(esp, guest.as_deref(), &verified_runtime, epoch) {
+        Ok(hypervisor_trial::ArmOutcome::RebootIntoTrial) => {
+            return hypervisor_trial::reboot_into_trial();
+        }
+        Ok(hypervisor_trial::ArmOutcome::ContinueBoot) => (),
+        Err(error) => eprintln!("FVCA_TRIAL_REFUSED {error}"),
     }
 
     println!("FVCA_VM_RUNTIME_ACTIVE {}", verified_runtime.extension);

@@ -174,7 +174,7 @@ EPOCH_ARGUMENT = "fvca.hypervisor_epoch"
 PROMOTION_KEY = "hypervisor-promotion-key"
 PROMOTION_SUPPORT = "hypervisor-promotion-support-v2"
 STANDING_TRIAL_KEY = "hypervisor-trial-key"
-STANDING_TRIAL_SUPPORT = "hypervisor-standing-trial-support-v2"
+STANDING_TRIAL_SUPPORT = "hypervisor-standing-trial-support-v3"
 TRIAL_KEY_ARGUMENT = "fvca.trial_key"
 
 
@@ -298,7 +298,7 @@ def assemble(args, work):
                      "usr/lib/fvca/verify-boot-approval")
     if args.boot_trial_public_key is not None:
         required += (f"usr/lib/fvca/{STANDING_TRIAL_SUPPORT}", "usr/lib/fvca/set-boot-next",
-                     "usr/lib/fvca/verify-boot-approval")
+                     "usr/lib/fvca/verify-boot-approval", "usr/bin/systemctl")
     if args.boot_trial_candidate is not None:
         recorder = runtime_work / "tree" / vm_runtime.TRIAL_HEALTH
         if recorder.is_symlink() or not recorder.is_file() or recorder.stat().st_mode & 0o111 == 0:

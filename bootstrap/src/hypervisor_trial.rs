@@ -22,6 +22,7 @@ const CANDIDATE: &str = "/usr/lib/fvca/hypervisor-trial-candidate";
 const CANDIDATE_ARGUMENT: &str = "fvca.hypervisor_trial";
 const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 const STARTED: &str = "/run/fvca/boot-trial-started";
+const REBOOT_PENDING: &str = "/run/fvca/trial-reboot-pending";
 const HOST_DATA: &str = "/run/fvca/host-data";
 const EFI: &str = "/sys/firmware/efi/efivars";
 const EFI_GLOBAL: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
@@ -48,6 +49,23 @@ struct Evidence<'a> {
     core: &'a str,
     guest: &'a str,
     runtime: &'a str,
+}
+
+pub enum ArmOutcome {
+    ContinueBoot,
+    RebootIntoTrial,
+}
+
+pub fn reboot_into_trial() -> io::Result<()> {
+    // The switch-root unit checks this marker while systemd processes the shutdown transaction.
+    publish(Path::new(REBOOT_PENDING), b"")?;
+    println!("FVCA_TRIAL_REBOOT_REQUESTED");
+    crate::run(Command::new("/usr/bin/systemctl").args([
+        "--no-block",
+        "--job-mode=replace-irreversibly",
+        "start",
+        "reboot.target",
+    ]))
 }
 
 pub fn verify_standing_key(cmdline: &str) -> io::Result<()> {
@@ -427,7 +445,7 @@ pub fn arm_if_authorized(
     guest: Option<&str>,
     active: &runtime::Activation,
     epoch: Option<&str>,
-) -> io::Result<()> {
+) -> io::Result<ArmOutcome> {
     let dynamic = Path::new(TRIAL_KEY).try_exists()?;
     let directory;
     let raw = if dynamic {
@@ -443,12 +461,16 @@ pub fn arm_if_authorized(
         }
         directory = record_directory()?;
         match read_record(&directory.join(PENDING)) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(ArmOutcome::ContinueBoot);
+            }
             result => result?,
         }
     } else {
         match read(Path::new(AUTHORIZATION), 1024) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(ArmOutcome::ContinueBoot);
+            }
             result => result?,
         }
     };
@@ -461,7 +483,7 @@ pub fn arm_if_authorized(
     let trial = &approved.trial;
     if let Some(standing) = &standing {
         if current_esp == Some(trial.candidate.esp) {
-            return Ok(());
+            return Ok(ArmOutcome::ContinueBoot);
         }
         standing::require_stable(standing, active, guest, epoch)?;
     } else if guest != Some(approved.guest) {
@@ -478,7 +500,7 @@ pub fn arm_if_authorized(
     let order = boot_order()?;
     if order.get(..2) == Some(&[trial.candidate.id, trial.stable.id]) {
         println!("FVCA_PROMOTION_STABLE_RECOVERY {}", trial.transaction);
-        return Ok(());
+        return Ok(ArmOutcome::ContinueBoot);
     }
     if order.first() != Some(&trial.stable.id)
         || (dynamic && order.get(1) != Some(&trial.candidate.id))
@@ -502,7 +524,7 @@ pub fn arm_if_authorized(
                     &order,
                 )?;
             }
-            return Ok(());
+            return Ok(ArmOutcome::ContinueBoot);
         }
         Ok(_) => {
             return Err(invalid(
@@ -538,7 +560,11 @@ pub fn arm_if_authorized(
         "FVCA_TRIAL_ARMED {} {:04x}",
         trial.transaction, trial.candidate.id
     );
-    Ok(())
+    if dynamic {
+        Ok(ArmOutcome::RebootIntoTrial)
+    } else {
+        Ok(ArmOutcome::ContinueBoot)
+    }
 }
 
 fn boot_id() -> io::Result<String> {

@@ -43,7 +43,7 @@ def image(path):
 
 def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, extra_cmdline=False,
          attach_runtime=True, timeout=80, direct_cmdline=None, attach_guest=True, ready_marker=READY,
-         firmware_timeout=None):
+         firmware_timeout=None, allow_reboot=False):
     cpu = "host,vmx=off" if args.guest else "host"
     machine = "q35,smm=on"
     devices = []
@@ -87,8 +87,10 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
             "-device", f"virtio-blk-pci,drive={drive},serial={drive}",
         ]
     command += [
-        "-display", "none", "-serial", "stdio", "-monitor", "none", "-nic", "none", "-no-reboot",
+        "-display", "none", "-serial", "stdio", "-monitor", "none", "-nic", "none",
     ]
+    if not allow_reboot:
+        command.append("-no-reboot")
     if args.runtime is not None and attach_runtime:
         companion = "nvme,drive=fvca-runtime,serial=fvca-slot-2" if nvme else "virtio-blk-pci,drive=fvca-runtime"
         command += [

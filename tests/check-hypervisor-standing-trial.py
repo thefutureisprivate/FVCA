@@ -140,13 +140,14 @@ def qualify(args):
                 entry = trial["Edk2VarStore"](variables).get_varlist().get("BootNext")
                 return entry.data if entry is not None else None
 
-            def boot(phase, marker):
+            def boot(phase, marker, *, allow_reboot=False):
                 before = override()
                 for retry in range(1, 4):
                     with storage["software_tpm"](args.tpm_state) as socket:
                         prompts, log = storage["boot"](options, f"{phase}-{retry}", None, *members,
                                                         firmware=args.firmware, tpm_socket=socket,
-                                                        firmware_timeout=35, timeout=115, ready_marker=marker)
+                                                        firmware_timeout=35, timeout=115, ready_marker=marker,
+                                                        allow_reboot=allow_reboot)
                     if b"Kernel command line:" in log or override() != before:
                         break
                 log = storage["rejoin_serial_output"](log)
@@ -158,17 +159,34 @@ def qualify(args):
                 return log
 
             armed = f"FVCA_TRIAL_ARMED {tx}".encode()
+            reboot_requested = b"FVCA_TRIAL_REBOOT_REQUESTED"
             if refusal is not None:
                 log = boot("stable-refusal", b"FVCA_TRIAL_REFUSED " + refusal)
-                assert armed not in log and override() is None
+                assert armed not in log and reboot_requested not in log and override() is None
             else:
-                boot("stable-arming", armed)
-                assert override() == struct.pack("<H", trial["CANDIDATE"])
-                log = boot("candidate-healthy", f"FVCA_TRIAL_HEALTH_RECORDED {tx}".encode())
-                assert b"FVCA_HYPERVISOR_EPOCH_ACCEPTED 2 1" in log and b"FVCA_SERVICE_GUEST_READY" in log
+                healthy = f"FVCA_TRIAL_HEALTH_RECORDED {tx}".encode()
+                log = boot("automatic-trial", healthy, allow_reboot=True)
+                stable_log, reset, candidate_log = log.partition(b"reboot: Restarting system")
+                assert reset and reset not in candidate_log, output
+                for boot_log, markers in (
+                    (stable_log, (b"FVCA_HYPERVISOR_EPOCH_ACCEPTED 1 1", armed + b" 000b", reboot_requested)),
+                    (candidate_log, (b"FVCA_HYPERVISOR_EPOCH_ACCEPTED 2 1",
+                                     f"FVCA_TRIAL_CANDIDATE_STARTED {tx}".encode(),
+                                     b"FVCA_SERVICE_GUEST_READY", healthy)),
+                ):
+                    assert all(marker in boot_log for marker in (b"secureboot: Secure boot enabled",
+                                                                 b"FVCA_SELINUX_ENFORCING",
+                                                                 b"FVCA_HOST_STORAGE_UNLOCK_PROFILE tpm2-auto"))
+                    position = 0
+                    for marker in markers:
+                        offset = boot_log.find(marker, position)
+                        assert offset >= 0, (output, marker)
+                        position = offset + len(marker)
+                assert all(marker not in stable_log for marker in (b"FVCA_VM_RUNTIME_ACTIVE", b"FVCA_DEV_BASE_READY",
+                                                                   b"FVCA_SERVICE_GUEST_READY"))
                 assert override() is None
                 log = boot("stable-replay", f"FVCA_TRIAL_HEALTH_AVAILABLE {tx}".encode())
-                assert armed not in log and override() is None
+                assert armed not in log and reboot_requested not in log and override() is None
         print(f"{label} passed", flush=True)
 
 
