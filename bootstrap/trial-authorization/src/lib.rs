@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::io;
 
 pub const APPROVAL_LIMIT: usize = 2048;
@@ -14,7 +15,9 @@ pub const PEER_ENROLLMENT: &str = "os-update-peer";
 pub const PEER_BYTES: usize = PEER_PARTITIONS * 37;
 pub const PROMOTION_ENROLLMENT: &str = "/run/fvca/os-update-promotion-key";
 pub const PROMOTED_RELEASE: &str = "/run/fvca/promoted-os-release";
-pub const STANDING_PROMOTION: &str = "FVCA-HYPERVISOR-STANDING-PROMOTION-1";
+pub const STANDING_TRIAL: &str = "FVCA-HYPERVISOR-STANDING-TRIAL-2";
+pub const STANDING_PROMOTION: &str = "FVCA-HYPERVISOR-STANDING-PROMOTION-2";
+pub const WATCHDOG_ARGUMENT: &str = "fvca.trial_watchdog_seconds";
 
 pub struct Promotion<'a> {
     pub trial_body: &'a str,
@@ -24,9 +27,6 @@ pub struct Promotion<'a> {
     pub candidate_sequence: u64,
     pub stable_manifest: &'a str,
     pub candidate_manifest: &'a str,
-    pub candidate_uki: &'a str,
-    pub candidate_uki_bytes: u64,
-    pub payloads: [[&'a str; 2]; 3],
 }
 
 impl Promotion<'_> {
@@ -35,7 +35,7 @@ impl Promotion<'_> {
             return Err(invalid("standing promotion exceeds its size bound"));
         }
         let (header, trial_body) = body.split_at(
-            body.find("FVCA-HYPERVISOR-STANDING-TRIAL-1\n")
+            body.find(STANDING_TRIAL)
                 .ok_or_else(|| invalid("standing promotion is missing its trial"))?,
         );
         let fields: Vec<_> = header.split('\n').collect();
@@ -46,11 +46,6 @@ impl Promotion<'_> {
             candidate_sequence,
             stable_manifest,
             candidate_manifest,
-            uki,
-            uki_bytes,
-            core,
-            runtime,
-            guest,
             "",
         ] = fields.as_slice()
         else {
@@ -69,25 +64,6 @@ impl Promotion<'_> {
                 "standing promotion must advance the active release",
             ));
         }
-        let candidate_uki = digest(uki, "candidate_uki_sha256=")?;
-        let candidate_uki_bytes = number(uki_bytes, "candidate_uki_bytes=")?;
-        if candidate_uki_bytes > 256 * 1024 * 1024 {
-            return Err(invalid(
-                "standing promotion candidate UKI exceeds its size bound",
-            ));
-        }
-        let mut payloads = [[""; 2]; 3];
-        for (output, (line, field)) in payloads.iter_mut().zip([
-            (core, "candidate_core_devices="),
-            (runtime, "candidate_runtime_devices="),
-            (guest, "candidate_guest_devices="),
-        ]) {
-            let (data, tree) = line
-                .strip_prefix(field)
-                .and_then(|x| x.split_once(','))
-                .ok_or_else(|| invalid("standing promotion is missing candidate partition IDs"))?;
-            *output = [uuid(data)?, uuid(tree)?];
-        }
         Ok(Promotion {
             trial_body,
             trial: Standing::parse(trial_body)?,
@@ -96,9 +72,6 @@ impl Promotion<'_> {
             candidate_sequence,
             stable_manifest,
             candidate_manifest,
-            candidate_uki,
-            candidate_uki_bytes,
-            payloads,
         })
     }
 
@@ -177,6 +150,9 @@ pub struct Standing<'a> {
     pub stable_epoch: u64,
     pub candidate_epoch: u64,
     pub epoch_policy: &'a str,
+    pub candidate_uki: &'a str,
+    pub candidate_uki_bytes: u64,
+    pub payloads: [[&'a str; 2]; 3],
     not_before: u64,
     expires: u64,
 }
@@ -216,6 +192,14 @@ fn number(field: &str, prefix: &str) -> io::Result<u64> {
         .filter(|value| !value.starts_with('0') && value.bytes().all(|byte| byte.is_ascii_digit()))
         .and_then(|value| value.parse().ok())
         .ok_or_else(|| invalid("invalid trial number"))
+}
+
+pub fn watchdog_seconds(value: &str) -> io::Result<i32> {
+    number(value, "")
+        .ok()
+        .filter(|value| (10..=300).contains(value))
+        .map(|value| value as i32)
+        .ok_or_else(|| invalid("trial watchdog deadline must be between 10 and 300 seconds"))
 }
 
 fn entry<'a>(line: &'a str, field: &str) -> io::Result<Entry<'a>> {
@@ -313,7 +297,7 @@ impl Standing<'_> {
         );
         let fields: Vec<_> = header.split('\n').collect();
         let [
-            "FVCA-HYPERVISOR-STANDING-TRIAL-1",
+            STANDING_TRIAL,
             from,
             until,
             stable_epoch,
@@ -322,6 +306,11 @@ impl Standing<'_> {
             core,
             runtime,
             guest,
+            uki,
+            uki_bytes,
+            core_devices,
+            runtime_devices,
+            guest_devices,
             "",
         ] = fields.as_slice()
         else {
@@ -340,9 +329,37 @@ impl Standing<'_> {
                 "standing trial exceeds its validity or epoch bounds",
             ));
         }
+        let authorization = authorization(attempt)?;
+        let candidate_uki_bytes = number(uki_bytes, "candidate_uki_bytes=")?;
+        if candidate_uki_bytes > authorization.bytes.min(256 * 1024 * 1024) {
+            return Err(invalid(
+                "standing trial candidate UKI exceeds its size bound",
+            ));
+        }
+        let mut used = BTreeSet::from([
+            authorization.trial.candidate.esp,
+            "00000000-0000-0000-0000-000000000000",
+        ]);
+        let mut payloads = [[""; 2]; 3];
+        for (pair, (line, field)) in payloads.iter_mut().zip([
+            (core_devices, "candidate_core_devices="),
+            (runtime_devices, "candidate_runtime_devices="),
+            (guest_devices, "candidate_guest_devices="),
+        ]) {
+            let (data, tree) = line
+                .strip_prefix(field)
+                .and_then(|value| value.split_once(','))
+                .ok_or_else(|| invalid("standing trial is missing candidate partition IDs"))?;
+            *pair = [uuid(data)?, uuid(tree)?];
+            if !used.insert(pair[0]) || !used.insert(pair[1]) {
+                return Err(invalid(
+                    "standing trial requires distinct nonzero candidate partition IDs",
+                ));
+            }
+        }
         Ok(Standing {
             attempt,
-            authorization: authorization(attempt)?,
+            authorization,
             stable_roots: [
                 digest(core, "stable_core=")?,
                 digest(runtime, "stable_runtime=")?,
@@ -351,6 +368,9 @@ impl Standing<'_> {
             stable_epoch,
             candidate_epoch,
             epoch_policy: digest(epoch_policy, "epoch_policy_sha256=")?,
+            candidate_uki: digest(uki, "candidate_uki_sha256=")?,
+            candidate_uki_bytes,
+            payloads,
             not_before,
             expires,
         })
@@ -378,9 +398,13 @@ mod tests {
         let other = "22222222-2222-4222-8222-222222222222";
         let trial = format!(
             concat!(
-                "FVCA-HYPERVISOR-STANDING-TRIAL-1\nnot_before=10\nexpires=300\n",
+                "FVCA-HYPERVISOR-STANDING-TRIAL-2\nnot_before=10\nexpires=300\n",
                 "stable_epoch=1\ncandidate_epoch=2\nepoch_policy_sha256={0}\n",
                 "stable_core={0}\nstable_runtime={0}\nstable_guest_bundle={0}\n",
+                "candidate_uki_sha256={3}\ncandidate_uki_bytes=2048\n",
+                "candidate_core_devices=11111111-1111-4111-8111-111111111112,11111111-1111-4111-8111-111111111113\n",
+                "candidate_runtime_devices=11111111-1111-4111-8111-111111111114,11111111-1111-4111-8111-111111111115\n",
+                "candidate_guest_devices=11111111-1111-4111-8111-111111111116,11111111-1111-4111-8111-111111111117\n",
                 "FVCA-HYPERVISOR-TRIAL-2\ntransaction=33333333-3333-4333-8333-333333333333\n",
                 "stable=000a,{1}\ncandidate=000b,{2}\ncandidate_esp_sha256={3}\n",
                 "candidate_esp_bytes=4096\ncandidate_core={3}\ncandidate_runtime={3}\nguest_bundle={3}\n",
@@ -389,15 +413,24 @@ mod tests {
         );
         let body = format!(
             "{STANDING_PROMOTION}\nstable_slot=a\nstable_sequence=3\ncandidate_sequence=4\n\
-             stable_manifest_sha256={prior}\ncandidate_manifest_sha256={candidate}\n\
-             candidate_uki_sha256={candidate}\ncandidate_uki_bytes=16384\n\
-             candidate_core_devices=11111111-1111-4111-8111-111111111112,11111111-1111-4111-8111-111111111113\n\
-             candidate_runtime_devices=11111111-1111-4111-8111-111111111114,11111111-1111-4111-8111-111111111115\n\
-             candidate_guest_devices=11111111-1111-4111-8111-111111111116,11111111-1111-4111-8111-111111111117\n{trial}",
+             stable_manifest_sha256={prior}\ncandidate_manifest_sha256={candidate}\n{trial}",
         );
         let approval = Promotion::parse(&body)?;
         assert_eq!(approval.candidate_manifest, candidate);
         assert_eq!(approval.candidate_sequence, 4);
+        assert_eq!(approval.trial.candidate_uki, candidate);
+        assert_eq!(approval.trial.candidate_uki_bytes, 2048);
+        assert!(
+            Standing::parse(&trial.replace("candidate_uki_bytes=2048", "candidate_uki_bytes=8192"))
+                .is_err()
+        );
+        assert!(
+            Standing::parse(&trial.replace(
+                "11111111-1111-4111-8111-111111111117",
+                "11111111-1111-4111-8111-111111111112"
+            ))
+            .is_err()
+        );
         let mut envelope = vec![0; 64];
         envelope.extend_from_slice(trial.as_bytes());
         approval.matches_trial(&envelope)?;

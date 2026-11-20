@@ -22,6 +22,7 @@ HERE = Path(__file__).parent
 tuf = runpy.run_path(HERE / "check-release-intake.py")
 gpt = runpy.run_path(HERE / "check-hypervisor-gpt-install.py")
 channel = runpy.run_path(HERE / "check-release-channel.py")
+standing = runpy.run_path(HERE / "check-hypervisor-standing-trial.py")
 
 ACTIVATION_PROBE = Path("/run/fvca/test-activation")
 TEST_SYSTEMCTL = b"""#!/bin/bash
@@ -61,14 +62,14 @@ def trial_target(root, original, candidate, key, stamp):
     trial_record = (original / "candidate.txt").read_text().splitlines()
     transaction = trial_record[1].removeprefix("transaction=")
     assert len(trial_record) == 4
-    esp = gpt["partitions"](trial)["fvca-esp"]
+    binding, esp = standing["candidate_fields"](trial)
     payload = root / "trial-message"
     payload.write_text(
-        f"FVCA-HYPERVISOR-STANDING-TRIAL-1\nnot_before={stamp-30}\nexpires={stamp+1800}\n"
+        f"FVCA-HYPERVISOR-STANDING-TRIAL-2\nnot_before={stamp-30}\nexpires={stamp+1800}\n"
         f"stable_epoch=1\ncandidate_epoch=2\nepoch_policy_sha256={epoch_policy}\n"
         f"stable_core={roots['core']}\nstable_runtime={roots['runtime']}\nstable_guest_bundle={roots['guest']}\n"
-        "FVCA-HYPERVISOR-TRIAL-2\n" + "\n".join(trial_record[1:]) + "\n"
-        f"candidate_esp_sha256={gpt['digest'](trial, esp).hex()}\ncandidate_esp_bytes={esp[1]}\n"
+        f"{binding}FVCA-HYPERVISOR-TRIAL-2\n" + "\n".join(trial_record[1:]) + "\n"
+        f"{esp}"
         f"candidate_core={roots['core']}\ncandidate_runtime={roots['runtime']}\nguest_bundle={roots['guest']}\n",
         encoding="ascii",
     )

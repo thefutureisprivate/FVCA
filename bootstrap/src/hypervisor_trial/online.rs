@@ -7,7 +7,7 @@ use fvca_trial_authorization::Standing;
 
 use super::{
     PENDING, RUNNING_CONTEXT, boot_next, boot_order, gpt_device, read_record, selected, standing,
-    verify_candidate_esp,
+    verify_candidate_esp, watchdog,
 };
 use crate::invalid;
 
@@ -74,5 +74,5 @@ fn check_pending(directory: &Path, approval: &Standing<'_>) -> io::Result<()> {
             "firmware does not select the approved stable slot without an override",
         ));
     }
-    Ok(())
+    watchdog::require_idle()
 }

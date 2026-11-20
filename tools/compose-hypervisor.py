@@ -192,6 +192,7 @@ def retention_selection(path, backup):
 TRIAL_FILE = "hypervisor-trial"
 TRIAL_CANDIDATE_FILE = "hypervisor-trial-candidate"
 TRIAL_WATCHDOG_FILE = "hypervisor-trial-watchdog"
+TRIAL_WATCHDOG_ARGUMENT = "fvca.trial_watchdog_seconds"
 TRIAL_SUPPORT = "hypervisor-trial-support-v3"
 TRIAL_ARGUMENT = "fvca.hypervisor_trial"
 EPOCH_FILE = "hypervisor-epoch"
@@ -199,7 +200,7 @@ EPOCH_ARGUMENT = "fvca.hypervisor_epoch"
 PROMOTION_KEY = "hypervisor-promotion-key"
 PROMOTION_SUPPORT = "hypervisor-promotion-support-v2"
 STANDING_TRIAL_KEY = "hypervisor-trial-key"
-STANDING_TRIAL_SUPPORT = "hypervisor-standing-trial-support-v4"
+STANDING_TRIAL_SUPPORT = "hypervisor-standing-trial-support-v5"
 TRIAL_KEY_ARGUMENT = "fvca.trial_key"
 
 
@@ -333,6 +334,7 @@ def assemble(args, work):
         if recorder.is_symlink() or not recorder.is_file() or recorder.stat().st_mode & 0o111 == 0:
             raise ValueError("the candidate VM runtime lacks its trial health recorder")
     watchdog = ()
+    watchdog_arguments = ()
     if args.boot_trial_watchdog_seconds is not None:
         marker = runtime_work / "tree" / vm_runtime.TRIAL_HEALTH_WATCHDOG
         if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
@@ -340,6 +342,7 @@ def assemble(args, work):
         required += ("usr/lib/fvca/hypervisor-trial-watchdog-v1",)
         deadline = f"FVCA-HYPERVISOR-TRIAL-WATCHDOG-1\nseconds={args.boot_trial_watchdog_seconds}\n"
         watchdog = ((TRIAL_WATCHDOG_FILE, deadline.encode("ascii")),)
+        watchdog_arguments = (f"{TRIAL_WATCHDOG_ARGUMENT}={args.boot_trial_watchdog_seconds}",)
     verify_initrd(args.initrd, uname, required, forbidden, "Hypervisor")
     extra = (("host-storage", storage.raw),) if storage is not None else ()
     ids = None
@@ -362,9 +365,11 @@ def assemble(args, work):
                *stable_trial, *candidate_trial, *watchdog,
                *authorities, *update_selection(args, authorities)),
     )
-    if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT) for arg in cmdline.split()):
+    if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT, TRIAL_WATCHDOG_ARGUMENT)
+           for arg in cmdline.split()):
         raise ValueError("shared core already configures a Hypervisor epoch or trial")
-    cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments, *trial_key_arguments))
+    cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments,
+                        *trial_key_arguments, *watchdog_arguments))
     immutable = None
     if ids is None:
         disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)
@@ -455,6 +460,9 @@ def main():
         or not 10 <= args.boot_trial_watchdog_seconds <= 300
     ):
         parser.error("the i6300ESB watchdog requires a standing candidate and a deadline of 10–300 seconds")
+    if (args.boot_trial_candidate is not None and args.boot_trial_public_key is not None
+            and args.boot_trial_watchdog_seconds is None):
+        parser.error("a standing trial candidate requires a qualified watchdog deadline")
     if args.boot_trial_public_key is not None and (
         args.epoch_policy is None or args.boot_trial is not None or args.restore_authorization is not None
     ):

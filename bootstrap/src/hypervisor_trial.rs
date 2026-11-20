@@ -14,6 +14,7 @@ use fvca_trial_authorization::{
 
 use crate::{find_partition, identity, invalid, recovery, runtime, sys_block};
 
+mod attempts;
 mod promotion;
 mod standing;
 mod standing_promotion;
@@ -418,22 +419,6 @@ fn verify_candidate_esp(approved: &Authorization<'_>) -> io::Result<()> {
     Ok(())
 }
 
-fn verify_arming(directory: &Path, id: &str, attempt: &[u8]) -> io::Result<()> {
-    let armed = read_record(&directory.join(format!("{id}.armed"))).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            invalid("candidate trial has no verified firmware arming record")
-        } else {
-            error
-        }
-    })?;
-    if armed != attempt {
-        return Err(invalid(
-            "firmware arming differs from the recorded trial authorization",
-        ));
-    }
-    Ok(())
-}
-
 fn approved_evidence<'a>(
     approved: &Authorization<'_>,
     receipt: &'a [u8],
@@ -456,16 +441,16 @@ fn approved_evidence<'a>(
 fn prior_health(
     directory: &Path,
     approved: &Authorization<'_>,
-    attempt: &[u8],
+    attempt: attempts::Attempt,
 ) -> io::Result<Option<Vec<u8>>> {
     let id = approved.trial.transaction;
     let receipt = match read_record(&directory.join(format!("{id}.healthy"))) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         prior => prior?,
     };
-    verify_arming(directory, id, attempt)?;
+    attempt.require_armed(directory, id)?;
     let evidence = approved_evidence(approved, &receipt)?;
-    if read_record(&directory.join(format!("{id}.started")))? != receipt {
+    if read_record(&attempt.path(directory, id, ".started"))? != receipt {
         return Err(invalid(
             "recorded candidate health does not match the authorized attempt",
         ));
@@ -547,58 +532,90 @@ pub fn arm_if_authorized(
         ));
     }
     let directory = record_directory()?;
-    let record = directory.join(trial.transaction);
-    match read_record(&record) {
+    let tx = trial.transaction;
+    let record = directory.join(tx);
+    let previously_recorded = match read_record(&record) {
         Ok(prior) if prior == raw => {
-            println!("FVCA_TRIAL_PREVIOUSLY_RECORDED {}", trial.transaction);
-            if let Some(health) = prior_health(&directory, &approved, &raw)? {
-                if dynamic && standing_promotion::commit(&directory, &raw, &health, &order)? {
-                    return Ok(ArmOutcome::RebootIntoTrial);
-                }
-                promotion::apply(
-                    &directory,
-                    &approved,
-                    text.as_bytes(),
-                    &health,
-                    active,
-                    &order,
-                )?;
-            }
-            return Ok(ArmOutcome::ContinueBoot);
+            println!("FVCA_TRIAL_PREVIOUSLY_RECORDED {tx}");
+            true
         }
         Ok(_) => {
             return Err(invalid(
                 "the trial transaction already has different contents",
             ));
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
         Err(error) => return Err(error),
+    };
+    let last = attempts::last(&directory, tx)?;
+    if last.0 != 0 && !previously_recorded {
+        return Err(invalid("orphaned durable trial attempt"));
+    }
+    if last.0 != 0 {
+        if boot_next()?.is_some() {
+            return Err(invalid("EFI BootNext already requests a boot"));
+        }
+        if !last.marked(&directory, tx, ".closed")? {
+            last.mark(&directory, tx, ".closed")?;
+        }
+        if let Some(health) = prior_health(&directory, &approved, last)? {
+            if dynamic && standing_promotion::commit(&directory, &raw, &health, &order)? {
+                return Ok(ArmOutcome::RebootIntoTrial);
+            }
+            promotion::apply(
+                &directory,
+                &approved,
+                text.as_bytes(),
+                &health,
+                active,
+                &order,
+            )?;
+            return Ok(ArmOutcome::ContinueBoot);
+        }
+    }
+    if !dynamic && previously_recorded {
+        return Ok(ArmOutcome::ContinueBoot);
+    }
+    if last.0 == attempts::LIMIT {
+        let pending = directory.join(PENDING);
+        if read_record(&pending)? == raw {
+            fs::remove_file(pending)?;
+            File::open(&directory)?.sync_all()?;
+        }
+        println!("FVCA_TRIAL_ATTEMPTS_EXHAUSTED {tx} {}", last.0);
+        return Ok(ArmOutcome::ContinueBoot);
     }
     if boot_next()?.is_some() {
         return Err(invalid("EFI BootNext already requests a boot"));
     }
-    verify_candidate_esp(&approved)?;
-    if let Some(standing) = standing {
-        standing::require_fresh(&standing)?;
+    if let Some(standing) = &standing {
+        standing::require_fresh(standing)?;
+        watchdog::require_available()?;
+    }
+    if last.0 == 0 {
+        verify_candidate_esp(&approved)?;
+    }
+    if let Some(standing) = &standing {
+        standing::verify_candidate(standing)?;
+        standing::require_fresh(standing)?;
     }
 
     // Consume the signed authorization durably before asking firmware for the one-shot trial.
-    publish(&record, &raw).map_err(|error| {
-        io::Error::other(format!("cannot create the boot trial record: {error}"))
-    })?;
+    if !previously_recorded {
+        publish(&record, &raw)?;
+    }
+    let attempt = attempts::Attempt(last.0 + 1);
+    attempt.mark(&directory, tx, "")?;
     crate::run(Command::new("/usr/lib/fvca/set-boot-next").arg(trial.candidate.id.to_string()))?;
     if boot_next()? != Some(trial.candidate.id) {
         return Err(invalid(
             "firmware did not store the approved BootNext value",
         ));
     }
-    publish(
-        &directory.join(format!("{}.armed", trial.transaction)),
-        &raw,
-    )?;
+    attempt.mark(&directory, tx, ".armed")?;
     println!(
-        "FVCA_TRIAL_ARMED {} {:04x}",
-        trial.transaction, trial.candidate.id
+        "FVCA_TRIAL_ARMED {tx} {:04x} {}",
+        trial.candidate.id, attempt.0
     );
     if dynamic {
         Ok(ArmOutcome::RebootIntoTrial)
@@ -635,7 +652,28 @@ fn candidate<'a>(cmdline: &str, raw: &'a mut Vec<u8>) -> io::Result<Option<Trial
 }
 
 pub fn arm_candidate_watchdog(cmdline: &str) -> io::Result<()> {
-    let Some(seconds) = watchdog::policy()? else {
+    use fvca_trial_authorization::WATCHDOG_ARGUMENT;
+    let signed = watchdog::policy()?;
+    let mut markers = cmdline
+        .split_ascii_whitespace()
+        .filter(|arg| arg.split('=').next() == Some(WATCHDOG_ARGUMENT));
+    let marker = markers.next();
+    if marker
+        != signed
+            .map(|seconds| format!("{WATCHDOG_ARGUMENT}={seconds}"))
+            .as_deref()
+        || markers.next().is_some()
+    {
+        return Err(invalid(
+            "UKI watchdog marker differs from the signed watchdog policy",
+        ));
+    }
+    let Some(seconds) = signed else {
+        if Path::new(CANDIDATE).try_exists()? && Path::new(TRIAL_KEY).try_exists()? {
+            return Err(invalid(
+                "standing trial candidate requires a signed watchdog deadline",
+            ));
+        }
         return Ok(());
     };
     let mut raw = Vec::new();
@@ -708,13 +746,26 @@ pub fn start_candidate(
             error
         }
     })?;
-    verify_arming(&directory, trial.transaction, &attempt)?;
+    let number = attempts::last(&directory, trial.transaction)?;
+    number.require_armed(&directory, trial.transaction)?;
+    if number.marked(&directory, trial.transaction, ".closed")? {
+        return Err(invalid("candidate trial attempt is already closed"));
+    }
     let standing = Path::new(TRIAL_KEY)
         .try_exists()?
         .then(|| standing::verify(&attempt))
         .transpose()?;
     let text = match &standing {
         Some(standing) => {
+            if !standing
+                .payloads
+                .as_flattened()
+                .iter()
+                .copied()
+                .eq(slot.payload_ids.iter().map(String::as_str))
+            {
+                return Err(invalid("candidate payloads differ from the standing trial"));
+            }
             standing::require_epoch(standing, epoch, standing.candidate_epoch)?;
             standing::require_fresh(standing)?;
             standing.attempt
@@ -751,7 +802,7 @@ pub fn start_candidate(
         active.extension
     );
     publish(
-        &directory.join(format!("{}.started", trial.transaction)),
+        &number.path(&directory, trial.transaction, ".started"),
         record.as_bytes(),
     )
     .map_err(|error| {
@@ -837,7 +888,11 @@ pub fn record_health() -> io::Result<()> {
             .stdout(Stdio::null()),
     )?;
     let directory = record_directory()?;
-    if read_record(&directory.join(format!("{transaction}.started")))? != receipt {
+    let attempt = attempts::last(&directory, transaction)?;
+    attempt.require_armed(&directory, transaction)?;
+    if attempt.marked(&directory, transaction, ".closed")?
+        || read_record(&attempt.path(&directory, transaction, ".started"))? != receipt
+    {
         return Err(invalid(
             "durable candidate start differs from the current boot",
         ));

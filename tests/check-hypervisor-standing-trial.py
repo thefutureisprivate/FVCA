@@ -4,6 +4,7 @@
 import argparse
 import gzip
 import hashlib
+import json
 import os
 from pathlib import Path
 import runpy
@@ -98,6 +99,34 @@ def require_sequence(log, markers, output):
         assert offset >= 0, (output, marker)
         position = offset + len(marker)
 
+def candidate_fields(image):
+    table = json.loads(subprocess.check_output(["sfdisk", "--json", "--sector-size", "4096", image]))
+    parts = {part["name"]: part for part in table["partitiontable"]["partitions"]}
+    esp = parts["fvca-esp"]
+    offset, size = esp["start"] * 4096, esp["size"] * 4096
+    sha = hashlib.sha256()
+    with image.open("rb") as source:
+        source.seek(offset)
+        remaining = size
+        while remaining:
+            chunk = source.read(min(remaining, 1024 * 1024))
+            if not chunk:
+                raise ValueError("truncated candidate ESP")
+            sha.update(chunk)
+            remaining -= len(chunk)
+    with tempfile.TemporaryDirectory(prefix="fvca-trial-uki-") as directory:
+        loader = Path(directory) / "BOOTX64.EFI"
+        subprocess.run(["mcopy", "-i", f"{image}@@{offset}", "::/EFI/BOOT/BOOTX64.EFI", loader], check=True)
+        with loader.open("rb") as source:
+            uki = hashlib.file_digest(source, "sha256").hexdigest()
+        loader_size = loader.stat().st_size
+    bound = f"candidate_uki_sha256={uki}\ncandidate_uki_bytes={loader_size}\n"
+    for name in ("core", "runtime", "guest"):
+        data = parts[f"fvca-{name}"]["uuid"].lower()
+        tree = parts[f"fvca-{name}_verity"]["uuid"].lower()
+        bound += f"candidate_{name}_devices={data},{tree}\n"
+    return bound, f"candidate_esp_sha256={sha.hexdigest()}\ncandidate_esp_bytes={size}\n"
+
 
 def qualify(args):
     here = Path(__file__).parent
@@ -105,12 +134,7 @@ def qualify(args):
     storage = runpy.run_path(here / "check-storage.py")
     stable, candidate = (args.fixture / f"{name}.raw" for name in ("stable", "candidate"))
     first, second = trial["esp"](stable), trial["esp"](candidate)
-    size = second[1]["size"] * 4096
-    sha = hashlib.sha256()
-    with candidate.open("rb") as disk:
-        disk.seek(second[1]["start"] * 4096)
-        for _ in range(0, size, 4096):
-            sha.update(disk.read(4096))
+    binding, esp = candidate_fields(candidate)
     ts = int(time.time())
     tx = str(args.transaction)
     args.output.mkdir(mode=0o700)
@@ -131,12 +155,12 @@ def qualify(args):
             trial["prepare_vars"](args.variables, variables, first, second)
             body = work / "payload"
             body.write_text(
-                f"FVCA-HYPERVISOR-STANDING-TRIAL-1\nnot_before={ts-60}\nexpires={expiry}\n"
+                f"FVCA-HYPERVISOR-STANDING-TRIAL-2\nnot_before={ts-60}\nexpires={expiry}\n"
                 f"stable_epoch=1\ncandidate_epoch=2\nepoch_policy_sha256={args.epoch_policy}\n"
                 f"stable_core={stable_core}\nstable_runtime={args.runtime}\nstable_guest_bundle={args.guest}\n"
-                f"FVCA-HYPERVISOR-TRIAL-2\ntransaction={tx}\n"
+                f"{binding}FVCA-HYPERVISOR-TRIAL-2\ntransaction={tx}\n"
                 f"stable=000a,{first[1]['uuid'].lower()}\ncandidate=000b,{second[1]['uuid'].lower()}\n"
-                f"candidate_esp_sha256={sha.hexdigest()}\ncandidate_esp_bytes={size}\n"
+                f"{esp}"
                 f"candidate_core={args.core}\ncandidate_runtime={args.runtime}\nguest_bundle={args.guest}\n",
                 encoding="ascii",
             )
@@ -150,7 +174,7 @@ def qualify(args):
                     args.seed if refusal is None else None)
             options = SimpleNamespace(disk=stable, runtime=candidate, guest=False, output=output, variables=variables,
                                       nvme_boot=True, persistent_boot=True, boot_sector_size=4096,
-                                      no_default_devices=True, memory_mib=4096)
+                                      no_default_devices=True, memory_mib=4096, trial_watchdog=True)
 
             def override():
                 entry = trial["Edk2VarStore"](variables).get_varlist().get("BootNext")

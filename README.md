@@ -381,10 +381,10 @@ The test checks that changing a candidate ESP byte leaves the stable slot bootab
 
 Compose both ordinary slots with `--boot-trial-public-key PUBLIC_KEY_PEM`, authenticated PIN-less TPM storage, and a protected release epoch. Keep the Ed25519 private key with the off-node trial issuer. It must be distinct from the boot, runtime, Guest release, and promotion keys. The candidate uses `--boot-trial-candidate FILE` to bind its transaction and slot pair. The stable UKI pins the trial key and can receive a new authorization through the encrypted Host Btrfs inbox.
 
-The issuer reviews the prepared candidate and the running stable release, then prepends the following header to the exact `FVCA-HYPERVISOR-TRIAL-2` record above. Use the verity root reported by `tools/pack-guest-boot.py` for each Guest bundle field. Use Unix seconds from a trusted clock. The authorization lasts at most 24 hours and both releases must use the named TPM counter policy.
+The issuer reviews the prepared candidate and the running stable release, then prepends the following header to the exact `FVCA-HYPERVISOR-TRIAL-2` record above. Measure `/EFI/BOOT/BOOTX64.EFI` within the prepared ESP and include the GPT UUIDs for each candidate data and verity partition. Use the verity root reported by `tools/pack-guest-boot.py` for each Guest bundle field. Use Unix seconds from a trusted clock. The authorization lasts at most 24 hours and both releases must use the named TPM counter policy.
 
 ```text
-FVCA-HYPERVISOR-STANDING-TRIAL-1
+FVCA-HYPERVISOR-STANDING-TRIAL-2
 not_before=1795154400
 expires=1795156200
 stable_epoch=17
@@ -393,17 +393,22 @@ epoch_policy_sha256=ENROLLED_COUNTER_POLICY_SHA256
 stable_core=STABLE_CORE_VERITY_ROOT
 stable_runtime=STABLE_RUNTIME_VERITY_ROOT
 stable_guest_bundle=STABLE_GUEST_BUNDLE_VERITY_ROOT
+candidate_uki_sha256=CANDIDATE_BOOTX64_EFI_SHA256
+candidate_uki_bytes=CANDIDATE_BOOTX64_EFI_LENGTH_IN_BYTES
+candidate_core_devices=CORE_DATA_UUID,CORE_VERITY_UUID
+candidate_runtime_devices=RUNTIME_DATA_UUID,RUNTIME_VERITY_UUID
+candidate_guest_devices=GUEST_BOOT_DATA_UUID,GUEST_BOOT_VERITY_UUID
 ```
 
 Sign the complete bytes with Ed25519 and prefix the body with the 64-byte detached signature. The envelope is at most 2048 bytes. Publish it as `boot-trials/pending-trial` through the authorized maintenance path. The directory is root-owned with mode `0700`. Publish a regular root-owned file with mode `0600` via atomic rename and flush the file and directory. [OpenSSL Ed25519 signing](https://docs.openssl.org/3.5/man1/openssl-pkeyutl/)
 
-On the stable boot, the verifier checks the signature, running roots, epoch, TPM policy, EFI entry order and candidate ESP. It persists the exact signed envelope before arming the one-shot boot. After reading back `BootNext` and flushing the armed record, the initramfs requests a systemd reboot and inhibits switch-root for the rest of that boot. The stable Guest therefore stays stopped during this handoff. The candidate verifies the durable envelope with its pinned key, checks its own epoch and roots, and records health after Guest readiness. On return to the stable slot, the recorded transaction prevents re-arming and makes any matching health receipt available to independently authorized promotion.
+The stable initramfs verifies the running release, both EFI entries, the watchdog and the signed candidate. It verifies the complete ESP on the first attempt and checks the exact UKI and all three verity trees on every attempt. It flushes a numbered reservation before writing `BootNext` and flushes the arming record after reading it back. It then requests a reboot and inhibits switch-root. The candidate verifies the signed envelope and its own epoch, partitions and roots before recording the boot ID against that reservation. Stable closes the previous reservation on return even if the candidate reset before unlocking storage. A matching health receipt ends retries and permits independently authorized promotion. After three unsuccessful reservations, stable retires the pending envelope, retains the consumed transaction and starts its Guest.
 
 `tests/check-hypervisor-standing-trial.py` uses a disposable enrolled software TPM, two signed 4Kn boot images and matching authenticated Btrfs members. It exercises signature, expiry and stable-release refusal. Its approved run observes the stable initramfs reboot into the candidate, which unlocks storage without a PIN and records Guest health. A subsequent stable boot exercises replay of the consumed trial.
 
-For an i6300ESB standing trial, compose the candidate with `--boot-trial-watchdog-seconds SECONDS` to sign a health deadline of 10–300 seconds into its UKI. The signed Hypervisor initrd arms the timer after verifying EFI candidate selection and before checking the TPM floor or unlocking Host storage. Verified Guest readiness and the matching durable trial record are required to disarm it. A timeout resets the machine to the stable entry in the existing EFI boot order.
+Compose standing candidates with `--boot-trial-watchdog-seconds SECONDS` to sign a health deadline of 10–300 seconds into the UKI. The current profile uses an i6300ESB watchdog. The Hypervisor initrd arms it after verifying EFI candidate selection and before checking the TPM floor or unlocking Host storage. Verified Guest readiness and the matching durable trial record authorize disarming it. A timeout resets to the stable entry in the EFI boot order.
 
-`tests/check-hypervisor-watchdog.py` uses a signed 10-second candidate and a signed 180-second candidate with the emulated i6300ESB. It checks QMP for the hardware watchdog event, verifies stable recovery after expiry, and confirms that the healthy candidate disarms the timer before recording health.
+`tests/check-hypervisor-watchdog.py` uses a signed 10-second candidate and a signed 180-second candidate with the emulated i6300ESB. It checks QMP for three reset events followed by stable recovery and confirms that the healthy candidate disarms the timer and records health on its first attempt.
 
 For live activation qualification, build the stable UKI with the initramfs produced by `tests/nested-guest-shutdown-initrd.sh INPUT_INITRAMFS OUTPUT_INITRAMFS online-trial`. Use the original initramfs for the candidate and pass `--online-handoff` to the standing trial test. The additional checks cover a tampered approval, capture contention, failure to queue the reboot, restart of the stable Guest, and a successful retry through candidate health.
 

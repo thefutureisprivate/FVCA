@@ -28,19 +28,14 @@ fn seconds(raw: &[u8]) -> io::Result<i32> {
         .strip_prefix(b"FVCA-HYPERVISOR-TRIAL-WATCHDOG-1\nseconds=")
         .and_then(|value| value.strip_suffix(b"\n"))
         .ok_or_else(|| invalid("invalid signed trial watchdog policy"))?;
-    let value: i32 = std::str::from_utf8(raw)
-        .ok()
-        .and_then(|text| text.parse::<i32>().ok())
-        .filter(|value| (10..=300).contains(value) && value.to_string().as_bytes() == raw)
-        .ok_or_else(|| invalid("trial watchdog deadline must be between 10 and 300 seconds"))?;
-    Ok(value)
+    fvca_trial_authorization::watchdog_seconds(std::str::from_utf8(raw).map_err(io::Error::other)?)
 }
 
 fn state(file: &str) -> io::Result<String> {
     fs::read_to_string(Path::new(SYSFS).join(file))
 }
 
-fn open(expected_state: &str) -> io::Result<File> {
+fn check_device(expected_state: &str) -> io::Result<()> {
     if state("identity")? != IDENTITY
         || state("nowayout")? != "0\n"
         || state("state")? != expected_state
@@ -57,10 +52,24 @@ fn open(expected_state: &str) -> io::Result<File> {
     if !metadata.file_type().is_char_device() || state("dev")? != format!("{major}:{minor}\n") {
         return Err(invalid("the watchdog node does not match its sysfs device"));
     }
+    Ok(())
+}
+
+fn open(expected_state: &str) -> io::Result<File> {
+    check_device(expected_state)?;
     OpenOptions::new()
         .write(true)
         .custom_flags(O_NOFOLLOW)
         .open(DEVICE)
+}
+
+pub fn require_available() -> io::Result<()> {
+    run(Command::new("/usr/bin/modprobe").args(["--ignore-install", "i6300esb", "nowayout=0"]))?;
+    require_idle()
+}
+
+pub(super) fn require_idle() -> io::Result<()> {
+    check_device("inactive\n")
 }
 
 fn uptime() -> io::Result<u64> {
@@ -81,8 +90,11 @@ fn uptime() -> io::Result<u64> {
 pub fn arm(seconds: i32, boot: &str, transaction: &str) -> io::Result<()> {
     // Runtime activation normally creates this directory later in the boot.
     fs::create_dir_all("/run/fvca")?;
-    run(Command::new("/usr/bin/modprobe").args(["--ignore-install", "i6300esb", "nowayout=0"]))?;
-    let device = open("inactive\n")?;
+    require_available()?;
+    let device = OpenOptions::new()
+        .write(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(DEVICE)?;
     let deadline = uptime()? + seconds as u64 * 100;
     if fvca_watchdog_boundary::set_timeout(&device, seconds)? != seconds
         || state("timeout")? != format!("{seconds}\n")

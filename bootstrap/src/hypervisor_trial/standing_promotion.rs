@@ -1,15 +1,15 @@
 //! Promote a healthy standing trial using the independently signed release grant.
 
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use fvca_trial_authorization::{PROMOTED_RELEASE, Promotion};
 
 use super::{
     PENDING, Trial, approved_evidence, boot_next, boot_order, gpt_device, promoted_order,
-    promotion, publish, read_record, standing, verify_arming, verify_signature,
+    promotion, publish, read_record, standing, verify_signature,
 };
 use crate::{invalid, run, runtime};
 
@@ -37,6 +37,7 @@ fn grant(directory: &Path, trial: &Trial<'_>) -> io::Result<Option<Vec<u8>>> {
 
 fn require_payloads(promotion: &Promotion<'_>, ids: &[String; 6]) -> io::Result<()> {
     if !promotion
+        .trial
         .payloads
         .iter()
         .flatten()
@@ -45,51 +46,6 @@ fn require_payloads(promotion: &Promotion<'_>, ids: &[String; 6]) -> io::Result<
     {
         return Err(invalid(
             "standing promotion differs from the signed candidate partitions",
-        ));
-    }
-    Ok(())
-}
-
-fn verify_candidate_uki(device: &Path, approval: &Promotion<'_>) -> io::Result<()> {
-    let mut hash = Command::new("/usr/bin/sha256sum")
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()?;
-    let loader = Command::new("/sysroot/usr/bin/mcopy")
-        .env_clear()
-        .env("MTOOLSRC", "/sysroot/usr/share/fvca/mtools.conf")
-        .env("GCONV_PATH", "/sysroot/usr/lib64/fvca/fat-gconv")
-        .arg("-i")
-        .arg(device)
-        .args(["::/EFI/BOOT/BOOTX64.EFI", "-"])
-        .stdout(Stdio::piped())
-        .spawn();
-    let mut loader = match loader {
-        Ok(loader) => loader,
-        Err(error) => {
-            let _ = hash.kill();
-            let _ = hash.wait();
-            return Err(error);
-        }
-    };
-    let copied = io::copy(
-        &mut loader
-            .stdout
-            .take()
-            .expect("loader output is piped")
-            .take(approval.candidate_uki_bytes + 1),
-        &mut hash.stdin.take().expect("hash input is piped"),
-    );
-    let status = loader.wait()?;
-    let digest = hash.wait_with_output()?;
-    if copied? != approval.candidate_uki_bytes
-        || !status.success()
-        || !digest.status.success()
-        || digest.stdout != format!("{}  -\n", approval.candidate_uki).as_bytes()
-    {
-        return Err(invalid(
-            "installed candidate UKI differs from standing promotion",
         ));
     }
     Ok(())
@@ -171,12 +127,7 @@ pub(super) fn commit(
             "standing promotion cannot override a pending one-shot boot",
         ));
     }
-    let (device, size) = gpt_device(&trial.candidate)?;
-    if size != approval.trial.authorization.bytes {
-        return Err(invalid("standing promotion candidate ESP geometry changed"));
-    }
-    verify_candidate_uki(&device, &approval)?;
-    promotion::verify_payloads(&device, approval.payloads, &approval.trial.authorization)?;
+    standing::verify_candidate(&approval.trial)?;
     standing::require_fresh(&approval.trial)?;
     let intent = directory.join(format!("{tx}.promotion-intent"));
     match publish(&intent, &packet) {
@@ -211,10 +162,8 @@ pub(super) fn authorize_boot(
     let attempt = read_record(&directory.join(tx))?;
     standing::verify(&attempt)?;
     promotion.matches_trial(&attempt)?;
-    let health = read_record(&directory.join(format!("{tx}.healthy")))?;
-    approved_evidence(approved, &health)?;
-    verify_arming(directory, tx, &attempt)?;
-    if read_record(&directory.join(format!("{tx}.started")))? != health
+    let number = super::attempts::last(directory, tx)?;
+    if super::prior_health(directory, approved, number)?.is_none()
         || *trial != approved.trial
         || guest != Some(approved.guest)
         || active.core != approved.core

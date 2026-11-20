@@ -106,9 +106,11 @@ def prepare_standing(args):
     tag = b"FVCA-HYPERVISOR-TRIAL-2\n"
     scope, separator, trial_body = body.partition(tag)
     trial = fields(separator + trial_body, "FVCA-HYPERVISOR-TRIAL-2", TRIAL_FIELDS)
-    selected = fields(scope, "FVCA-HYPERVISOR-STANDING-TRIAL-1", (
+    selected = fields(scope, "FVCA-HYPERVISOR-STANDING-TRIAL-2", (
         "not_before", "expires", "stable_epoch", "candidate_epoch", "epoch_policy_sha256",
         "stable_core", "stable_runtime", "stable_guest_bundle",
+        "candidate_uki_sha256", "candidate_uki_bytes", "candidate_core_devices",
+        "candidate_runtime_devices", "candidate_guest_devices",
     ))
     with args.standing_active.open("rb") as stream:
         record = stream.read(65537)
@@ -144,13 +146,14 @@ def prepare_standing(args):
             raise ValueError("standing promotion candidate UKI exceeds its size bound")
         with loader.open("rb") as stream:
             uki = hashlib.file_digest(stream, "sha256").hexdigest()
+    if (sha256(selected["candidate_uki_sha256"]) != uki or selected["candidate_uki_bytes"] != str(size)
+            or any(selected[key] != value for key, value in (line.split("=", 1) for line in devices.splitlines()))):
+        raise ValueError("candidate loader or verity partitions differ from the signed trial")
     header = (
-        "FVCA-HYPERVISOR-STANDING-PROMOTION-1\n"
+        "FVCA-HYPERVISOR-STANDING-PROMOTION-2\n"
         f"stable_slot={active['slot']}\nstable_sequence={active['sequence']}\n"
         f"candidate_sequence={args.candidate_sequence}\n"
         f"stable_manifest_sha256={stable_digest}\ncandidate_manifest_sha256={candidate_digest}\n"
-        f"candidate_uki_sha256={uki}\ncandidate_uki_bytes={size}\n"
-        f"{devices}"
     )
     return header.encode("ascii") + body
 

@@ -13,7 +13,9 @@ use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use fvca_trial_authorization::{KEY_ARGUMENT, PEER_PARTITIONS, Standing, key_marker};
+use fvca_trial_authorization::{
+    KEY_ARGUMENT, PEER_PARTITIONS, Standing, WATCHDOG_ARGUMENT, key_marker, watchdog_seconds,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -145,7 +147,7 @@ struct ReleaseEpoch<'a> {
     policy: &'a str,
     auto_pcr_key: Option<&'a str>,
     require_trial: bool,
-    trial_transaction: Option<&'a str>,
+    trial: Option<&'a Standing<'a>>,
     trial_key: Option<&'a [u8]>,
 }
 
@@ -267,12 +269,27 @@ fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<()> {
             .and_then(|arg| arg.split_once('=').map(|(_, id)| id));
         if !transaction.is_some_and(layout::valid_uuid)
             || markers.next().is_some()
-            || expected
-                .trial_transaction
-                .is_some_and(|wanted| transaction != Some(wanted))
+            || expected.trial.is_some_and(|approval| {
+                transaction != Some(approval.authorization.trial.transaction)
+            })
         {
             return Err(invalid(
                 "inactive Hypervisor UKI requires a signed candidate trial marker",
+            )
+            .into());
+        }
+        let mut watchdog = cmdline
+            .split_ascii_whitespace()
+            .filter(|arg| arg.split('=').next() == Some(WATCHDOG_ARGUMENT));
+        let seconds = watchdog
+            .next()
+            .and_then(|arg| arg.split_once('='))
+            .map(|(_, seconds)| seconds);
+        if !seconds.is_some_and(|seconds| watchdog_seconds(seconds).is_ok())
+            || watchdog.next().is_some()
+        {
+            return Err(invalid(
+                "inactive Hypervisor UKI requires a signed trial watchdog deadline",
             )
             .into());
         }
@@ -335,13 +352,17 @@ fn loader(
     )?;
     let signed = state::open_regular(&efi)?;
     verify_epoch(&signed, epoch)?;
-    Ok(digest(
-        &signed,
-        Extent {
-            start: 0,
-            bytes: signed.metadata()?.len(),
-        },
-    )?)
+    let bytes = signed.metadata()?.len();
+    let hash = digest(&signed, Extent { start: 0, bytes })?;
+    if epoch.trial.is_some_and(|trial| {
+        trial.candidate_uki_bytes != bytes || trial.candidate_uki != hex::encode(hash)
+    }) {
+        return Err(invalid(
+            "location or contents of the candidate UKI differ from the signed trial",
+        )
+        .into());
+    }
+    Ok(hash)
 }
 
 impl Artifact {
@@ -403,6 +424,10 @@ impl Artifact {
             || authorized.trial.candidate.esp != inactive.regions[0].uuid
             || authorized.bytes != inactive.regions[0].extent.bytes
             || authorized.digest != hex::encode(self.digests[0])
+            || !inactive.regions[1..PEER_PARTITIONS]
+                .iter()
+                .map(|region| region.uuid.as_str())
+                .eq(approval.payloads.as_flattened().iter().copied())
         {
             return Err(invalid(
                 "trial approval differs from the reviewed EFI partitions or selected ESP bytes",
@@ -613,7 +638,7 @@ impl StandingSite {
                 policy: &self.epoch_policy_sha256,
                 auto_pcr_key: Some(&self.storage_pcr_key_fingerprint),
                 require_trial: false,
-                trial_transaction: None,
+                trial: None,
                 trial_key: Some(trial_key),
             },
         )?;
@@ -627,7 +652,7 @@ impl StandingSite {
                 policy: &self.epoch_policy_sha256,
                 auto_pcr_key: Some(&self.storage_pcr_key_fingerprint),
                 require_trial: true,
-                trial_transaction: Some(approval.authorization.trial.transaction),
+                trial: Some(approval),
                 trial_key: Some(trial_key),
             },
         )?;
@@ -746,7 +771,7 @@ fn install_reviewed(
         policy: &plan.epoch_policy_sha256,
         auto_pcr_key,
         require_trial: false,
-        trial_transaction: None,
+        trial: None,
         trial_key: live.map(|trial| trial.trial_key),
     };
     let next_epoch = ReleaseEpoch {
@@ -754,7 +779,7 @@ fn install_reviewed(
         policy: &plan.epoch_policy_sha256,
         auto_pcr_key,
         require_trial: standing.is_some(),
-        trial_transaction: live.map(|trial| trial.approval.authorization.trial.transaction),
+        trial: live.map(|trial| trial.approval),
         trial_key: live.map(|trial| trial.trial_key),
     };
     let (active, active_layout) = if live.is_some() {

@@ -127,7 +127,12 @@ pub(super) fn pinned_key() -> io::Result<Option<[u8; 32]>> {
 
 pub(super) fn record_candidate_key(directory: &Path, tx: &str) -> io::Result<()> {
     if let Some(key) = pinned_key()? {
-        publish(&directory.join(format!("{tx}.promotion-key")), &key)?;
+        let path = directory.join(format!("{tx}.promotion-key"));
+        match publish(&path, &key) {
+            Err(error)
+                if error.kind() == io::ErrorKind::AlreadyExists && read_record(&path)? == key => {}
+            result => result?,
+        }
     }
     Ok(())
 }

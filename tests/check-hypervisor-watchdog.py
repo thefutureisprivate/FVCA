@@ -3,7 +3,6 @@
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-import hashlib
 import json
 from pathlib import Path
 import runpy
@@ -32,25 +31,14 @@ def qmp_events(path):
             return [event for line in messages if "event" in (event := json.loads(line))]
 
 
-def authorize(args, candidate, partition, selection, work):
-    remaining = size = partition["size"] * 4096
-    digest = hashlib.sha256()
-    with candidate.open("rb") as image:
-        image.seek(partition["start"] * 4096)
-        while remaining:
-            chunk = image.read(min(remaining, 1024 * 1024))
-            if not chunk:
-                raise ValueError("truncated candidate ESP")
-            digest.update(chunk)
-            remaining -= len(chunk)
+def authorize(args, binding, esp, selection, work):
     now = int(time.time())
     approval = work / "approval"
     approval.write_text(
-        f"FVCA-HYPERVISOR-STANDING-TRIAL-1\nnot_before={now-60}\nexpires={now+1800}\n"
+        f"FVCA-HYPERVISOR-STANDING-TRIAL-2\nnot_before={now-60}\nexpires={now+1800}\n"
         f"stable_epoch=1\ncandidate_epoch=2\nepoch_policy_sha256={args.epoch_policy}\n"
         f"stable_core={args.core}\nstable_runtime={args.runtime}\nstable_guest_bundle={args.guest}\n"
-        f"FVCA-HYPERVISOR-TRIAL-2\n{selection}"
-        f"candidate_esp_sha256={digest.hexdigest()}\ncandidate_esp_bytes={size}\n"
+        f"{binding}FVCA-HYPERVISOR-TRIAL-2\n{selection}{esp}"
         f"candidate_core={args.core}\ncandidate_runtime={args.runtime}\nguest_bundle={args.guest}\n",
         encoding="ascii",
     )
@@ -82,7 +70,8 @@ def qualify(args):
         with tempfile.TemporaryDirectory(prefix="members-", dir=args.output) as path:
             work = Path(path)
             trial["prepare_vars"](args.variables, variables, stable_entry, candidate_entry)
-            envelope = authorize(args, candidate, candidate_entry[1], selection, work)
+            binding, esp = standing["candidate_fields"](candidate)
+            envelope = authorize(args, binding, esp, selection, work)
             members = [work / f"member-{side}.raw" for side in ("a", "b")]
             for member in members:
                 subprocess.run(["cp", "--reflink=auto", "--sparse=always", args.members / member.name, member], check=True)
@@ -98,7 +87,7 @@ def qualify(args):
                                               trial_watchdog=True, qmp_path=qmp)
                     prompts, log = storage["boot"](
                         options, f"{case}-{attempt}", None, *members, firmware=args.firmware, tpm_socket=tpm,
-                        firmware_timeout=35, timeout=190, ready_marker=finish, allow_reboot=True,
+                        firmware_timeout=35, timeout=235, ready_marker=finish, allow_reboot=True,
                     )
                     events = capture.result()
                 if b"Kernel command line:" in log:
@@ -108,27 +97,32 @@ def qualify(args):
         efi = trial["Edk2VarStore"](variables).get_varlist()
         assert efi.get("BootNext") is None
         assert efi["BootOrder"].data[:4] == struct.pack("<HH", trial["STABLE"], trial["CANDIDATE"])
-        assert prompts == 0 and storage["FAIL"] not in log and finish in log and log.count(armed) == 1
+        count = 3 if case == "expiry" else 1
+        assert prompts == 0 and storage["FAIL"] not in log and finish in log and log.count(armed) == count
         boots = log.split(b"Linux version ")[1:]
-        expected_boots = 3 if case == "expiry" else 2
+        expected_boots = 7 if case == "expiry" else 2
         assert len(boots) == expected_boots and log.count(b"secureboot: Secure boot enabled") >= expected_boots
-        candidate_boot = boots[1]
         for boot in boots:
             assert all(marker in boot for marker in (
                 b"FVCA_SELINUX_ENFORCING", b"FVCA_HOST_STORAGE_UNLOCK_PROFILE tpm2-auto",
                 b"FVCA_BTRFS_PROFILES raid1 raid1 raid1",
             ))
-        standing["require_sequence"](candidate_boot, (
-            armed + f" {seconds}".encode(), b"FVCA_HYPERVISOR_EPOCH_ACCEPTED 2 1",
-            b"FVCA_TRIAL_CANDIDATE_STARTED " + txn,
-        ), args.output)
+        for number in range(1, count + 1):
+            stable_boot, candidate_boot = boots[2 * (number - 1):2 * number]
+            standing["require_sequence"](stable_boot, (
+                b"FVCA_HYPERVISOR_EPOCH_ACCEPTED 1 1", b"FVCA_TRIAL_ARMED " + txn + f" 000b {number}".encode(),
+            ), args.output)
+            standing["require_sequence"](candidate_boot, (
+                armed + f" {seconds}".encode(), b"FVCA_HYPERVISOR_EPOCH_ACCEPTED 2 1",
+                b"FVCA_TRIAL_CANDIDATE_STARTED " + txn,
+            ), args.output)
         resets = [event["data"]["action"] for event in events if event["event"] == "WATCHDOG"]
         if case == "expiry":
-            assert resets == ["reset"]
-            assert disarmed not in log and healthy not in log and guest_ready not in candidate_boot
-            assert b"reboot: Restarting system" not in candidate_boot
-            standing["require_sequence"](boots[2], (
-                b"FVCA_HYPERVISOR_EPOCH_ACCEPTED 1 1", b"FVCA_TRIAL_PREVIOUSLY_RECORDED " + txn, finish,
+            assert resets == ["reset"] * count
+            assert disarmed not in log and healthy not in log
+            assert all(guest_ready not in boot and b"reboot: Restarting system" not in boot for boot in boots[1::2])
+            standing["require_sequence"](boots[-1], (
+                b"FVCA_HYPERVISOR_EPOCH_ACCEPTED 1 1", b"FVCA_TRIAL_ATTEMPTS_EXHAUSTED " + txn + b" 3", finish,
             ), args.output)
         else:
             assert not resets

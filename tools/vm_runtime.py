@@ -26,7 +26,7 @@ DOMAIN_SCHEMAS = {
 }
 BASE_INPUT = "vm-runtime-base"
 TRIAL_HEALTH = Path("usr/libexec/fvca/trial-health")
-TRIAL_HEALTH_WATCHDOG = Path("usr/libexec/fvca/trial-health-watchdog-v1")
+TRIAL_HEALTH_WATCHDOG = Path("usr/libexec/fvca/trial-health-watchdog-v2")
 BASE_BINDING = Path("usr/share/fvca/vm-runtime-base.roothash")
 EXTENSION_RELEASE = Path("usr/lib/extension-release.d/extension-release.vm-runtime")
 REQUIRED_FILES = {

@@ -299,7 +299,7 @@ pub fn verify_floor(
                 policy: &approved.epoch_policy_sha256,
                 auto_pcr_key: None,
                 require_trial: false,
-                trial_transaction: None,
+                trial: None,
                 trial_key: None,
             },
         )?;

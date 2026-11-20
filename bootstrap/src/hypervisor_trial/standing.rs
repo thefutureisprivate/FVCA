@@ -1,11 +1,13 @@
 //! Verify an off-node trial authorization against the booted release.
 
-use std::io;
+use std::io::{self, Read};
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fvca_trial_authorization::Standing;
 
-use super::verify_signature;
+use super::{gpt_device, promotion, verify_signature};
 use crate::{HYPERVISOR_EPOCH_ARGUMENT, invalid, runtime};
 
 pub(super) fn verify(envelope: &[u8]) -> io::Result<Standing<'_>> {
@@ -54,4 +56,58 @@ pub(super) fn require_fresh(approval: &Standing<'_>) -> io::Result<()> {
         .map_err(io::Error::other)?
         .as_secs();
     approval.require_fresh(now)
+}
+
+pub(super) fn verify_candidate(approval: &Standing<'_>) -> io::Result<()> {
+    let (device, size) = gpt_device(&approval.authorization.trial.candidate)?;
+    if size != approval.authorization.bytes {
+        return Err(invalid("standing trial candidate ESP geometry changed"));
+    }
+    verify_candidate_uki(&device, approval)?;
+    promotion::verify_payloads(&device, approval.payloads, &approval.authorization)
+}
+
+fn verify_candidate_uki(device: &Path, approval: &Standing<'_>) -> io::Result<()> {
+    let mut hash = Command::new("/usr/bin/sha256sum")
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let loader = Command::new("/sysroot/usr/bin/mcopy")
+        .env_clear()
+        .env("MTOOLSRC", "/sysroot/usr/share/fvca/mtools.conf")
+        .env("GCONV_PATH", "/sysroot/usr/lib64/fvca/fat-gconv")
+        .arg("-i")
+        .arg(device)
+        .args(["::/EFI/BOOT/BOOTX64.EFI", "-"])
+        .stdout(Stdio::piped())
+        .spawn();
+    let mut loader = match loader {
+        Ok(loader) => loader,
+        Err(error) => {
+            let _ = hash.kill();
+            let _ = hash.wait();
+            return Err(error);
+        }
+    };
+    let copied = io::copy(
+        &mut loader
+            .stdout
+            .take()
+            .expect("loader output is piped")
+            .take(approval.candidate_uki_bytes + 1),
+        &mut hash.stdin.take().expect("hash input is piped"),
+    );
+    let status = loader.wait()?;
+    let digest = hash.wait_with_output()?;
+    if copied? != approval.candidate_uki_bytes
+        || !status.success()
+        || !digest.status.success()
+        || digest.stdout != format!("{}  -\n", approval.candidate_uki).as_bytes()
+    {
+        return Err(invalid(
+            "installed candidate UKI differs from standing trial",
+        ));
+    }
+    Ok(())
 }
