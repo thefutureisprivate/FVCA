@@ -36,7 +36,8 @@ def image(path):
 
 
 def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, extra_cmdline=False,
-         attach_runtime=True, timeout=80, direct_cmdline=None, attach_guest=True, ready_marker=READY):
+         attach_runtime=True, timeout=80, direct_cmdline=None, attach_guest=True, ready_marker=READY,
+         firmware_timeout=None):
     cpu = "host,vmx=off" if args.guest else "host"
     machine = "q35,smm=on"
     devices = []
@@ -67,7 +68,7 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
     media_access = "snapshot=on" if nvme else "readonly=on"
     command = [
         "qemu-system-x86_64", *devices, "-machine", machine, "-accel", "kvm", "-cpu", cpu,
-        "-m", "4096" if nested is not None else "2048", "-smp", "2", *loader,
+        "-m", str(getattr(args, "memory_mib", 4096 if nested is not None else 2048)), "-smp", "2", *loader,
         "-drive", f"if=none,id=fvca-boot,format=raw,{media_access},file={image(args.disk)}",
         "-device", f"{boot_device}{geometry}" + ("" if persistent else ",bootindex=1"),
     ]
@@ -107,7 +108,7 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
     waiting_for_no_echo = False
     submitted = False
     failed_boot = False
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + (timeout if firmware_timeout is None else firmware_timeout)
     log = args.output / f"{name}.log"
     try:
         with log.open("wb", buffering=0) as progress, \
@@ -120,6 +121,9 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
                     if not data:
                         break
                     output.extend(data)
+                    if firmware_timeout is not None and b"Kernel command line:" in output:
+                        deadline = time.monotonic() + timeout
+                        firmware_timeout = None
                     if not submitted:
                         progress.write(data)
                     recent = output[max(prompt_start, len(output) - 4096):]

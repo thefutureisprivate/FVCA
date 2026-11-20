@@ -25,19 +25,21 @@ fn activate() -> io::Result<()> {
         return Err(invalid("Intel KVM must be available with nested virtualization disabled"));
     }
     let slot = Slot::load()?;
-    let runtime_hash = runtime::activate(Runtime::Vm, slot.as_ref().map(|slot| &slot.runtime))?;
+    let verified_runtime = runtime::activate(Runtime::Vm, slot.as_ref().map(|slot| &slot.runtime))?;
     runtime::install_development_probe("fvca-vm-runtime-probe.service", PROBE)?;
     storage::activate_if_selected()?;
     backup_policy::activate_if_selected()?;
     retention_policy::activate_if_selected()?;
     let recovering = recovery::activate_if_selected()?;
     backup_job::activate_if_selected(recovering)?;
-    guest_boot::activate_if_selected(!recovering, slot.as_ref().map(|slot| &slot.guest))?;
-    if let Err(error) = hypervisor_trial::arm_if_authorized(slot.as_ref().map(|slot| slot.esp.as_str())) {
+    let guest = guest_boot::activate_if_selected(!recovering, slot.as_ref().map(|slot| &slot.guest))?;
+    let esp = slot.as_ref().map(|slot| slot.esp.as_str());
+    hypervisor_trial::start_candidate(esp, guest.as_deref(), &verified_runtime, recovering)?;
+    if let Err(error) = hypervisor_trial::arm_if_authorized(esp, guest.as_deref()) {
         eprintln!("FVCA_TRIAL_REFUSED {error}");
     }
 
-    println!("FVCA_VM_RUNTIME_ACTIVE {runtime_hash}");
+    println!("FVCA_VM_RUNTIME_ACTIVE {}", verified_runtime.extension);
     Ok(())
 }
 

@@ -186,22 +186,36 @@ python3 tests/check-hypervisor-gpt-slots.py \
 
 The test attaches the boot images as virtual NVMe devices with the selected logical sector size. Compose its inputs with a recovery UKI or provide a seeded Guest and the matching Host storage profile. The test selects each slot with both disks attached and rejects duplicate locators or a tuple split across the two disks. Installing these immutable partitions alongside the data partitions on the physical NVMes and physical degraded boot remain separate qualification steps.
 
-### Exercise a one-shot Hypervisor trial
+### Exercise a one-shot Hypervisor trial and record health
 
-Compose the candidate slot first. Obtain its ESP partition UUID, starting LBA and length with `sfdisk --json --sector-size 4096 build/slot-b.raw`. Hash exactly the byte range occupied by the ESP and record its full length in bytes. Compose the stable lab slot with `--boot-trial FILE` to embed the authorization in its signed UKI. Use a fresh transaction UUID and the actual values for each field below. The stable ESP UUID is derived from the stable slot UUID and the name `esp` with UUIDv5.
+Choose a fresh transaction UUID and distinct slot UUIDs. The two ESP UUIDs are derived from their respective slot UUIDs and the name `esp` with UUIDv5. Compose the candidate first with `--boot-trial-candidate FILE` using the policy below and a VM runtime built with the trial health recorder. Select the same signed Guest boot bundle on both slots and use ordinary Guest startup for the candidate.
 
 ```text
-FVCA-HYPERVISOR-TRIAL-1
+FVCA-HYPERVISOR-TRIAL-CANDIDATE-1
+transaction=TRANSACTION_UUID
+stable=000a,STABLE_ESP_UUID
+candidate=000b,CANDIDATE_ESP_UUID
+```
+
+Obtain the candidate ESP starting LBA and length with `sfdisk --json --sector-size 4096 build/slot-b.raw`. Hash exactly the bytes in that partition. Use the signed dm-verity root hashes of the candidate core, candidate VM runtime and Guest boot bundle. Compose the stable slot with `--boot-trial FILE` to sign the following authorization into its UKI.
+
+```text
+FVCA-HYPERVISOR-TRIAL-2
 transaction=TRANSACTION_UUID
 stable=000a,STABLE_ESP_UUID
 candidate=000b,CANDIDATE_ESP_UUID
 candidate_esp_sha256=CANDIDATE_ESP_SHA256
 candidate_esp_bytes=CANDIDATE_ESP_LENGTH_IN_BYTES
+candidate_core=CANDIDATE_CORE_VERITY_ROOT
+candidate_runtime=CANDIDATE_VM_RUNTIME_VERITY_ROOT
+guest_bundle=GUEST_BOOT_BUNDLE_VERITY_ROOT
 ```
 
-Enroll two active UEFI boot entries with short-form GPT device paths to `\EFI\BOOT\BOOTX64.EFI` and put the stable entry first in `BootOrder`. The Hypervisor checks `BootCurrent`, both boot entries and the candidate ESP after opening the encrypted Btrfs mirror. After flushing the transaction record, it invokes a confined writer that exclusively creates `BootNext` at a fixed path, then verifies the value by reading it back. Firmware consumes `BootNext` before starting the candidate. The original boot order remains in effect on subsequent resets. [UEFI Boot Manager](https://uefi.org/specs/UEFI/2.10/03_Boot_Manager.html)
+Enroll two active UEFI boot entries with short-form GPT device paths to `\EFI\BOOT\BOOTX64.EFI` and put the stable entry first in `BootOrder`. The Hypervisor checks `BootCurrent`, both boot entries and the candidate ESP after opening the encrypted Btrfs mirror. After flushing the transaction record, it invokes a confined writer that exclusively creates `BootNext` at a fixed path. It flushes a second record only after verifying `BootNext` by reading it back. Firmware consumes `BootNext` before starting the candidate. The original boot order remains in effect on subsequent resets. [UEFI Boot Manager](https://uefi.org/specs/UEFI/2.10/03_Boot_Manager.html)
 
-The Fedora KVM lab test uses `python3-virt-firmware` to seed the entries in a private OVMF variable store. The trial and tamper cases each use fresh copies of the variable store and both Btrfs members. The two input slots must use the same signed storage profile.
+Before launching the candidate's Guest, the initramfs checks the recorded stable authorization against the candidate UKI selection, actual boot entry and verified core, runtime and Guest roots. This check accounts for EFI filesystem metadata writes during boot. The initramfs records the candidate boot ID on Btrfs. After the base and Guest startup checks pass, the recorder checks the running Guest through libvirt and pings its Guest agent. It then writes `boot-trials/TRANSACTION_UUID.healthy` to the encrypted mirror. The stable slot reads back a matching record on return. This record is local readiness evidence. Promotion, protected epoch advancement, application-specific validation, physical qualification, and automatic reset after a stalled trial remain separate requirements.
+
+The Fedora KVM lab test uses `python3-virt-firmware` to seed the entries in a private OVMF variable store. Its successful trial, interrupted trial and tamper cases use separate copies of the variable store and both Btrfs members. Use the same signed storage profile on both input slots and seed the mirror with matching Guest data.
 
 ```sh
 python3 tests/check-hypervisor-trial.py \
@@ -209,7 +223,7 @@ python3 tests/check-hypervisor-trial.py \
   --lab build/host-storage-lab --transaction TRANSACTION_UUID --output build/gpt-trial-checks
 ```
 
-The test checks that changing a candidate ESP byte leaves the stable slot bootable, that the approved candidate boots once, and that the next reset returns to the stable slot without arming the same transaction again. Health-based promotion, an automatic reset after a stalled trial, and protected epoch advancement are separate release requirements.
+The test checks that changing a candidate ESP byte leaves the stable slot bootable, that a healthy candidate records its boot ID and runtime, and that cutting power before readiness yields no health record. It also selects the candidate without arming a trial and checks that it refuses to start the Guest. Each armed candidate attempt returns through the original stable order on the next boot.
 
 ## Development Hypervisor storage
 

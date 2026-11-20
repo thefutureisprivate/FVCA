@@ -26,6 +26,10 @@ required-features = ["libvirt"]
 name = "fvca-launch-guest"
 required-features = ["libvirt"]
 
+[[bin]]
+name = "fvca-trial-health"
+required-features = ["libvirt"]
+
 [profile.release]
 panic = "abort"
 strip = "symbols"

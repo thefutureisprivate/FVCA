@@ -23,6 +23,7 @@ DOMAIN_SCHEMAS = {
                  "privatedata", "storagecommon", "sysinfocommon")
 }
 BASE_INPUT = "vm-runtime-base"
+TRIAL_HEALTH = Path("usr/libexec/fvca/trial-health")
 BASE_BINDING = Path("usr/share/fvca/vm-runtime-base.roothash")
 EXTENSION_RELEASE = Path("usr/lib/extension-release.d/extension-release.vm-runtime")
 REQUIRED_FILES = {
@@ -76,6 +77,7 @@ FIRMWARE_DATA = {
 def allowed(path):
     return (
         path in REQUIRED_FILES
+        or path == TRIAL_HEALTH
         or path in FIRMWARE_DATA
         or path.is_relative_to("usr/share/licenses")
         or (path.parent == Path("usr/share/libvirt/cpu_map") and path.suffix == ".xml")

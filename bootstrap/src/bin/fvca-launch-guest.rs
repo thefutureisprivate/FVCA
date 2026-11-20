@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
-use fvca_initrd_bootstrap::{guest_boot, invalid, run, vm_confinement};
+use fvca_initrd_bootstrap::{guest_boot::{self, SERVICE_GUEST_UUID as UUID}, invalid, run, vm_confinement};
 use fvca_libvirt_boundary::{Connection, Domain, EventLoop, PAUSED, RUNNING};
 
 #[path = "fvca-launch-guest/capture.rs"]
@@ -18,7 +18,6 @@ mod capture;
 #[global_allocator]
 static ALLOCATOR: System = System;
 
-const UUID: &CStr = c"e629aa43-af11-47c6-aedc-a2dc47f1cc3a";
 const POOL: &str = "/run/fvca/host-data";
 const VM_PARENT: &str = "/run/fvca/host-data/vms";
 const VM_DIRECTORY: &str = "/run/fvca/host-data/vms/service-guest";

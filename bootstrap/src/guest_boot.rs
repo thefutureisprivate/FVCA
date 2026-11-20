@@ -1,5 +1,6 @@
 //! Exact launch selection authenticated by the Hypervisor UKI.
 
+use std::ffi::CStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -7,6 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::{invalid, runtime};
 
 pub const BOOT: &str = "/run/fvca/guest-boot";
+pub const SERVICE_GUEST_UUID: &CStr = c"e629aa43-af11-47c6-aedc-a2dc47f1cc3a";
 pub const SELECTION: &str = "/run/fvca/guest-launch";
 const SOURCE: &str = "/usr/lib/fvca/guest-launch";
 const SIGNATURE: &str = "/usr/lib/fvca/guest-launch.p7s";
@@ -51,18 +53,19 @@ pub fn parse(payload: &str) -> io::Result<Selection<'_>> {
     Ok(Selection { bundle, core, runtime, checksums })
 }
 
-pub fn activate_if_selected(auto_start: bool, devices: Option<&(PathBuf, PathBuf)>) -> io::Result<()> {
+pub fn activate_if_selected(auto_start: bool, devices: Option<&(PathBuf, PathBuf)>) -> io::Result<Option<String>> {
     let payload = match fs::read_to_string(SOURCE) {
         Ok(payload) => payload,
-        Err(error) if error.kind() == io::ErrorKind::NotFound && !Path::new(SIGNATURE).try_exists()? => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !Path::new(SIGNATURE).try_exists()? => return Ok(None),
         Err(error) => return Err(error),
     };
     let selection = parse(&payload)?;
     runtime::mount_verified("guest-boot", "Guest boot bundle", selection.bundle, Path::new(SIGNATURE),
                             Path::new(BOOT), "ro,nodev,nosuid,noexec", devices)?;
+    let bundle = selection.bundle.to_owned();
     fs::write(SELECTION, payload)?;
     if !auto_start {
-        return Ok(());
+        return Ok(Some(bundle));
     }
     let control = Path::new("/run/systemd/system");
     let dropin = control.join("fvca-base-ready.service.d");
@@ -77,5 +80,5 @@ pub fn activate_if_selected(auto_start: bool, devices: Option<&(PathBuf, PathBuf
         "/usr/lib/systemd/system/fvca-service-guest.service",
         wants.join("fvca-service-guest.service"),
     )?;
-    Ok(())
+    Ok(Some(bundle))
 }

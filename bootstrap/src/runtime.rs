@@ -13,6 +13,11 @@ pub enum Runtime {
     Oci,
 }
 
+pub struct Activation {
+    pub core: String,
+    pub extension: String,
+}
+
 pub fn hash(value: &str) -> io::Result<&str> {
     if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
         return Err(invalid("expected a lowercase SHA-256 root hash"));
@@ -106,7 +111,7 @@ pub fn mount_verified(
         .arg(target))
 }
 
-pub fn activate(selected: Runtime, devices: Option<&(PathBuf, PathBuf)>) -> io::Result<String> {
+pub fn activate(selected: Runtime, devices: Option<&(PathBuf, PathBuf)>) -> io::Result<Activation> {
     let (role, runtime, label) = match selected {
         Runtime::Vm => ("hypervisor", "vm-runtime", "VM runtime"),
         Runtime::Oci => ("service-guest", "oci-runtime", "OCI runtime"),
@@ -132,5 +137,5 @@ pub fn activate(selected: Runtime, devices: Option<&(PathBuf, PathBuf)>) -> io::
         &format!("ro,nodev,redirect_dir=nofollow,metacopy=off,lowerdir={staging}/usr:/sysroot/usr"),
         &mapping, "/sysroot/usr",
     ]))?;
-    Ok(runtime_hash.to_owned())
+    Ok(Activation { core: core_hash.to_owned(), extension: runtime_hash.to_owned() })
 }

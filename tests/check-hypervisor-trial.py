@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Exercise one-shot UEFI selection with disposable 4Kn slots and persistent OVMF state."""
+"""Exercise one-shot UEFI selection and candidate health on disposable 4Kn slots."""
 
 import argparse
 import json
 from pathlib import Path
+import re
 import runpy
 import struct
 import subprocess
@@ -36,7 +37,7 @@ def load_option(number, part, description):
     return struct.pack("<IH", 1, len(path)) + (description + "\0").encode("utf-16-le") + path
 
 
-def prepare_vars(source, destination, stable, candidate):
+def prepare_vars(source, destination, stable, candidate, *, next_id=None):
     store = Edk2VarStore(source)
     variables = store.get_varlist()
     for name in tuple(variables):
@@ -49,6 +50,8 @@ def prepare_vars(source, destination, stable, candidate):
     }
     for name, value in values.items():
         variables[name] = EfiVar(name, attr=7, data=value)
+    if next_id is not None:
+        variables.set_boot_next(next_id)
     store.write_varstore(destination, variables)
 
 
@@ -68,13 +71,16 @@ def qualify(args):
             members.append(member)
         return members
 
-    def run(name, selected, companion, marker, members):
+    def run(name, selected, companion, marker, members, *, finish=None, required=(), forbidden=(), refusal=False):
         options = SimpleNamespace(guest=False, disk=args.stable, runtime=companion, variables=variables,
-                                  output=args.output, nvme_boot=True, boot_sector_size=SECTOR, persistent_boot=True)
+                                  output=args.output, nvme_boot=True, boot_sector_size=SECTOR, persistent_boot=True,
+                                  memory_mib=4096)
+        finish = finish or lab["READY"]
         before = Edk2VarStore(variables).get_varlist().get("BootNext")
         for attempt in range(1, 4):
             transcript = name if attempt == 1 else f"{name}-retry-{attempt - 1}"
-            prompts, log = lab["boot"](options, transcript, password, *members)
+            prompts, log = lab["boot"](options, transcript, password, *members, ready_marker=finish,
+                                       timeout=135, firmware_timeout=40)
             if b"Kernel command line:" in log:
                 break
             after = Edk2VarStore(variables).get_varlist().get("BootNext")
@@ -82,10 +88,12 @@ def qualify(args):
                 # Do not retry if the firmware already consumed the override.
                 break
         selected = f"FVCA_HYPERVISOR_SLOT_VERIFIED {selected[1]['uuid'].lower()}".encode()
-        expected = (b"Secure boot enabled", b"FVCA_SELINUX_ENFORCING", selected, lab["HOST_PROFILES"], lab["READY"], marker)
-        if prompts != 2 or lab["FAIL"] in log or not all(value in log for value in expected):
+        expected = (b"Secure boot enabled", b"FVCA_SELINUX_ENFORCING", selected, lab["HOST_PROFILES"], finish, marker, *required)
+        if (prompts != 2 or (not refusal and lab["FAIL"] in log) or not all(value in log for value in expected)
+                or any(value in log for value in forbidden)):
             raise ValueError(f"{name} did not reach the expected Secure Boot, Btrfs and trial state. See {transcript}.log")
         print(f"{name} passed", flush=True)
+        return log
 
     def state(next_id=None, order=None):
         values = Edk2VarStore(variables).get_varlist()
@@ -97,15 +105,38 @@ def qualify(args):
             raise ValueError("unexpected persistent EFI BootNext")
         return current
 
+    tx = str(args.transaction).encode()
+    armed = b"FVCA_TRIAL_ARMED " + tx + f" {CANDIDATE:04x}".encode()
+    started = b"FVCA_TRIAL_CANDIDATE_STARTED " + tx
+    healthy = b"FVCA_TRIAL_HEALTH_RECORDED " + tx
+    available = b"FVCA_TRIAL_HEALTH_AVAILABLE " + tx
+    prior = b"FVCA_TRIAL_PREVIOUSLY_RECORDED " + tx
+
     prepare_vars(args.variables, variables, stable, candidate)
     members = mirror("trial")
-    run("trial-armed-from-stable", stable, args.candidate,
-        f"FVCA_TRIAL_ARMED {args.transaction} {CANDIDATE:04x}".encode(), members)
+    run("trial-armed-from-stable", stable, args.candidate, armed, members)
     order = state(CANDIDATE)
-    run("firmware-selected-candidate", candidate, args.candidate, b"FVCA_VM_RUNTIME_ACTIVE", members)
+    log = run("candidate-health-recorded", candidate, args.candidate, started, members, finish=healthy,
+              required=(lab["READY"], b"FVCA_SERVICE_GUEST_READY", b"FVCA_LIBVIRT_LIFECYCLE_OK"))
+    boot_id = re.search(re.escape(started) + rb" ([0-9a-f-]{36})", log)
+    runtime = re.search(rb"FVCA_VM_RUNTIME_ACTIVE ([0-9a-f]{64})", log)
+    if boot_id is None or runtime is None:
+        raise ValueError("candidate health log lacks its boot and runtime identities")
     state(order=order)
-    run("stable-order-resumed", stable, args.candidate,
-        f"FVCA_TRIAL_PREVIOUSLY_RECORDED {args.transaction}".encode(), members)
+    run("stable-read-back-health", stable, args.candidate, prior, members,
+        required=(b" ".join((available, boot_id[1], runtime[1])),), forbidden=(armed,))
+    state(order=order)
+
+    variables = args.output / "interruption-vars.fd"
+    prepare_vars(args.variables, variables, stable, candidate)
+    members = mirror("interruption")
+    run("interrupted-trial-armed", stable, args.candidate, armed, members)
+    order = state(CANDIDATE)
+    run("cut-power-before-health", candidate, args.candidate, started, members, finish=started,
+        forbidden=(healthy,))
+    state(order=order)
+    run("stable-resumed-without-health", stable, args.candidate, prior, members,
+        forbidden=(available, armed))
     state(order=order)
 
     changed = args.output / "changed-candidate.raw"
@@ -120,6 +151,13 @@ def qualify(args):
     prepare_vars(args.variables, variables, stable, candidate)
     run("changed-candidate-refused", stable, changed,
         b"FVCA_TRIAL_REFUSED candidate ESP differs from the approved image", mirror("refusal"))
+    state()
+
+    variables = args.output / "unarmed-vars.fd"
+    prepare_vars(args.variables, variables, stable, candidate, next_id=CANDIDATE)
+    denied = b"candidate trial has no recorded stable authorization"
+    run("unarmed-candidate-refused", candidate, args.candidate, denied, mirror("unarmed"), finish=denied,
+        forbidden=(started, b"FVCA_SERVICE_GUEST_READY", healthy), refusal=True)
     state()
 
 
