@@ -3,6 +3,7 @@
 import hashlib
 from uuid import UUID, uuid5
 
+from host_storage import DATA_PARTITION
 from image_verity import extract_partition, read_layout
 from runtime_boot import BOOT_EFI, PARTITIONS as CORE_PARTITIONS, build_uki, run
 
@@ -38,8 +39,8 @@ def command_line(cmdline, ids):
                      f"systemd.verity_root_options=panic-on-corruption,root-hash-signature=/usr/lib/fvca/{ROOT_SIGNATURE}"))
 
 
-def verify_readback(image, ids, sources, sector_size):
-    sector, parts = read_layout(image, PARTITIONS, sector_size=sector_size)
+def verify_readback(image, types, ids, sources, sector_size):
+    sector, parts = read_layout(image, types, sector_size=sector_size)
     with image.open("rb") as stream:
         for name, source in sources.items():
             part = parts[name]
@@ -60,7 +61,7 @@ def verify_readback(image, ids, sources, sector_size):
     return sector, parts
 
 
-def pack(args, work, ids, cmdline, uname, composition, pcr_options):
+def pack(args, work, ids, cmdline, uname, composition, pcr_options, *, data=None):
     uki = build_uki(args, work, command_line(cmdline, ids), uname, composition, pcr_options)
     run("sbverify", "--cert", args.boot_certificate, uki)
     sector, core = read_layout(args.core, CORE_PARTITIONS)
@@ -82,6 +83,14 @@ def pack(args, work, ids, cmdline, uname, composition, pcr_options):
         "runtime": work / "runtime/root", "runtime_verity": work / "runtime/verity",
         "guest": work / "guest/root", "guest_verity": work / "guest/verity",
     }
+    types = PARTITIONS
+    if data is not None:
+        identifier, payload = data
+        if identifier in ids.values():
+            raise ValueError("the Host data UUID collides with an immutable slot partition")
+        types = PARTITIONS | DATA_PARTITION
+        ids = ids | {"host_data": identifier}
+        sources["host_data"] = payload
     definitions = work / "slot.repart.d"
     definitions.mkdir()
     for index, (name, image) in enumerate(sources.items()):
@@ -89,14 +98,17 @@ def pack(args, work, ids, cmdline, uname, composition, pcr_options):
         if size == 0 or size % 4096:
             raise ValueError(f"Hypervisor slot source {name} is not 4 KiB aligned")
         (definitions / f"{index:02}.conf").write_text(
-            f"[Partition]\nType={PARTITIONS[name]}\nUUID={ids[name]}\nLabel=fvca-{name}\n"
+            f"[Partition]\nType={types[name]}\nUUID={ids[name]}\nLabel=fvca-{name}\n"
             f"SizeMinBytes={size}\nSizeMaxBytes={size}\nCopyBlocks={image}\n", encoding="utf-8"
         )
 
     disk = work / "hypervisor-slot.raw"
-    run("systemd-repart", "--empty=create", "--size=auto", "--dry-run=no", f"--sector-size={logical_sector}", f"--seed={args.gpt_slot}",
-        f"--definitions={definitions}", disk)
-    sector, parts = verify_readback(disk, ids, sources, logical_sector)
+    image_size = args.gpt_disk_bytes or "auto"
+    run("systemd-repart", "--empty=create", "--offline=yes", f"--size={image_size}", "--dry-run=no",
+        f"--sector-size={logical_sector}", f"--seed={args.gpt_slot}", f"--definitions={definitions}", disk)
+    if args.gpt_disk_bytes is not None and args.gpt_disk_bytes != disk.stat().st_size:
+        raise ValueError("the integrated image does not match the requested disk capacity")
+    sector, parts = verify_readback(disk, types, ids, sources, logical_sector)
     run("mcopy", "-i", f"{disk}@@{parts['esp']['start'] * sector}", BOOT_EFI, work / "installed.efi")
     if (work / "installed.efi").read_bytes() != uki.read_bytes():
         raise ValueError("installed ESP has a different UKI")

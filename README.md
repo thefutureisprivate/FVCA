@@ -184,7 +184,15 @@ python3 tests/check-hypervisor-gpt-slots.py \
   --lab build/host-storage-lab --output build/gpt-slot-checks
 ```
 
-The test attaches the boot images as virtual NVMe devices with the selected logical sector size. Compose its inputs with a recovery UKI or provide a seeded Guest and the matching Host storage profile. The test selects each slot with both disks attached and rejects duplicate locators or a tuple split across the two disks. Installing these immutable partitions alongside the data partitions on the physical NVMes and physical degraded boot remain separate qualification steps.
+The test attaches the boot images as virtual NVMe devices with the selected logical sector size. Compose its inputs with a recovery UKI or provide a seeded Guest and the matching Host storage profile. The test selects each slot with both disks attached and rejects duplicate locators or a tuple split across the two disks.
+
+### Provision both Hypervisor NVMe images
+
+Prepare two authenticated LUKS2 members of the same Btrfs RAID1 pool and provide `cryptsetup` on the build workstation. For an isolated test, run `tests/storage-lab.sh --authenticated NEW_LAB GUEST_DATA_RAW` with the approved Guest data image. When composing each GPT slot, add `--host-data-disk` with that slot's prepared member image and use the same signed `--storage` policy for both UKIs. Give each slot a distinct UUID. The member input must be a quiesced regular image with one GPT LUKS2 partition. The input defaults to 512-byte GPT sectors, and `--host-data-sector-size 4096` selects a 4Kn input. The output defaults to 4Kn independently of the input geometry. Pass `--gpt-disk-bytes` with the target's measured capacity to place the backup GPT at the correct final sector. The image keeps the partition sizes of its inputs and leaves unused capacity unallocated.
+
+The assembler checks the member's GPT and LUKS2 UUIDs, authenticated LUKS2 metadata, and selected TPM token when applicable. It appends the exact encrypted bytes alongside the seven immutable partitions and verifies all eight by readback before publishing a private image. The same slot test detects this layout and boots with just the two NVMe images. It checks Guest readiness with each boot slot selected and refuses ordinary startup when a required mirror member is absent or duplicated.
+
+Keep the combined images private. They contain the encrypted data from the provisioning inputs. Use them for initial provisioning or authorized recovery. Updates to the installed immutable partitions and qualification on the target physical NVMes remain separate release gates. [systemd GPT partition definitions](https://www.freedesktop.org/software/systemd/man/latest/repart.d.html)
 
 ### Exercise a one-shot Hypervisor trial and record health
 

@@ -11,6 +11,7 @@ import tempfile
 from uuid import UUID
 
 import hypervisor_gpt
+from host_storage import DATA_PARTITION
 from image_verity import read_layout
 
 
@@ -51,7 +52,8 @@ def prepare(args):
     if tuple(value for key, value in health.items() if key != "boot_id") != expected:
         raise ValueError("the health receipt differs from the authorized trial")
 
-    sector, parts = read_layout(args.candidate, hypervisor_gpt.PARTITIONS, sector_size=args.sector_size)
+    sector, parts = read_layout(args.candidate, hypervisor_gpt.PARTITIONS, sector_size=args.sector_size,
+                                optional_types=DATA_PARTITION)
     ids = {name: str(UUID(part["uuid"])) for name, part in parts.items()}
     size = parts["esp"]["size"] * sector
     if len(set(ids.values())) != len(parts) or ids["esp"] != health["candidate"] or str(size) != trial["candidate_esp_bytes"]:

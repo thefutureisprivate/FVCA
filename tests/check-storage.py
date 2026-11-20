@@ -26,6 +26,7 @@ INIT_EXIT = b"Attempted to kill init! exitcode=0x00000100"
 PCR_CONFINED = b"FVCA_SELINUX_PCR_CONFINED"
 PROMPT = re.compile(rb"Please enter (?:the )?passphrase for disk [^\r\n]{1,250}:|Enter FVCA storage TPM PIN:")
 KERNEL_AUDIT = re.compile(rb"\[ *[0-9]+\.[0-9]+\] audit: type=[0-9]+ audit\([0-9]+\.[0-9]+:[0-9]+\): [^\r\n]*\r?\n")
+KERNEL_MOUNT_NOTICE = re.compile(rb"\[ *[0-9]+\.[0-9]+\] (?:BTRFS info|erofs) \(device [^\r\n]*\r?\n")
 OVMF_CODE = Path("/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd")
 
 
@@ -183,7 +184,7 @@ def check_hypervisor(args):
             prompted, log = boot(options, f"{name}-{attempt}", key, *members, firmware_timeout=36, timeout=105)
             if b"Kernel command line:" in log:
                 break
-        log = re.sub(rb"\[ *[0-9]+\.[0-9]+\] BTRFS info \(device [^\r\n]*\r?\n", b"", KERNEL_AUDIT.sub(b"", log))
+        log = KERNEL_MOUNT_NOTICE.sub(b"", KERNEL_AUDIT.sub(b"", log))
         return prompted, log
 
     cases = [("healthy", args, member_a, member_b)]

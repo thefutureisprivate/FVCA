@@ -14,18 +14,20 @@ VERITY_PARTITIONS = {
 }
 
 
-def read_layout(image, partition_types, *, sector_size=None):
+def read_layout(image, partition_types, *, sector_size=None, optional_types=None):
     options = ("--sector-size", str(sector_size)) if sector_size is not None else ()
     output = subprocess.check_output(["sfdisk", "--json", *options, image])
     table = json.loads(output)["partitiontable"]
     entries = table["partitions"]
     actual_types = sorted(partition["type"].lower() for partition in entries)
-    if (table["label"] != "gpt" or actual_types != sorted(partition_types.values())
+    selected_types = partition_types | {name: guid for name, guid in (optional_types or {}).items()
+                                        if guid in actual_types}
+    if (table["label"] != "gpt" or actual_types != sorted(selected_types.values())
             or (sector_size is not None and table["sectorsize"] != sector_size)):
         raise ValueError(f"expected exactly these GPT partitions: {', '.join(partition_types)}")
 
     by_type = {entry["type"].lower(): entry for entry in entries}
-    return table["sectorsize"], {name: by_type[guid] for name, guid in partition_types.items()}
+    return table["sectorsize"], {name: by_type[guid] for name, guid in selected_types.items()}
 
 
 def extract_partition(image, partition, sector_size, destination):

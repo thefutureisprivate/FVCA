@@ -5,6 +5,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -13,6 +14,7 @@ from uuid import UUID
 
 import backup_destination
 import guest_boot_bundle
+import host_storage
 import hypervisor_gpt
 from image_verity import VERITY_PARTITIONS, read_layout, verify_verity
 from runtime_boot import (
@@ -37,40 +39,11 @@ ACTIVATION_FILES = (
 )
 
 
-def storage_selection(path):
-    content = path.read_bytes()
-    uuid = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
-    match = re.fullmatch(
-        rf"FVCA-HOST-STORAGE-4\nunlock=(development-passphrase|tpm2-pin)\n"
-        r"protection=(?:development-luks2|luks2-xts-hmac-sha256)\n"
-        rf"member_a=({uuid}),({uuid})\nmember_b=({uuid}),({uuid})\n"
-        rf"filesystem=btrfs\nfilesystem_uuid={uuid}\n"
-        r"(?:token_a=(?:[0-9]|[12][0-9]|3[01]),([0-9a-f]{64})\n"
-        r"token_b=(?:[0-9]|[12][0-9]|3[01]),([0-9a-f]{64})\n)?",
-        content.decode("ascii"),
-    )
-    if match is None:
-        raise ValueError("invalid Hypervisor storage selection")
-    unlock, partition_a, luks_a, partition_b, luks_b, digest_a, digest_b = match.groups()
-    if partition_a == partition_b or luks_a == luks_b:
-        raise ValueError("storage selection must name distinct partitions and LUKS2 volumes")
-    if (unlock == "tpm2-pin") != (digest_a is not None) or (digest_a is not None and digest_a == digest_b):
-        raise ValueError("TPM storage selection requires separate authorization for both tokens")
-    return content, (digest_a, digest_b)
-
-
-def unique_fields(pairs):
-    fields = dict(pairs)
-    if len(fields) != len(pairs):
-        raise ValueError("duplicate fields in the LUKS2 TPM token")
-    return fields
-
-
 def verify_tpm_token(path, expected, pcr_public):
     raw = path.read_bytes()
     if hashlib.sha256(raw).hexdigest() != expected:
         raise ValueError("exported LUKS2 token does not match the signed storage selection")
-    token = json.loads(raw, object_pairs_hook=unique_fields)
+    token = json.loads(raw, object_pairs_hook=host_storage.unique_fields)
     if (
         token["type"] != "systemd-tpm2"
         or token["tpm2-pin"] is not True
@@ -239,7 +212,8 @@ def trial_selection(path, ids, guest, *, candidate):
 
 
 def assemble(args, work):
-    storage, digests = storage_selection(args.storage) if args.storage is not None else (None, (None, None))
+    storage = host_storage.selection(args.storage) if args.storage is not None else None
+    digests = [member.token_digest for member in storage.members] if storage is not None else (None, None)
     tpm = digests[0] is not None
     token_paths = (args.tpm_token_a, args.tpm_token_b)
     if tpm != (args.pcr_key is not None) or any(tpm != (path is not None) for path in token_paths):
@@ -258,6 +232,11 @@ def assemble(args, work):
             f"--pcr-private-key={args.pcr_key}",
             "--pcr-banks=sha256", "--phases=enter-initrd", f"--policyref={PCR_POLICY_REF}",
         ]
+    data = None
+    if args.host_data_disk is not None:
+        payload = work / "host-data"
+        part = host_storage.prepare_member(storage, args.host_data_disk, args.host_data_sector_size or 512, payload)
+        data = (part, payload)
     prepared, core_hash, offset, cmdline, uname = prepare_core(args, work)
     runtime_work = work / "runtime"
     runtime_work.mkdir()
@@ -284,7 +263,7 @@ def assemble(args, work):
         if recorder.is_symlink() or not recorder.is_file() or recorder.stat().st_mode & 0o111 == 0:
             raise ValueError("the candidate VM runtime lacks its trial health recorder")
     verify_initrd(args.initrd, uname, required, forbidden, "Hypervisor")
-    extra = (("host-storage", storage),) if storage is not None else ()
+    extra = (("host-storage", storage.raw),) if storage is not None else ()
     ids = None
     if args.gpt_slot:
         ids, slot_files = hypervisor_gpt.approval(args.gpt_slot, prepared)
@@ -304,8 +283,17 @@ def assemble(args, work):
     if ids is None:
         disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)
     else:
-        disk = hypervisor_gpt.pack(args, work, ids, cmdline, uname, composition, pcr_options)
+        disk = hypervisor_gpt.pack(args, work, ids, cmdline, uname, composition, pcr_options, data=data)
+    if data is not None:
+        disk.chmod(0o600)
+    with disk.open("rb") as output:
+        os.fsync(output.fileno())
     args.output.hardlink_to(disk)
+    directory = os.open(args.output.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
     print(f"FVCA Hypervisor development disk binds core {core_hash} to VM runtime {runtime_hash}")
 
 
@@ -318,6 +306,10 @@ def main():
     parser.add_argument("--guest-release-certificate", type=Path, help="trusted Guest release signer")
     parser.add_argument("--gpt-slot", type=UUID, help="assign one unique UUID to a self-contained Hypervisor GPT slot image")
     parser.add_argument("--gpt-sector-size", type=int, choices=(512, 4096), help="GPT slot logical sector size (default 4096)")
+    parser.add_argument("--host-data-disk", type=Path, help="include one prepared GPT LUKS2 member in the slot image")
+    parser.add_argument("--host-data-sector-size", type=int, choices=(512, 4096),
+                        help="logical sector size of the input Host data image (default 512)")
+    parser.add_argument("--gpt-disk-bytes", type=int, help="exact provisioned disk size in bytes")
     trial = parser.add_mutually_exclusive_group()
     trial.add_argument("--boot-trial", type=Path, help="authorize a specific one-shot UEFI trial from the stable GPT slot")
     trial.add_argument("--boot-trial-candidate", type=Path, help="validate readiness during the authorized GPT trial")
@@ -341,6 +333,13 @@ def main():
         parser.error("a GPT slot requires its authorized Guest boot bundle")
     if args.gpt_sector_size is not None and args.gpt_slot is None:
         parser.error("sector size is only configurable for a GPT slot image")
+    if args.host_data_disk is not None and (args.gpt_slot is None or args.storage is None):
+        parser.error("integrated Host data requires a GPT slot and signed Host storage selection")
+    if args.host_data_sector_size is not None and args.host_data_disk is None:
+        parser.error("--host-data-sector-size requires --host-data-disk")
+    if args.gpt_disk_bytes is not None and (args.host_data_disk is None
+            or not 0 < args.gpt_disk_bytes < 2**63 or args.gpt_disk_bytes % (args.gpt_sector_size or 4096)):
+        parser.error("--gpt-disk-bytes requires integrated Host data and a sector-aligned byte size")
     if (args.boot_trial is not None or args.boot_trial_candidate is not None) and args.gpt_slot is None:
         parser.error("a boot trial requires a GPT slot")
     if args.boot_trial_candidate is not None and args.restore_authorization is not None:

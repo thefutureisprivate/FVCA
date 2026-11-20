@@ -16,8 +16,6 @@ from types import SimpleNamespace
 from uuid import UUID
 
 
-BTRFS_NOTICE = re.compile(rb"\[ *[0-9]+\.[0-9]+\] BTRFS info \(device [^\r\n]*\r?\n")
-
 INSTALL = b"""#!/bin/bash
 set -Eeuo pipefail
 export PATH=/usr/bin
@@ -145,7 +143,7 @@ def qualify(args):
                 values.set_boot_next(stable)
                 edk.write_varstore(store, values)
         # Kernel printk can interrupt the userspace profile report mid-line.
-        log = BTRFS_NOTICE.sub(b"", lab["KERNEL_AUDIT"].sub(b"", log))
+        log = lab["KERNEL_MOUNT_NOTICE"].sub(b"", lab["KERNEL_AUDIT"].sub(b"", log))
         if (prompts != 2 or not all(item in log for item in (
                 ready, b"Secure boot enabled", lab["HOST_PROFILES"], b"FVCA_SELINUX_ENFORCING", *required))
                 or any(item in log for item in prohibited)):
