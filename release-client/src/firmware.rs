@@ -237,7 +237,7 @@ struct Devices {
     devices: Vec<ObservedDevice>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Esrt {
     guid: String,
@@ -650,26 +650,37 @@ pub struct Intake<'a> {
     pub owner: &'a Path,
 }
 
-pub async fn scheduled() -> Result<()> {
+fn enrolled_host() -> Result<(&'static Path, PathBuf, File)> {
     let boot = Path::new("/run/fvca");
     if boot.join("boot-trial-started").try_exists()? {
         return Err(invalid("firmware scheduling requires a stable Hypervisor boot").into());
     }
+    if state::read(&boot.join("firmware-update-owner"), 32)?.len() != 32 {
+        return Err(invalid("invalid enrolled Host firmware owner").into());
+    }
     let directory = boot.join("host-data").join(ENROLLMENT);
     let pool_directory = handoff::require_pool_directory(&directory)?;
+    Ok((boot, directory, pool_directory))
+}
+
+pub fn reconcile_scheduled() -> Result<()> {
+    let (_, directory, pool) = enrolled_host()?;
     let _lease = state::lock(&directory)?;
-    if let Some((activation, evidence)) = activation::recover(&directory, &pool_directory)? {
-        let status = Status {
-            schema: "fvca-firmware-discovery-status-v1",
-            disposition: activation.disposition(),
-            checked_at: Timestamp::now().as_second(),
-            freshness: Freshness::default(),
-            staged: None,
-            activation: Some(activation),
-            recovery_evidence: Some(evidence),
-        };
-        save(&directory, STATUS, &status)?;
-        println!("{}", serde_json::to_string(&status)?);
+    if let Some(recovery) = activation::recover(&pool)? {
+        let complete = recovery.completion_blocker.is_none();
+        report_recovery(&directory, recovery)?;
+        if !complete {
+            return Err(invalid("Host firmware activation still requires reconciliation").into());
+        }
+    }
+    Ok(())
+}
+
+pub async fn scheduled() -> Result<()> {
+    let (boot, directory, pool) = enrolled_host()?;
+    let _lease = state::lock(&directory)?;
+    if let Some(recovery) = activation::recover(&pool)? {
+        report_recovery(&directory, recovery)?;
         return Ok(());
     }
     let depot = EnrolledDepot::load(boot, ENROLLMENT)?;
@@ -682,9 +693,25 @@ pub async fn scheduled() -> Result<()> {
             signature: &directory.join("policy.sig"),
             owner: &boot.join("firmware-update-owner"),
         },
-        ObservationSource::Scheduled(&depot, &pool_directory),
+        ObservationSource::Scheduled(&depot, &pool),
     )
     .await
+}
+
+fn report_recovery(directory: &Path, recovery: activation::Recovery) -> Result<()> {
+    let status = Status {
+        schema: "fvca-firmware-discovery-status-v1",
+        disposition: recovery.disposition(),
+        checked_at: Timestamp::now().as_second(),
+        freshness: Freshness::default(),
+        staged: None,
+        activation: Some(recovery.activation),
+        recovery_evidence: Some(recovery.evidence),
+        completion_blocker: recovery.completion_blocker,
+    };
+    save(directory, STATUS, &status)?;
+    println!("{}", serde_json::to_string(&status)?);
+    Ok(())
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -708,6 +735,8 @@ struct Status {
     activation: Option<activation::Activation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recovery_evidence: Option<result::Evidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completion_blocker: Option<String>,
 }
 
 pub async fn stage(inputs: Intake<'_>, source: ObservationSource<'_>) -> Result<()> {
@@ -736,6 +765,7 @@ async fn stage_locked(inputs: Intake<'_>, source: ObservationSource<'_>) -> Resu
         staged: None,
         activation: None,
         recovery_evidence: None,
+        completion_blocker: None,
     };
     if scheduled {
         save(directory, STATUS, &status)?;

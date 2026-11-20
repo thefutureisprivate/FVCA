@@ -505,6 +505,7 @@ fn run() -> Result<()> {
             Some("--run-firmware-update") => {
                 return runtime()?.block_on(firmware::scheduled());
             }
+            Some("--reconcile-firmware-update") => return firmware::reconcile_scheduled(),
             _ => (),
         }
     }

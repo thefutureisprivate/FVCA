@@ -8,8 +8,8 @@ use rustix::fs::{self, Mode, OFlags, ResolveFlags};
 use serde::Serialize;
 
 use super::{
-    Esrt, HEAD_SCHEMA, Head, OFFER, Offer, Version, activation::Activation, boot, boot_id, live,
-    qualification, transition, uuid,
+    Esrt, HEAD_SCHEMA, Head, OFFER, Offer, Version, activation::Activation, boot, boot_id, capsule,
+    live, qualification, transition, uuid,
 };
 use crate::{MANIFEST_BYTES, Result, Role, channel::digest, invalid};
 
@@ -32,6 +32,54 @@ pub(super) enum Evidence {
         #[serde(flatten)]
         observed: Observed,
     },
+}
+
+impl Evidence {
+    pub(super) fn verify_completion(
+        &self,
+        directory: &File,
+        activation: &Activation,
+    ) -> Result<()> {
+        let Self::Observed {
+            assessment,
+            boot_transition,
+            observed,
+            ..
+        } = self
+        else {
+            return Err(invalid("firmware completion requires a different verified boot").into());
+        };
+        require_success(assessment, boot_transition, &observed.fwupd_history)?;
+        let bytes = staged_record(directory, activation, OFFER, MANIFEST_BYTES)?;
+        let (_, offer) = parse_offer(&bytes, &activation.offer_sha256, &activation.device_id)?;
+        let reboot = staged_record(
+            directory,
+            activation,
+            qualification::REBOOT_FILE,
+            qualification::LIMIT,
+        )?;
+        qualification::Reboot::require_capsule_reboot(&reboot, &offer)?;
+        capsule::require_clear_queue()
+    }
+}
+
+fn require_success(
+    assessment: &Assessment,
+    boot_transition: &transition::Status,
+    history: &History,
+) -> Result<()> {
+    if *assessment != Assessment::TargetReported
+        || !matches!(boot_transition, transition::Status::Matched)
+        || !matches!(
+            history,
+            History::Matched {
+                result: HistoryResult::Success
+            }
+        )
+    {
+        return Err(invalid("firmware result, fwupd history and qualified boot must agree").into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -268,6 +316,36 @@ pub(super) fn test_offer() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_exact_terminal_consensus_qualifies_for_completion() {
+        let matched = transition::Status::Matched;
+        let blocked = transition::Status::Blocked {
+            reason: "policy differs".into(),
+        };
+        let success = History::Matched {
+            result: HistoryResult::Success,
+        };
+        let failed = History::Matched {
+            result: HistoryResult::FailedTransient,
+        };
+        let unavailable = History::Unavailable {
+            reason: "no exact result".into(),
+        };
+        assert!(require_success(&Assessment::TargetReported, &matched, &success).is_ok());
+        assert!(require_success(&Assessment::TargetReported, &blocked, &success).is_err());
+        assert!(require_success(&Assessment::TargetReported, &matched, &failed).is_err());
+        assert!(require_success(&Assessment::TargetReported, &matched, &unavailable).is_err());
+        for incomplete in [
+            Assessment::VersionOnly,
+            Assessment::TransitionPending,
+            Assessment::AttemptFailed,
+            Assessment::ConflictingReports,
+            Assessment::NoMatchingAttempt,
+        ] {
+            assert!(require_success(&incomplete, &matched, &success).is_err());
+        }
+    }
 
     #[test]
     fn binds_recovery_to_the_original_offer_and_pre_flash_esrt() -> Result<()> {

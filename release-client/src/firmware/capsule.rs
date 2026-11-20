@@ -139,6 +139,13 @@ pub(super) fn verify_ordinary_boot() -> Result<u16> {
     ordinary_boot(&variables, expected)
 }
 
+pub(super) fn require_clear_queue() -> Result<()> {
+    let binding = read_binding()?;
+    let (device_id, _) = esp_binding(&binding)?;
+    esp_space(Path::new(efi::FIRMWARE_ESP), device_id)?;
+    Ok(())
+}
+
 fn require_efivarfs(space: &StatFs) -> io::Result<()> {
     if space.f_type as u64 != EFIVARFS_MAGIC {
         return Err(invalid(

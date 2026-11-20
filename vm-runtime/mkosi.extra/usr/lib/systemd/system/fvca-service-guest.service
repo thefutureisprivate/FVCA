@@ -4,6 +4,7 @@ Requires=fvca-vm-runtime-probe.service fvca-virtqemud.service
 After=fvca-vm-runtime-probe.service fvca-virtqemud.service fvca-virtlogd.service fvca-virtlockd.service
 Before=fvca-base-ready.service
 AssertPathExists=/run/fvca/guest-launch
+ConditionPathExists=!/run/fvca/host-data/firmware-update/activation.json
 AssertSecurity=uefi-secureboot
 AssertSecurity=selinux
 OnFailure=fvca-guest-failure.service

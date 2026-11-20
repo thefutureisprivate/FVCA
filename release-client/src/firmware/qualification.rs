@@ -18,12 +18,13 @@ pub(super) const LIMIT: u64 = 8192;
 const DISTRIBUTION: &str = "distribution";
 const VENDOR: &str = "vendor";
 const REBOOT: &str = "reboot-policy";
+pub(super) const REBOOT_FILE: &str = "reboot-policy.json";
 const RECOVERY: &str = "recovery";
 pub(super) const RECOVERY_FILE: &str = "recovery.json";
 pub(super) const FILES: [&str; 4] = [
     "distribution.json",
     "vendor.json",
-    "reboot-policy.json",
+    REBOOT_FILE,
     RECOVERY_FILE,
 ];
 
@@ -229,6 +230,19 @@ pub(super) enum Status {
 }
 
 impl Reboot {
+    pub(super) fn require_capsule_reboot(bytes: &[u8], offer: &Offer) -> Result<()> {
+        let reboot: Self = decode(
+            bytes,
+            REBOOT,
+            &offer.qualification.reboot_policy_sha256,
+            offer,
+        )?;
+        if let Some(reason) = reboot.delivery_blocker() {
+            return Err(invalid(reason).into());
+        }
+        Ok(())
+    }
+
     pub(super) fn preflight(
         &self,
         boot: &transition::Status,

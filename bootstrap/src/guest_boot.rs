@@ -39,8 +39,14 @@ fn publish_trial_enrollment() -> io::Result<()> {
         .write_all(&enrolled)
 }
 
+pub enum Startup {
+    Automatic,
+    AfterFirmwareRecovery,
+    Disabled,
+}
+
 pub fn activate_if_selected(
-    auto_start: bool,
+    startup: Startup,
     devices: Option<&(PathBuf, PathBuf)>,
 ) -> io::Result<Option<String>> {
     let payload = match fs::read_to_string(SOURCE) {
@@ -64,11 +70,20 @@ pub fn activate_if_selected(
     )?;
     let bundle = selection.bundle.to_owned();
     fs::write(SELECTION, payload)?;
-    if !auto_start {
+    if matches!(startup, Startup::Disabled) {
         return Ok(Some(bundle));
     }
     publish_trial_enrollment()?;
     let control = Path::new("/run/systemd/system");
+    if matches!(startup, Startup::AfterFirmwareRecovery) {
+        let dropin = control.join("fvca-firmware-recovery.service.d");
+        fs::create_dir_all(&dropin)?;
+        fs::write(
+            dropin.join("30-resume-guest.conf"),
+            "[Unit]\nOnSuccess=fvca-service-guest.service\n",
+        )?;
+        return Ok(Some(bundle));
+    }
     let dropin = control.join("fvca-base-ready.service.d");
     let wants = control.join("fvca-base-ready.service.wants");
     fs::create_dir_all(&dropin)?;

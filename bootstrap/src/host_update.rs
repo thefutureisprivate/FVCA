@@ -4,11 +4,13 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::net::IpAddr;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
 
-use fvca_trial_authorization::{PEER_ENROLLMENT, PROMOTION_ENROLLMENT, peer_partitions};
+use fvca_trial_authorization::{
+    GUEST_CAPTURE_LOCK, PEER_ENROLLMENT, PROMOTION_ENROLLMENT, peer_partitions,
+};
 
 use crate::{invalid, run};
 
@@ -140,13 +142,37 @@ fn publish_depot(name: &str, service: &str, owner: &[u8]) -> io::Result<()> {
 }
 
 fn enable_timer(service: &str) -> io::Result<()> {
-    let timer = format!("{service}.timer");
+    enable_unit(&format!("{service}.timer"))
+}
+
+fn enable_unit(unit: &str) -> io::Result<()> {
     let wants = Path::new(UNITS).join("fvca-base.target.wants");
     fs::create_dir_all(&wants)?;
-    symlink(
-        format!("/usr/lib/systemd/system/{timer}"),
-        wants.join(&timer),
-    )
+    symlink(format!("/usr/lib/systemd/system/{unit}"), wants.join(unit))
+}
+
+fn prepare_firmware_lease() -> io::Result<()> {
+    let lock = Path::new(GUEST_CAPTURE_LOCK);
+    match fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(lock)
+    {
+        Ok(_) => (),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+        Err(error) => return Err(error),
+    }
+    let meta = fs::symlink_metadata(lock)?;
+    if !meta.is_file()
+        || meta.uid() != 0
+        || meta.gid() != 0
+        || meta.nlink() != 1
+        || meta.mode() & 0o7777 != 0o600
+    {
+        return Err(invalid("invalid Host lifecycle lease file"));
+    }
+    Ok(())
 }
 
 pub fn activate_if_selected() -> io::Result<()> {
@@ -211,13 +237,17 @@ pub fn activate_firmware_if_selected(
     runtime: &crate::runtime::Activation,
     filesystem: &str,
     storage_policy_sha256: &str,
-) -> io::Result<()> {
+    recovery: bool,
+) -> io::Result<bool> {
     let Some(owner) = owner_for(FIRMWARE_STATE)? else {
-        return Ok(());
+        return Ok(false);
     };
-    if let Err(error) = prepare_staging(FIRMWARE_STATE).and_then(|()| prepare_firmware_history()) {
+    if let Err(error) = prepare_staging(FIRMWARE_STATE)
+        .and_then(|()| prepare_firmware_history())
+        .and_then(|()| prepare_firmware_lease())
+    {
         eprintln!("FVCA_HOST_FIRMWARE_ENROLLMENT_BLOCKED {error}");
-        return Ok(());
+        return Ok(false);
     }
     if let Err(error) = crate::hypervisor_trial::publish_firmware_esp(esp) {
         eprintln!("FVCA_HOST_FIRMWARE_ESP_BLOCKED {error}");
@@ -233,6 +263,9 @@ pub fn activate_firmware_if_selected(
     }
     publish_depot(FIRMWARE_STATE, "fvca-firmware-update", &owner)?;
     enable_timer("fvca-firmware-update")?;
+    if recovery {
+        enable_unit("fvca-firmware-recovery.service")?;
+    }
     println!("FVCA_HOST_FIRMWARE_TIMER_ENROLLED");
-    Ok(())
+    Ok(true)
 }

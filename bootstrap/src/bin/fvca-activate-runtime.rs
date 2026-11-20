@@ -56,45 +56,56 @@ fn activate() -> io::Result<()> {
     runtime::install_development_probe("fvca-vm-runtime-probe.service", PROBE)?;
     let storage = storage::activate_if_selected(protected_epoch)?;
     let esp = slot.as_ref().map(|slot| slot.esp.as_str());
-    let enroll_firmware = || {
+    let enroll_firmware = |recovery| {
         if let (Some(esp), Some(epoch), Some(storage)) = (esp, epoch, &storage) {
-            host_update::activate_firmware_if_selected(
+            return host_update::activate_firmware_if_selected(
                 esp,
                 epoch,
                 &verified_runtime,
                 &storage.filesystem,
                 &storage.policy_sha256,
-            )?;
+                recovery,
+            );
         }
-        Ok::<(), io::Error>(())
+        Ok(false)
     };
-    if fvca_trial_authorization::firmware::activation_pending()? {
+    let firmware_pending = fvca_trial_authorization::firmware::activation_pending()?;
+    if firmware_pending {
         hypervisor_trial::stop_candidate_watchdog_for_firmware(&cmdline)?;
         println!("FVCA_HOST_FIRMWARE_RECOVERY_REQUIRED");
-        enroll_firmware()?;
-        println!("FVCA_VM_RUNTIME_ACTIVE {}", verified_runtime.extension);
-        return Ok(());
+        if !enroll_firmware(true)? {
+            println!("FVCA_VM_RUNTIME_ACTIVE {}", verified_runtime.extension);
+            return Ok(());
+        }
     }
     backup_policy::activate_if_selected()?;
     retention_policy::activate_if_selected()?;
-    let recovering = recovery::activate_if_selected()?;
+    let recovering = !firmware_pending && recovery::activate_if_selected()?;
     backup_job::activate_if_selected(recovering)?;
-    let guest =
-        guest_boot::activate_if_selected(!recovering, slot.as_ref().map(|slot| &slot.guest))?;
-    hypervisor_trial::start_candidate(
-        &cmdline,
-        slot.as_ref(),
-        guest.as_deref(),
-        &verified_runtime,
-        recovering,
-        epoch,
-    )?;
-    match hypervisor_trial::arm_if_authorized(esp, guest.as_deref(), &verified_runtime, epoch) {
-        Ok(hypervisor_trial::ArmOutcome::RebootIntoTrial) => {
-            return hypervisor_trial::reboot_into_trial();
+    let startup = if firmware_pending {
+        guest_boot::Startup::AfterFirmwareRecovery
+    } else if recovering {
+        guest_boot::Startup::Disabled
+    } else {
+        guest_boot::Startup::Automatic
+    };
+    let guest = guest_boot::activate_if_selected(startup, slot.as_ref().map(|slot| &slot.guest))?;
+    if !firmware_pending {
+        hypervisor_trial::start_candidate(
+            &cmdline,
+            slot.as_ref(),
+            guest.as_deref(),
+            &verified_runtime,
+            recovering,
+            epoch,
+        )?;
+        match hypervisor_trial::arm_if_authorized(esp, guest.as_deref(), &verified_runtime, epoch) {
+            Ok(hypervisor_trial::ArmOutcome::RebootIntoTrial) => {
+                return hypervisor_trial::reboot_into_trial();
+            }
+            Ok(hypervisor_trial::ArmOutcome::ContinueBoot) => (),
+            Err(error) => eprintln!("FVCA_TRIAL_REFUSED {error}"),
         }
-        Ok(hypervisor_trial::ArmOutcome::ContinueBoot) => (),
-        Err(error) => eprintln!("FVCA_TRIAL_REFUSED {error}"),
     }
     if !recovering && let (Some(esp), Some(guest), Some(epoch)) = (esp, guest.as_deref(), epoch) {
         hypervisor_trial::publish_running_context(esp, &verified_runtime, guest, epoch)?;
@@ -104,7 +115,9 @@ fn activate() -> io::Result<()> {
         if guest.is_some() {
             host_update::activate_guest_if_selected()?;
         }
-        enroll_firmware()?;
+        if !firmware_pending {
+            enroll_firmware(false)?;
+        }
     }
 
     println!("FVCA_VM_RUNTIME_ACTIVE {}", verified_runtime.extension);
