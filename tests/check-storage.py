@@ -61,6 +61,8 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
         cpu = "Skylake-Client,vmx=on,hle=off,rtm=off"
         machine += ",kernel_irqchip=split"
         devices = ["-device", "virtio-rng-pci"]
+    if getattr(args, "no_default_devices", False):
+        devices.append("-nodefaults")
     nvme = getattr(args, "nvme_boot", False)
     sector = getattr(args, "boot_sector_size", 512)
     geometry = f",logical_block_size={sector},physical_block_size={sector}" if nvme or sector != 512 else ""

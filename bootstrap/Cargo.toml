@@ -9,10 +9,12 @@ publish = false
 fvca-allocator-binding = { path = "allocator-binding" }
 fvca-btrfs-boundary = { path = "btrfs-boundary", optional = true }
 fvca-libvirt-boundary = { path = "libvirt-boundary", optional = true }
+fvca-signature-boundary = { path = "signature-boundary", optional = true }
 
 [features]
 libvirt = ["dep:fvca-btrfs-boundary", "dep:fvca-libvirt-boundary"]
 backup = []
+promotion = ["dep:fvca-signature-boundary"]
 
 [[bin]]
 name = "fvca-backup-worker"
@@ -29,6 +31,10 @@ required-features = ["libvirt"]
 [[bin]]
 name = "fvca-trial-health"
 required-features = ["libvirt"]
+
+[[bin]]
+name = "fvca-verify-boot-promotion"
+required-features = ["promotion"]
 
 [profile.release]
 panic = "abort"

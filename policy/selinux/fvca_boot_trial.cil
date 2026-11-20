@@ -1,12 +1,12 @@
-; efivarfs uses one inode label. A private executable domain supplies the
-; write permission and creation is allowed only for the BootNext name.
+; efivarfs uses one inode label. The two fixed-path writers use a private
+; domain. Creation is allowed only for the BootNext name.
 (type fvca_boot_next_writer_t)
 (typeattributeset domain (fvca_boot_next_writer_t))
 (roletype system_r fvca_boot_next_writer_t)
 (type fvca_boot_next_writer_exec_t)
 (typeattributeset file_type (fvca_boot_next_writer_exec_t))
 (roletype object_r fvca_boot_next_writer_exec_t)
-(filecon "/usr/lib/fvca/set-boot-next" file (system_u object_r fvca_boot_next_writer_exec_t ((s0) (s0))))
+(filecon "/usr/lib/fvca/set-boot-(next|order)" file (system_u object_r fvca_boot_next_writer_exec_t ((s0) (s0))))
 (typetransition init_t fvca_boot_next_writer_exec_t process fvca_boot_next_writer_t)
 (allow init_t fvca_boot_next_writer_t (process (getattr sigkill signal transition)))
 (allow init_t fvca_boot_next_writer_t (process2 (nnp_transition)))
@@ -36,4 +36,4 @@
 (allow fvca_boot_next_create_t efivarfs_t (filesystem (associate)))
 (allow fvca_boot_next_writer_t fvca_boot_next_create_t (file (create)))
 (allow fvca_boot_next_writer_t efivarfs_t (dir (add_name search write)))
-(allow fvca_boot_next_writer_t efivarfs_t (file (getattr open write)))
+(allow fvca_boot_next_writer_t efivarfs_t (file (getattr open read write)))

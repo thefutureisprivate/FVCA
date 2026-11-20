@@ -34,8 +34,8 @@ fn activate() -> io::Result<()> {
     backup_job::activate_if_selected(recovering)?;
     let guest = guest_boot::activate_if_selected(!recovering, slot.as_ref().map(|slot| &slot.guest))?;
     let esp = slot.as_ref().map(|slot| slot.esp.as_str());
-    hypervisor_trial::start_candidate(esp, guest.as_deref(), &verified_runtime, recovering)?;
-    if let Err(error) = hypervisor_trial::arm_if_authorized(esp, guest.as_deref()) {
+    hypervisor_trial::start_candidate(slot.as_ref(), guest.as_deref(), &verified_runtime, recovering)?;
+    if let Err(error) = hypervisor_trial::arm_if_authorized(esp, guest.as_deref(), &verified_runtime) {
         eprintln!("FVCA_TRIAL_REFUSED {error}");
     }
 

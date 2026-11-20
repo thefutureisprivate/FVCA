@@ -25,6 +25,7 @@ pub struct Slot {
     pub esp: String,
     pub runtime: (PathBuf, PathBuf),
     pub guest: (PathBuf, PathBuf),
+    pub payload_ids: [String; 6],
 }
 
 fn parse(manifest: &str) -> io::Result<[&str; 7]> {
@@ -120,6 +121,7 @@ impl Slot {
             esp: uuids[0].to_owned(),
             runtime: (runtime, runtime_verity),
             guest: (guest, guest_verity),
+            payload_ids: std::array::from_fn(|index| uuids[index + 1].to_owned()),
         }))
     }
 }

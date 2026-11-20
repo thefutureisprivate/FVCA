@@ -9,6 +9,10 @@ use std::process::{Command, Stdio};
 
 use crate::{find_partition, identity, invalid, recovery, runtime, sys_block};
 
+mod promotion;
+
+pub const PROMOTION_KEY: &str = "/usr/lib/fvca/hypervisor-promotion-key";
+pub const PROMOTION_LIMIT: usize = 2048;
 const AUTHORIZATION: &str = "/usr/lib/fvca/hypervisor-trial";
 const CANDIDATE: &str = "/usr/lib/fvca/hypervisor-trial-candidate";
 const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
@@ -206,6 +210,34 @@ fn boot_order() -> io::Result<Vec<u16>> {
     Ok(order)
 }
 
+fn promoted_order(current: &[u16], stable: u16, candidate: u16) -> io::Result<Vec<u16>> {
+    if stable == candidate || current.get(..2) != Some(&[stable, candidate]) {
+        return Err(invalid(
+            "EFI BootOrder must start with the approved stable and candidate entries",
+        ));
+    }
+    let mut order = current.to_vec();
+    order.swap(0, 1);
+    Ok(order)
+}
+
+pub fn write_promoted_order(stable: u16, candidate: u16) -> io::Result<()> {
+    if selected()? != stable || boot_next()?.is_some() {
+        return Err(invalid(
+            "boot promotion requires the selected stable slot with no one-shot override",
+        ));
+    }
+    let order = promoted_order(&boot_order()?, stable, candidate)?;
+    let mut payload = ATTRIBUTES.to_le_bytes().to_vec();
+    payload.extend(order.iter().flat_map(|id| id.to_le_bytes()));
+    // efivarfs passes a complete payload to one EFI SetVariable call.
+    let mut variable = OpenOptions::new().write(true).open(variable("BootOrder"))?;
+    if variable.write(&payload)? != payload.len() || boot_order()? != order {
+        return Err(invalid("firmware did not store the approved boot order"));
+    }
+    Ok(())
+}
+
 fn boot_next() -> io::Result<Option<u16>> {
     match efi_data("BootNext", ATTRIBUTES) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -348,7 +380,7 @@ fn read_record(path: &Path) -> io::Result<Vec<u8>> {
     {
         return Err(invalid("boot trial record is not a private Host file"));
     }
-    bounded_read(file, 1024)
+    bounded_read(file, PROMOTION_LIMIT)
 }
 
 fn publish(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -390,22 +422,38 @@ fn verify_arming(directory: &Path, id: &str, attempt: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn prior_health(directory: &Path, approved: &Authorization<'_>, attempt: &[u8]) -> io::Result<()> {
-    let id = approved.trial.transaction;
-    let receipt = match read_record(&directory.join(format!("{id}.healthy"))) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        prior => prior?,
-    };
-    verify_arming(directory, id, attempt)?;
-    let evidence = evidence(&receipt)?;
-    if evidence.transaction != id
+fn approved_evidence<'a>(
+    approved: &Authorization<'_>,
+    receipt: &'a [u8],
+) -> io::Result<Evidence<'a>> {
+    let evidence = evidence(receipt)?;
+    if evidence.transaction != approved.trial.transaction
         || evidence.candidate != approved.trial.candidate.esp
         || evidence.esp_digest != approved.digest
         || evidence.core != approved.core
         || evidence.runtime != approved.runtime
         || evidence.guest != approved.guest
-        || read_record(&directory.join(format!("{id}.started")))? != receipt
     {
+        return Err(invalid(
+            "candidate health does not match the authorized trial",
+        ));
+    }
+    Ok(evidence)
+}
+
+fn prior_health(
+    directory: &Path,
+    approved: &Authorization<'_>,
+    attempt: &[u8],
+) -> io::Result<Option<Vec<u8>>> {
+    let id = approved.trial.transaction;
+    let receipt = match read_record(&directory.join(format!("{id}.healthy"))) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        prior => prior?,
+    };
+    verify_arming(directory, id, attempt)?;
+    let evidence = approved_evidence(approved, &receipt)?;
+    if read_record(&directory.join(format!("{id}.started")))? != receipt {
         return Err(invalid(
             "recorded candidate health does not match the authorized attempt",
         ));
@@ -414,10 +462,14 @@ fn prior_health(directory: &Path, approved: &Authorization<'_>, attempt: &[u8]) 
         "FVCA_TRIAL_HEALTH_AVAILABLE {id} {} {}",
         evidence.boot, evidence.runtime
     );
-    Ok(())
+    Ok(Some(receipt))
 }
 
-pub fn arm_if_authorized(current_esp: Option<&str>, guest: Option<&str>) -> io::Result<()> {
+pub fn arm_if_authorized(
+    current_esp: Option<&str>,
+    guest: Option<&str>,
+    active: &runtime::Activation,
+) -> io::Result<()> {
     let raw = match read(Path::new(AUTHORIZATION), 1024) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
@@ -431,21 +483,31 @@ pub fn arm_if_authorized(current_esp: Option<&str>, guest: Option<&str>) -> io::
             "stable boot must use the approved trial Guest bundle",
         ));
     }
-    if current_esp != Some(trial.stable.esp)
-        || selected()? != trial.stable.id
-        || boot_order()?.first() != Some(&trial.stable.id)
-    {
+    if current_esp != Some(trial.stable.esp) || selected()? != trial.stable.id {
+        return Err(invalid(
+            "the firmware must have selected the signed stable slot",
+        ));
+    }
+    gpt_device(&trial.stable)?;
+    let order = boot_order()?;
+    if order.get(..2) == Some(&[trial.candidate.id, trial.stable.id]) {
+        println!("FVCA_PROMOTION_STABLE_RECOVERY {}", trial.transaction);
+        return Ok(());
+    }
+    if order.first() != Some(&trial.stable.id) {
         return Err(invalid(
             "the signed stable slot must be booted and first in EFI BootOrder",
         ));
     }
-    gpt_device(&trial.stable)?;
     let directory = record_directory()?;
     let record = directory.join(trial.transaction);
     match read_record(&record) {
         Ok(prior) if prior == raw => {
             println!("FVCA_TRIAL_PREVIOUSLY_RECORDED {}", trial.transaction);
-            return prior_health(&directory, &approved, &raw);
+            if let Some(health) = prior_health(&directory, &approved, &raw)? {
+                promotion::apply(&directory, &approved, &raw, &health, active, &order)?;
+            }
+            return Ok(());
         }
         Ok(_) => {
             return Err(invalid(
@@ -487,7 +549,7 @@ fn boot_id() -> io::Result<String> {
 }
 
 pub fn start_candidate(
-    current_esp: Option<&str>,
+    slot: Option<&crate::hypervisor_slot::Slot>,
     guest: Option<&str>,
     active: &runtime::Activation,
     recovering: bool,
@@ -498,10 +560,10 @@ pub fn start_candidate(
         Ok(raw) => raw,
     };
     let trial = candidate_selection(std::str::from_utf8(&raw).map_err(io::Error::other)?)?;
+    let slot = slot.ok_or_else(|| invalid("trial candidate requires its verified GPT slot"))?;
     if recovering
-        || current_esp != Some(trial.candidate.esp)
+        || slot.esp != trial.candidate.esp
         || selected()? != trial.candidate.id
-        || boot_order()?.first() != Some(&trial.stable.id)
         || boot_next()?.is_some()
         || Path::new(AUTHORIZATION).try_exists()?
     {
@@ -510,6 +572,22 @@ pub fn start_candidate(
         ));
     }
     let directory = record_directory()?;
+    let order = boot_order()?;
+    if order.first() == Some(&trial.candidate.id) {
+        return promotion::authorize_promoted(
+            &directory,
+            &trial,
+            guest,
+            active,
+            &order,
+            &slot.payload_ids,
+        );
+    }
+    if order.first() != Some(&trial.stable.id) {
+        return Err(invalid(
+            "trial boot requires the stable slot first in EFI BootOrder",
+        ));
+    }
     let attempt = read_record(&directory.join(trial.transaction)).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             invalid("candidate trial has no recorded stable authorization")
@@ -558,6 +636,7 @@ pub fn start_candidate(
             error
         }
     })?;
+    promotion::record_candidate_key(&directory, trial.transaction)?;
     publish(Path::new(STARTED), record.as_bytes())?;
     let units = Path::new("/run/systemd/system");
     let requires = units.join("fvca-base.target.requires");

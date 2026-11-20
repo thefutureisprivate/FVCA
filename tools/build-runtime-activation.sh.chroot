@@ -8,9 +8,11 @@ export CARGO_TARGET_DIR="$build_dir/target"
 export RUSTFLAGS="-Dwarnings"
 
 target=x86_64-unknown-linux-gnu
-binaries=(fvca-activate-runtime fvca-set-boot-next)
+binaries=(fvca-activate-runtime fvca-set-boot-next fvca-set-boot-order fvca-verify-boot-promotion)
+features=(--features promotion)
 if [[ -n "${FVCA_GUEST_DATA_SELECTION:-}" ]]; then
     binaries=(fvca-activate-guest-data)
+    features=()
     install -Dm644 "$SRCDIR/$FVCA_GUEST_DATA_SELECTION" "$DESTDIR/usr/lib/fvca/guest-data"
     if [[ "${FVCA_GUEST_OCI:-}" == yes ]]; then
         binaries+=(fvca-activate-oci-runtime)
@@ -18,11 +20,12 @@ if [[ -n "${FVCA_GUEST_DATA_SELECTION:-}" ]]; then
 fi
 arguments=()
 for binary in "${binaries[@]}"; do arguments+=(--bin "$binary"); done
-cargo build --frozen --release --target "$target" --manifest-path "$SRCDIR/bootstrap/Cargo.toml" "${arguments[@]}"
+cargo build --frozen --release --target "$target" --manifest-path "$SRCDIR/bootstrap/Cargo.toml" "${features[@]}" "${arguments[@]}"
 for binary in "${binaries[@]}"; do
     install -Dm755 "$CARGO_TARGET_DIR/$target/release/$binary" "$DESTDIR/usr/lib/fvca/${binary#fvca-}"
 done
 if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-slot-support-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-trial-support-v2"
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-promotion-support-v1"
 fi

@@ -213,7 +213,7 @@ guest_bundle=GUEST_BOOT_BUNDLE_VERITY_ROOT
 
 Enroll two active UEFI boot entries with short-form GPT device paths to `\EFI\BOOT\BOOTX64.EFI` and put the stable entry first in `BootOrder`. The Hypervisor checks `BootCurrent`, both boot entries and the candidate ESP after opening the encrypted Btrfs mirror. After flushing the transaction record, it invokes a confined writer that exclusively creates `BootNext` at a fixed path. It flushes a second record only after verifying `BootNext` by reading it back. Firmware consumes `BootNext` before starting the candidate. The original boot order remains in effect on subsequent resets. [UEFI Boot Manager](https://uefi.org/specs/UEFI/2.10/03_Boot_Manager.html)
 
-Before launching the candidate's Guest, the initramfs checks the recorded stable authorization against the candidate UKI selection, actual boot entry and verified core, runtime and Guest roots. This check accounts for EFI filesystem metadata writes during boot. The initramfs records the candidate boot ID on Btrfs. After the base and Guest startup checks pass, the recorder checks the running Guest through libvirt and pings its Guest agent. It then writes `boot-trials/TRANSACTION_UUID.healthy` to the encrypted mirror. The stable slot reads back a matching record on return. This record is local readiness evidence. Promotion, protected epoch advancement, application-specific validation, physical qualification, and automatic reset after a stalled trial remain separate requirements.
+Before launching the candidate's Guest, the initramfs checks the recorded stable authorization against the candidate UKI selection, actual boot entry and verified core, runtime and Guest roots. This check accounts for EFI filesystem metadata writes during boot. The initramfs records the candidate boot ID on Btrfs. After the base and Guest startup checks pass, the recorder checks the running Guest through libvirt and pings its Guest agent. It then writes `boot-trials/TRANSACTION_UUID.healthy` to the encrypted mirror. The stable slot reads back a matching record on return. This record is local readiness evidence.
 
 The Fedora KVM lab test uses `python3-virt-firmware` to seed the entries in a private OVMF variable store. Its successful trial, interrupted trial and tamper cases use separate copies of the variable store and both Btrfs members. Use the same signed storage profile on both input slots and seed the mirror with matching Guest data.
 
@@ -224,6 +224,24 @@ python3 tests/check-hypervisor-trial.py \
 ```
 
 The test checks that changing a candidate ESP byte leaves the stable slot bootable, that a healthy candidate records its boot ID and runtime, and that cutting power before readiness yields no health record. It also selects the candidate without arming a trial and checks that it refuses to start the Guest. Each armed candidate attempt returns through the original stable order on the next boot.
+
+### Promote an independently approved Hypervisor trial
+
+Pass the same `--boot-promotion-public-key PUBLIC_KEY_PEM` when composing the stable and candidate slots. Use a dedicated Ed25519 authority and keep its private key off the appliance. After the trial, review the exact health receipt and the recovery release. Capture the candidate disk's installed ESP after the trial so the approval covers any firmware writes during the trial.
+
+```sh
+python3 tools/sign-hypervisor-promotion.py \
+  --trial stable-trial.txt --health TRANSACTION_UUID.healthy \
+  --candidate candidate-after-trial.raw --stable-core STABLE_CORE_VERITY_ROOT \
+  --stable-runtime STABLE_VM_RUNTIME_VERITY_ROOT --sign-key promotion.key \
+  --output TRANSACTION_UUID.promotion
+```
+
+Place the packet in `boot-trials` on the authorized Host Btrfs mirror as a private `0600` root-owned file through the maintenance path. Boot the stable slot normally with the approved stable and candidate as the first two EFI entries. The verifier checks that the candidate trial pinned the same promotion authority. It compares the signature, exact readiness receipt, running stable roots, and installed candidate ESP with the approval. It checks all three candidate dm-verity trees on the approved GPT partitions before flushing the signed intent and swapping the first two EFI entries. The stable slot becomes the second entry. Later boots of the promoted candidate validate the durable signed intent and the booted composition. [Linux efivarfs documentation](https://docs.kernel.org/filesystems/efivarfs.html)
+
+If the write is interrupted after the intent is flushed, the original stable order or the approved candidate-first order can boot using its existing authorization. A fresh trial is required to attempt another promotion after a consumed intent leaves the stable order in place. Application-specific validation, protected epoch advancement, physical qualification, and automatic reset after a stalled trial remain separate release requirements.
+
+Run `tests/check-hypervisor-promotion.py` against two fresh 4Kn slot images signed with a disposable promotion authority. Supply the stable trial file, the stable core and VM runtime root hashes, a signed-Guest seeded mirror from `tests/storage-lab.sh`, and separate Ed25519 private keys for the approved and incorrect signers. The test writes the packet only to disposable Btrfs copies. It checks rejection of an incorrect signer, a candidate-first order without a durable approval, and candidate media corruption. It also checks that the promoted candidate and the retained stable entry can both reach Guest readiness.
 
 ## Development Hypervisor storage
 
