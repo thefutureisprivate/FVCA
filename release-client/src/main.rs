@@ -255,7 +255,7 @@ async fn load_repository(
     };
     validate_root(&root, limits)?;
     fs::write(work.join("root.json"), &root)?;
-    let (metadata, targets) = depot.urls()?;
+    let (metadata, targets) = depot.urls();
     let loaded = RepositoryLoader::new(&root, metadata, targets)
         .transport(depot)
         .limits(limits)
@@ -428,11 +428,13 @@ fn run() -> Result<()> {
         .collect::<Vec<_>>();
     let [root, depot, state, selection] = operands.as_slice() else {
         return Err(invalid(
-            "usage: fvca-release-client TRUSTED_ROOT DEPOT PRIVATE_STATE SELECTION_JSON",
+            "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON",
         )
         .into());
     };
     tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
         .build()?
         .block_on(intake(root, depot, state, selection))
 }
@@ -440,6 +442,11 @@ fn run() -> Result<()> {
 fn main() {
     if let Err(error) = run() {
         eprintln!("FVCA release intake failed: {error}");
+        let mut source = error.source();
+        while let Some(cause) = source {
+            eprintln!("  {cause}");
+            source = cause.source();
+        }
         std::process::exit(1);
     }
 }

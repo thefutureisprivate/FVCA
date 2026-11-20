@@ -62,7 +62,7 @@ Use the same QEMU command with `build/exec-check/fvca-dev-exec-check.raw` as the
 
 ## Verify and stage a signed role release
 
-`fvca-release-client` accepts an exact role release from a local TUF depot on the release or recovery workstation. Use an out-of-band trusted root and a separately authorized local selection record. Keep the TUF root and approved targets signing keys offline. Assign distinct Ed25519 keys to all four top-level TUF roles, and use consistent snapshots with SHA-256 and lengths at both metadata links. The client accepts timestamp metadata with up to 24 hours of remaining validity and snapshot metadata with up to seven days. Use a trusted clock and preserve the private metadata state across imports. [TUF specification](https://theupdateframework.github.io/specification/latest/) · [Amutable Quarry distribution](https://amutable.com/blog/distributing-images-quarry)
+`fvca-release-client` accepts an exact role release from a configured HTTPS or local TUF depot on the release or recovery workstation. Use an out-of-band trusted root and a separately authorized local selection record. Keep the TUF root and approved targets signing keys offline. Assign distinct Ed25519 keys to all four top-level TUF roles, and use consistent snapshots with SHA-256 and lengths at both metadata links. The client accepts timestamp metadata with up to 24 hours of remaining validity and snapshot metadata with up to seven days. Use a trusted clock and preserve the private metadata state across imports. [TUF specification](https://theupdateframework.github.io/specification/latest/) · [Amutable Quarry distribution](https://amutable.com/blog/distributing-images-quarry)
 
 Publish a top-level target named `ROLE-EPOCH-release.json`. The Hypervisor tuple contains the composed boot disk, the VM runtime disk, and its authorized Guest boot disk. The Service Guest tuple contains the packed Guest boot disk holding the signed UKI, core and OCI runtime. Publish a qualification record as a separate target and include its digest and byte count in the manifest. Before signing targets, independently review the actual qualification evidence and verify the signed boot and runtime artifacts with the role's release authorities.
 
@@ -82,6 +82,19 @@ For example, the Service Guest manifest uses this shape. Replace the digest stri
 
 The Hypervisor composition instead uses `role` set to `hypervisor` and requires `boot`, `vm_runtime` and `guest_boot` member records. Add `ROLE-EPOCH-boot.raw`, `ROLE-EPOCH-vm-runtime.raw`, `ROLE-EPOCH-guest-boot.raw` and `ROLE-EPOCH-qualification.json` targets as applicable. In the depot, use `metadata/` for the TUF role documents and `targets/` for hash-prefixed target files. Mount imported media with `nodev,nosuid,noexec` and keep it read-only for intake.
 
+Keep the depot configuration and CA bundle under the intake operator's control alongside the trusted root. The release selection can specify only a role, epoch, manifest digest and byte budget. For HTTPS, configure a static origin with a trailing slash on the depot path, an absolute PEM CA bundle path and a deadline for fetching the complete release. The client verifies the server name against this CA bundle, connects directly to the configured origin and requires unencoded response bodies. Serve repository objects with HTTP 200 and missing objects with HTTP 404.
+
+```json
+{
+  "transport": "https",
+  "base_url": "https://updates.example.org/fvca/",
+  "ca_file": "/etc/fvca/update-ca.pem",
+  "deadline_seconds": 1800
+}
+```
+
+For an offline depot, use `{"transport":"local","path":"/mnt/fvca/depot"}` in the depot configuration. Keep the same trusted TUF metadata state when moving between HTTPS and a local copy of the same repository.
+
 Prepare a private state directory owned by the intake account with mode `0700`. In the trusted selection JSON, supply `role`, `epoch`, the independently authorized `minimum_epoch`, `manifest_sha256`, and `max_release_bytes` for the total logical size of the selected set. Supply the initial trusted root from verified configuration, and keep its bytes stable when the client advances the repository's trusted root through TUF rotation.
 
 ```sh
@@ -91,12 +104,14 @@ cargo vendor --locked --versioned-dirs --manifest-path release-client/Cargo.toml
 # Run the build below in a Fedora Rust 1.100 environment with networking disabled.
 cargo build --frozen --release --manifest-path release-client/Cargo.toml \
   --config build/release-client-cargo.toml
-release-client/target/release/fvca-release-client trusted-root.json depot intake-state selection.json
+release-client/target/release/fvca-release-client trusted-root.json depot.json intake-state selection.json
 ```
 
-`FVCA_RELEASE_STAGED` names the complete verified tuple under `intake-state/staged/MANIFEST_SHA256`. Treat staged artifacts as inputs to the role's boot and installation verifiers. The current client handles local intake. HTTPS transport, on-node activation and an independently protected on-node security epoch are separate release gates.
+`FVCA_RELEASE_STAGED` names the complete verified tuple under `intake-state/staged/MANIFEST_SHA256`. Treat staged artifacts as inputs to the role's boot and installation verifiers. On-node activation and an independently protected on-node security epoch remain release gates.
 
 Run `tests/check-release-intake.py` with Python TUF 7.0.1 and securesystemslib 1.6.0 with crypto support. Supply `--client`, `--hypervisor`, `--vm-runtime`, `--guest` and a new `--output` directory on the same filesystem as the three disposable lab images. The fixture signs a test depot with ephemeral keys and exercises staging, expiry, role and epoch mismatches, artifact corruption, and persistent metadata and root rollback checks.
+
+Use the same Python environment for `tests/check-release-https.py --client FILE --fixture INTAKE_TEST_OUTPUT --output NEW_DIRECTORY`. It serves the signed fixtures over loopback TLS and checks CA and server-name validation, proxy and redirect handling, size and time bounds, recovery from an interrupted transfer, and persisted rollback checks.
 
 ## Hypervisor runtime candidate
 

@@ -117,7 +117,9 @@ def fixture(client, output, hypervisor, vm_runtime, guest):
         state.mkdir(mode=0o700, exist_ok=True)
         request = output / f"selection-{name}.json"
         write_json(request, selection)
-        command = [client, pinned, depot, state, request]
+        config = output / f"depot-{name}.json"
+        write_json(config, {"transport": "local", "path": str(depot)})
+        command = [client, pinned, config, state, request]
         result = subprocess.run(command, text=True, capture_output=True, check=False, timeout=120)
         (output / f"{name}.log").write_text(result.stdout + result.stderr)
         if failure:
