@@ -11,6 +11,8 @@
 (allow init_t fvca_host_data_t (dir (add_name create getattr ioctl open read remove_name search setattr write)))
 (allow init_t fvca_host_data_t (file (create getattr ioctl lock open read relabelfrom relabelto rename setattr unlink write)))
 (allow init_t virt_image_t (file (relabelfrom relabelto)))
+; Let the firmware daemon traverse to its separately labeled history directory.
+(allow fwupd_t fvca_host_data_t (dir (getattr search)))
 
 ; Cold restore moves two recorded VM subvolume roots between private parents.
 ; The launcher gives only those roots a movable label before the exchange.

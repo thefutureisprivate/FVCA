@@ -20,19 +20,20 @@ const RUN: &str = "/run/fvca";
 const SIGNED: &str = "/usr/lib/fvca";
 const UNITS: &str = "/run/systemd/system";
 
+fn private_directory(meta: &fs::Metadata, device: u64) -> bool {
+    meta.is_dir()
+        && meta.uid() == 0
+        && meta.gid() == 0
+        && meta.mode() & 0o7777 == 0o700
+        && meta.dev() == device
+}
+
 fn prepare_staging(name: &str) -> io::Result<()> {
     let data = Path::new(HOST_DATA);
     let state = data.join(name);
     let parent = state.symlink_metadata()?;
     let device = data.metadata()?.dev();
-    let private = |meta: &fs::Metadata| {
-        meta.is_dir()
-            && meta.uid() == 0
-            && meta.gid() == 0
-            && meta.mode() & 0o7777 == 0o700
-            && meta.dev() == device
-    };
-    if !private(&parent) {
+    if !private_directory(&parent, device) {
         return Err(invalid(
             "Host update state requires a private directory on the authenticated pool",
         ));
@@ -43,7 +44,7 @@ fn prepare_staging(name: &str) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
         Err(error) => return Err(error),
     }
-    if !private(&staging.symlink_metadata()?) {
+    if !private_directory(&staging.symlink_metadata()?, device) {
         return Err(invalid(
             "Host release staging requires a private directory on the authenticated pool",
         ));
@@ -55,7 +56,7 @@ fn prepare_staging(name: &str) -> io::Result<()> {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
             Err(error) => return Err(error),
         }
-        if !private(&inbox.symlink_metadata()?) {
+        if !private_directory(&inbox.symlink_metadata()?, device) {
             return Err(invalid(
                 "Guest trial inbox must be private and on the authenticated pool",
             ));
@@ -64,6 +65,34 @@ fn prepare_staging(name: &str) -> io::Result<()> {
     run(Command::new("/usr/bin/chcon")
         .args(["--no-dereference", "system_u:object_r:fvca_os_stage_t:s0"])
         .arg(staging))
+}
+
+fn prepare_firmware_history() -> io::Result<()> {
+    let data = Path::new(HOST_DATA);
+    let state = data.join(FIRMWARE_STATE);
+    let history = state.join("history");
+    match fs::DirBuilder::new().mode(0o700).create(&history) {
+        Ok(()) => fs::File::open(&state)?.sync_all()?,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+        Err(error) => return Err(error),
+    }
+    if !private_directory(&history.symlink_metadata()?, data.metadata()?.dev()) {
+        return Err(invalid(
+            "firmware history requires a private directory on the authenticated pool",
+        ));
+    }
+    run(Command::new("/usr/bin/chcon")
+        .args(["--no-dereference", "system_u:object_r:fwupd_var_lib_t:s0"])
+        .arg(&history))?;
+    let dropin = Path::new(UNITS).join("fvca-fwupd.service.d");
+    fs::create_dir_all(&dropin)?;
+    fs::write(
+        dropin.join("20-history.conf"),
+        format!(
+            "[Unit]\nAfter=fvca-base-ready.service\nAssertPathIsMountPoint={HOST_DATA}\n\n[Service]\nEnvironment=FVCA_FWUPD_PERSISTENT_HISTORY=1\nReadWritePaths={}\n",
+            history.display()
+        ),
+    )
 }
 
 fn owner_for(name: &str) -> io::Result<Option<Vec<u8>>> {
@@ -186,7 +215,7 @@ pub fn activate_firmware_if_selected(
     let Some(owner) = owner_for(FIRMWARE_STATE)? else {
         return Ok(());
     };
-    if let Err(error) = prepare_staging(FIRMWARE_STATE) {
+    if let Err(error) = prepare_staging(FIRMWARE_STATE).and_then(|()| prepare_firmware_history()) {
         eprintln!("FVCA_HOST_FIRMWARE_ENROLLMENT_BLOCKED {error}");
         return Ok(());
     }

@@ -43,10 +43,26 @@ pub(super) enum Assessment {
 }
 
 #[derive(Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub(super) enum History {
+    Matched { result: HistoryResult },
+    Unavailable { reason: String },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum HistoryResult {
+    Success,
+    Failed,
+    FailedTransient,
+}
+
+#[derive(Serialize)]
 pub(super) struct Observed {
     pub(super) version: Version,
     pub(super) esrt: Option<Esrt>,
     pub(super) transition_pending: bool,
+    pub(super) fwupd_history: History,
 }
 
 pub(super) fn inspect(directory: &File, activation: &Activation) -> Evidence {
@@ -89,7 +105,7 @@ fn collect(directory: &File, activation: &Activation) -> Result<(Assessment, Obs
     file.take(MANIFEST_BYTES + 1).read_to_end(&mut bytes)?;
     let (head, offer) = parse_offer(&bytes, &activation.offer_sha256, &activation.device_id)?;
     require_baseline(&offer, activation.esrt_before.as_ref())?;
-    let observed = live::read_result(&offer, &head.system_uuid, &head.fwupd_version)?;
+    let observed = live::read_result(&offer, &head.system_uuid, &head.fwupd_version, activation)?;
     let assessment = assess(&offer, &observed);
     Ok((assessment, observed))
 }
@@ -135,6 +151,15 @@ fn require_baseline(offer: &Offer, before: Option<&Esrt>) -> Result<()> {
 pub(super) fn assess(offer: &Offer, observed: &Observed) -> Assessment {
     if observed.transition_pending {
         return Assessment::TransitionPending;
+    }
+    if let History::Matched { result } = &observed.fwupd_history {
+        let expected = match result {
+            HistoryResult::Success => &offer.to,
+            HistoryResult::Failed | HistoryResult::FailedTransient => &offer.from,
+        };
+        if &observed.version != expected {
+            return Assessment::ConflictingReports;
+        }
     }
     let Some(esrt) = observed.esrt.as_ref() else {
         return Assessment::VersionOnly;
@@ -273,6 +298,9 @@ mod tests {
                     last_attempt_status: status,
                 }),
                 transition_pending: pending,
+                fwupd_history: History::Unavailable {
+                    reason: "no history in fixture".into(),
+                },
             };
             assert_eq!(assess(&offer, &observed), assessment);
         }

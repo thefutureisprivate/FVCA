@@ -9,8 +9,9 @@ use std::path::Path;
 use jiff::Timestamp;
 use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, memfd_create};
 
+use super::activation::Activation;
 use super::bus::{Bus, Message};
-use super::result::Observed;
+use super::result::{History, HistoryResult, Observed};
 use super::{
     DeviceIdentity, Devices, Esrt, OBSERVATION_SCHEMA, Observation, ObservedDevice,
     ObservedRelease, Offer, Platform, Policy, Version, has, unique, unique_device,
@@ -106,6 +107,38 @@ impl Peer {
         let releases = reply.array(c"a{sv}", release)?;
         reply.finish()?;
         Ok(releases)
+    }
+
+    fn result(
+        &self,
+        offer: &Offer,
+        (transaction, offer_sha256): (&str, &str),
+    ) -> Result<HistoryResult> {
+        let exact = CString::new(offer.device.device_id.as_str())?;
+        let transaction = CString::new(transaction)?;
+        let offer_sha256 = CString::new(offer_sha256)?;
+        let mut reply = self.bus.call(
+            &self.owner,
+            c"/",
+            FWUPD,
+            c"GetFvcaResult",
+            &[&exact, &transaction, &offer_sha256],
+        )?;
+        let version = reply.string()?;
+        let protocol = reply.string()?;
+        let state = reply.u32()?;
+        reply.finish()?;
+        if version != offer.to.text || protocol != offer.device.component.protocol() {
+            return Err(
+                invalid("fwupd history differs from the staged version or protocol").into(),
+            );
+        }
+        match state {
+            2 => Ok(HistoryResult::Success),
+            3 => Ok(HistoryResult::Failed),
+            5 => Ok(HistoryResult::FailedTransient),
+            _ => Err(invalid("fwupd did not report a terminal update state").into()),
+        }
     }
 }
 
@@ -416,6 +449,7 @@ pub(super) fn read_result(
     offer: &Offer,
     system_uuid: &str,
     fwupd_version: &str,
+    activation: &Activation,
 ) -> Result<Observed> {
     let peer = Peer::connect(ADDRESS, 0, Path::new(DAEMON))?;
     result_snapshot(
@@ -423,6 +457,7 @@ pub(super) fn read_result(
         offer,
         system_uuid,
         fwupd_version,
+        (&activation.transaction, &activation.offer_sha256),
         Path::new(DMI),
         Path::new(ESRT),
     )
@@ -433,6 +468,7 @@ fn result_snapshot(
     offer: &Offer,
     system_uuid: &str,
     fwupd_version: &str,
+    operation: (&str, &str),
     dmi: &Path,
     entries: &Path,
 ) -> Result<Observed> {
@@ -485,6 +521,12 @@ fn result_snapshot(
         version,
         esrt,
         transition_pending,
+        fwupd_history: match peer.result(offer, operation) {
+            Ok(result) => History::Matched { result },
+            Err(error) => History::Unavailable {
+                reason: error.to_string(),
+            },
+        },
     })
 }
 
@@ -587,6 +629,8 @@ mod tests {
 
         let head: super::super::Head = serde_json::from_value(super::super::result::test_offer())?;
         let offer = head.offer.unwrap();
+        let digest = "b".repeat(64);
+        let operation = ("f1234567-d234-4031-a111-000000000000", digest.as_str());
         fs::write(&mode, "post-update")?;
         fs::write(entry.join("fw_version"), "65587\n")?;
         fs::write(entry.join("last_attempt_version"), "65587\n")?;
@@ -595,6 +639,7 @@ mod tests {
             &offer,
             &head.system_uuid,
             &head.fwupd_version,
+            operation,
             directory.path(),
             &esrt,
         )?;
@@ -602,6 +647,40 @@ mod tests {
             super::super::result::assess(&offer, &result),
             super::super::result::Assessment::TargetReported
         );
+        assert!(matches!(
+            result.fwupd_history,
+            History::Matched {
+                result: HistoryResult::Success
+            }
+        ));
+        fs::write(&mode, "post-update-conflict")?;
+        let result = result_snapshot(
+            &peer,
+            &offer,
+            &head.system_uuid,
+            &head.fwupd_version,
+            operation,
+            directory.path(),
+            &esrt,
+        )?;
+        assert_eq!(
+            super::super::result::assess(&offer, &result),
+            super::super::result::Assessment::ConflictingReports
+        );
+        fs::write(&mode, "post-update-other-release")?;
+        let result = result_snapshot(
+            &peer,
+            &offer,
+            &head.system_uuid,
+            &head.fwupd_version,
+            operation,
+            directory.path(),
+            &esrt,
+        )?;
+        assert!(matches!(
+            result.fwupd_history,
+            History::Unavailable { reason } if reason.contains("staged version or protocol")
+        ));
         fs::write(entry.join("fw_type"), "2\n")?;
         assert!(
             result_snapshot(
@@ -609,6 +688,7 @@ mod tests {
                 &offer,
                 &head.system_uuid,
                 &head.fwupd_version,
+                operation,
                 directory.path(),
                 &esrt,
             )

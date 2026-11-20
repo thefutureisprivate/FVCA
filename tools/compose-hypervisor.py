@@ -355,7 +355,7 @@ def assemble(args, work):
             if path.is_symlink() or not path.is_file():
                 raise ValueError("the VM runtime lacks scheduled Service Guest updates")
     if args.firmware_update_owner is not None:
-        required += ("usr/lib/fvca/firmware-update-enrollment-v5", "usr/bin/chcon", "usr/bin/mount", "usr/bin/sha256sum")
+        required += ("usr/lib/fvca/firmware-update-enrollment-v6", "usr/bin/chcon", "usr/bin/mount", "usr/bin/sha256sum")
         for tree, members in (
             (prepared / "root", (Path("usr/libexec/fwupd/fwupd"), Path("usr/lib/systemd/system/fvca-fwupd.service"),
                                  Path("usr/share/fvca/firmware-build.txt"))),
@@ -367,6 +367,9 @@ def assemble(args, work):
         if (not re.search(r"^cabinet_patch_sha256=[0-9a-f]{64}$", provenance, re.MULTILINE)
                 or "cabinet_payload_size=v1" not in provenance.splitlines()):
             raise ValueError("scheduled Host firmware requires exact payload sizes from the native cabinet verifier")
+        if (not re.search(r"^history_patch_sha256=[0-9a-f]{64}$", provenance, re.MULTILINE)
+                or "operation_history=v1" not in provenance.splitlines()):
+            raise ValueError("scheduled Host firmware requires exact operation history from fwupd")
     if args.boot_trial_candidate is not None:
         recorder = runtime_work / "tree" / vm_runtime.TRIAL_HEALTH
         if recorder.is_symlink() or not recorder.is_file() or recorder.stat().st_mode & 0o111 == 0:

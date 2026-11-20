@@ -28,7 +28,7 @@ enum Phase {
 #[serde(deny_unknown_fields)]
 pub(super) struct Activation {
     schema: String,
-    transaction: String,
+    pub(super) transaction: String,
     pub(super) boot_id: String,
     pub(super) offer_sha256: String,
     pub(super) device_id: String,

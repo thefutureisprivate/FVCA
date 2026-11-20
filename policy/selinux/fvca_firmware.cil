@@ -7,5 +7,9 @@
 (allow init_t system_dbusd_t (process2 (nnp_transition)))
 (allow init_t fwupd_t (process2 (nnp_transition)))
 
+; Only the fwupd history directory on the authenticated Host pool uses this label.
+(allow fwupd_var_lib_t fs_t (filesystem (associate)))
+(allow init_t fwupd_var_lib_t (dir (getattr mounton relabelto)))
+
 ; Permit PID 1 to mask its private control socket in the fwupd mount namespace.
 (allow init_t init_var_run_t (sock_file (mounton)))

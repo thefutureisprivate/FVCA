@@ -83,12 +83,24 @@ def serve(address, mode):
                 "VersionRaw": dbus.UInt64(65578),
                 "Created": dbus.UInt64(42),
             }
-            if setting == "post-update":
+            if setting.startswith("post-update"):
                 device["Name"] = "System Firmware"
                 device["Flags"] = dbus.UInt64(1)
                 device["Version"] = "1.51"
                 device["VersionRaw"] = dbus.UInt64(65587)
             return [device, device] if setting == "duplicate" else [device]
+
+        @dbus.service.method(interface, in_signature="sss", out_signature="ssu")
+        def GetFvcaResult(self, device, transaction, offer_sha256):
+            assert device == device_id
+            assert transaction == "f1234567-d234-4031-a111-000000000000"
+            assert offer_sha256 == "b" * 64
+            setting = mode.read_text()
+            return (
+                "1.52" if setting == "post-update-other-release" else "1.51",
+                "org.uefi.capsule",
+                dbus.UInt32(3 if setting == "post-update-conflict" else 2),
+            )
 
         @dbus.service.method(interface, in_signature="s", out_signature="aa{sv}")
         def GetUpgrades(self, device):

@@ -1,0 +1,144 @@
+--- a/src/fu-dbus-daemon.c
++++ b/src/fu-dbus-daemon.c
+@@ -1920,0 +1921,58 @@
++static void
++fu_dbus_daemon_method_get_fvca_result(FuDbusDaemon *self,
++				    GVariant *parameters,
++				    FuEngineRequest *request,
++				    GDBusMethodInvocation *invocation)
++{
++	FuEngine *engine = fu_daemon_get_engine(FU_DAEMON(self));
++	const gchar *id, *transaction, *offer_sha256;
++	FwupdRelease *release;
++	FwupdUpdateState state;
++	const gchar *version, *protocol;
++	g_autofree gchar *operation = NULL;
++	g_autoptr(FuDevice) device = NULL;
++	g_autoptr(GError) error = NULL;
++
++	g_variant_get(parameters, "(&s&s&s)", &id, &transaction, &offer_sha256);
++	if (!fu_engine_request_has_converter_flag(request, FWUPD_CODEC_FLAG_TRUSTED) ||
++	    g_strcmp0(g_getenv("FVCA_FWUPD_PERSISTENT_HISTORY"), "1") != 0 ||
++	    strlen(id) != 40 || strspn(id, "0123456789abcdef") != 40 ||
++	    !g_uuid_string_is_valid(transaction) ||
++	    strlen(offer_sha256) != 64 || strspn(offer_sha256, "0123456789abcdef") != 64) {
++		g_dbus_method_invocation_return_error_literal(invocation, G_DBUS_ERROR,
++							      G_DBUS_ERROR_ACCESS_DENIED,
++							      "FVCA requires one exact history operation");
++		return;
++	}
++	device = fu_engine_get_fvca_history(engine, id, &error);
++	if (device == NULL) {
++		fu_dbus_daemon_method_invocation_return_gerror(invocation, error);
++		return;
++	}
++	release = fu_device_get_release_default(device);
++	state = fu_device_get_update_state(device);
++	operation = g_strdup_printf("%s:%s", transaction, offer_sha256);
++	if (release == NULL ||
++	    fu_device_has_flag(device, FWUPD_DEVICE_FLAG_EMULATED) ||
++	    g_strcmp0(fu_release_get_metadata_item(FU_RELEASE(release), "FvcaOperation"), operation) != 0 ||
++	    (state != FWUPD_UPDATE_STATE_SUCCESS && state != FWUPD_UPDATE_STATE_FAILED &&
++	     state != FWUPD_UPDATE_STATE_FAILED_TRANSIENT)) {
++		g_dbus_method_invocation_return_error_literal(invocation, FWUPD_ERROR,
++							      FWUPD_ERROR_NOTHING_TO_DO,
++							      "FVCA has no terminal result for this operation");
++		return;
++	}
++	version = fwupd_release_get_version(release);
++	protocol = fwupd_release_get_protocol(release);
++	if (version == NULL || strlen(version) == 0 || strlen(version) > 64 ||
++	    (g_strcmp0(protocol, "org.uefi.capsule") != 0 &&
++	     g_strcmp0(protocol, "org.nvmexpress") != 0)) {
++		g_dbus_method_invocation_return_error_literal(invocation, FWUPD_ERROR,
++							      FWUPD_ERROR_INVALID_DATA,
++							      "FVCA history lacks a valid version and protocol");
++		return;
++	}
++	g_dbus_method_invocation_return_value(invocation,
++					      g_variant_new("(ssu)", version, protocol, (guint)state));
++}
++
+@@ -2964,0 +3023 @@
++	    {"GetFvcaResult", fu_dbus_daemon_method_get_fvca_result},
+@@ -2987 +3046 @@
+-	/* FVCA currently permits discovery only, including on a directly connected bus. */
++	/* Constrain callers even on a directly connected bus. */
+@@ -2989,0 +3049 @@
++	    g_strcmp0(method_name, "GetFvcaResult") != 0 &&
+@@ -2997 +3057 @@
+-							      "FVCA permits firmware discovery only");
++							      "FVCA denies this firmware operation");
+--- a/src/fu-engine.c
++++ b/src/fu-engine.c
+@@ -6569,0 +6570,7 @@
++FuDevice *
++fu_engine_get_fvca_history(FuEngine *self, const gchar *device_id, GError **error)
++{
++	/* Read the record as written, before fwupd enriches it from current metadata. */
++	return fu_history_get_device_by_id(self->history, device_id, error);
++}
++
+--- a/src/fu-engine.h
++++ b/src/fu-engine.h
+@@ -88,0 +89,3 @@
++FuDevice *
++fu_engine_get_fvca_history(FuEngine *self, const gchar *device_id, GError **error)
++    G_GNUC_NON_NULL(1, 2);
+--- a/src/fu-history.c
++++ b/src/fu-history.c
+@@ -585 +585,4 @@
+-	rc = sqlite3_open(filename, &self->db);
++	rc = sqlite3_open_v2(filename,
++			     &self->db,
++			     SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOFOLLOW,
++			     NULL);
+@@ -592,0 +596,2 @@
++		sqlite3_close(self->db);
++		self->db = NULL;
+@@ -605,0 +611 @@
++	gboolean persistent = g_strcmp0(g_getenv("FVCA_FWUPD_PERSISTENT_HISTORY"), "1") == 0;
+@@ -616,5 +622,9 @@
+-	filename = fu_context_build_filename(self->ctx,
+-					     error,
+-					     FU_PATH_KIND_LOCALSTATEDIR_PKG,
+-					     "pending.db",
+-					     NULL);
++	if (persistent) {
++		filename = g_strdup("/run/fvca/host-data/firmware-update/history/pending.db");
++	} else {
++		filename = fu_context_build_filename(self->ctx,
++						     error,
++						     FU_PATH_KIND_LOCALSTATEDIR_PKG,
++						     "pending.db",
++						     NULL);
++	}
+@@ -644,0 +655,7 @@
++	if (persistent && schema_ver != 0 && schema_ver != FU_HISTORY_CURRENT_SCHEMA_VERSION) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_NOT_SUPPORTED,
++				    "FVCA persistent history uses an unsupported schema");
++		sqlite3_close(self->db);
++		self->db = NULL;
++		return FALSE;
++	}
+@@ -647,0 +665,7 @@
++			if (persistent) {
++				/* Preserve recovery evidence even if this daemon cannot read it. */
++				sqlite3_close(self->db);
++				self->db = NULL;
++				g_propagate_error(error, g_steal_pointer(&error_migrate));
++				return FALSE;
++			}
+--- a/src/org.freedesktop.fwupd.xml
++++ b/src/org.freedesktop.fwupd.xml
+@@ -551,0 +552,10 @@
++    <method name='GetFvcaResult'>
++      <arg type='s' name='device_id' direction='in'/>
++      <arg type='s' name='transaction' direction='in'/>
++      <arg type='s' name='offer_sha256' direction='in'/>
++      <arg type='s' name='version' direction='out'/>
++      <arg type='s' name='protocol' direction='out'/>
++      <arg type='u' name='update_state' direction='out'/>
++    </method>
++
++    <!--***********************************************************-->
