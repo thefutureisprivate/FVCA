@@ -167,7 +167,7 @@ pub fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
     Ok(content)
 }
 
-fn verify_signature(content: &[u8], signature: &[u8], certificate: &X509) -> Result<()> {
+pub fn verify_signature(content: &[u8], signature: &[u8], certificate: &X509) -> Result<()> {
     let mut cms = CmsContentInfo::from_der(signature)?;
     if cms.to_der()? != signature {
         return Err(invalid("workload signature is not canonical DER"));

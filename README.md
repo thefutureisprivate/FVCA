@@ -398,7 +398,7 @@ Run all commands as the off-node `fvca-s3` service account against the same priv
 
 `retain` previews eligible IDs using the original capture times in the ledger. For an authorized retention run, select the off-node maintenance credentials and run `retain --apply`. The tool requires the approved minimum of known recovery points and a fresh capture, verifies pack integrity, journals selected IDs, then calls restic forget and prune. A retry resumes the journaled set. Maintenance stops if an active snapshot disappears or a retired ID reappears. Schedule retention separately from independent copies and protect the full dependency set of any off-node copy.
 
-Independent Guest application backups and versioning or Object Lock profiles are pending.
+S3 versioning or Object Lock profiles are pending.
 
 ## Off-node Stalwart workload derivation
 
@@ -490,3 +490,29 @@ With the approved OCI image staged locally by digest, run `python3 tests/stalwar
 Pass `build/stalwart-mail-lab` as the fourth argument to `tests/workload-data-lab.sh` to seed the two signed Stalwart volume mappings on the Guest Btrfs disk. Run `bash tests/stalwart-mail-initrd.sh GUEST_INITRAMFS NEW_INITRAMFS build/stalwart-mail-lab`, then compose the disposable Guest with `NEW_INITRAMFS`. The fixture initramfs contains a synthetic mailbox credential. Use `--workload --stalwart-mail` with `tests/check-storage.py` to verify that the exact message is retrieved before Guest readiness. The workload image alteration check also runs.
 
 To exercise S3 recovery, use the configured Guest and seeded disk in the stopped-backup procedure. Authorize that snapshot on a fresh encrypted Host Btrfs mirror, with the same signed Guest fixture. The restore receipt then requires the recovered Stalwart account and TLS configuration to serve the same message before Guest readiness. The nested KVM test exercised this path against a disposable Garage repository.
+
+## Independent Stalwart application recovery
+
+The off-node `fvca-stalwart-backup` tool creates an application-only recovery point from an approved clean-stopped VM capture. It verifies the capture manifest and complete raw disk digest, checks the Guest Btrfs partition and its checksums, and extracts the two approved Stalwart volumes. SQLite's backup API consolidates the database and its WAL into a standalone file. The application point contains that database, the approved configuration files and an inventory of their hashes. The Guest stays networkless during the workflow. [Stalwart backup procedure](https://stalw.art/docs/management/maintenance/backup/) · [SQLite backup API](https://sqlite.org/backup.html)
+
+This profile covers the pinned single-node Stalwart workload with local SQLite and the Default blob store. Confirm that profile and account for each dependent file before approving a source. The signed configuration list includes `config.json` and any local certificate or key files the database references. Keep the temporary working directory and the restored configuration on independently protected storage. Use a separate restic format 2 application repository, repository secret and S3 identities. Keep the read-only recovery credentials and the application receipt independently of the VM copy.
+
+Build the off-node tool using the workload crate's locked dependencies. Install Fedora's `btrfs-progs`, `util-linux` and SQLite CLI on the off-node worker. Supply the independently retained VM manifest and its matching raw disk using the selected stopped S3 backup or an equivalent verified export.
+
+```sh
+cargo build --release --locked --manifest-path workload-admission/Cargo.toml --bin fvca-stalwart-backup
+openssl cms -sign -binary -noattr -nocerts -outform DER \
+  -signer application-authority.crt -inkey application-authority.key \
+  -in create.json -out create.p7s
+fvca-stalwart-backup create.json create.p7s application-authority.crt ./writer \
+  /usr/bin/restic s3-ca.pem ./private-work create data.raw vm-manifest application-receipt.json
+```
+
+The signed JSON has `schema` set to `fvca-stalwart-sqlite-inline-v1`. Its `endpoint` has `address` as a literal IP and port, `bucket`, `prefix`, `region`, the full `repository` ID, and `ca_sha256` and `restic_sha256` digests of the selected files. Set `timeout_seconds`, `bandwidth_kib` and `max_application_bytes` for the off-node worker. Under `operation`, set `action` to `create`, give the Guest `partition` and `filesystem` UUIDs, and list the exact `configuration` basenames. Its `source` object contains `vm_repository`, `vm_snapshot`, `vm_manifest_sha256` and `deployment_sha256`, all full lowercase SHA-256 values. Use the SHA-256 of the approved workload's exact `deployment.json`. Credential directories must be private and contain `repository-password` and `s3-credentials` as in the Hypervisor workflow.
+
+For recovery, sign a policy with the same approved repository and an `operation` containing `action` set to `recover` plus the exact `snapshot`, `manifest_sha256` and `deployment_sha256` from the independently retained application receipt. Run with the dedicated read-only identity. Place the work and destination directories on the same protected filesystem so publication can use an atomic rename. The tool authenticates the manifest, verifies every member and checks SQLite integrity before publishing `NEW_DESTINATION/application`. Stage its `config` and `data` directories into the two approved Btrfs volume mappings of a fresh Guest with the current authorized workload and mapped ownership. Verify the application in isolation before exposing service endpoints.
+
+```sh
+fvca-stalwart-backup recover.json recover.p7s application-authority.crt ./reader \
+  /usr/bin/restic s3-ca.pem ./private-work recover NEW_DESTINATION
+```
