@@ -13,13 +13,17 @@ use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use fvca_trial_authorization::guest_config::{self, Binding as GuestBinding};
 use fvca_trial_authorization::{
     KEY_ARGUMENT, PEER_PARTITIONS, Standing, WATCHDOG_ARGUMENT, key_marker, watchdog_seconds,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::{MANIFEST_BYTES, Result, Role, Selection, install, invalid, state, valid_digest};
+use crate::{
+    MANIFEST_BYTES, Result, Role, Selection, guest_configuration, install, invalid, state,
+    valid_digest,
+};
 use layout::{Disk, Extent, Layout, check_sector, fd_path};
 
 // Ordered to match the slot composition. The final type holds the independent,
@@ -151,6 +155,27 @@ struct ReleaseEpoch<'a> {
     trial_key: Option<&'a [u8]>,
 }
 
+#[derive(PartialEq, Eq)]
+struct VerifiedLoader {
+    sha256: [u8; 32],
+    guest_configuration: Option<GuestBinding>,
+}
+
+impl VerifiedLoader {
+    fn require_preserved_guest_configuration(&self, candidate: &Self, running: bool) -> Result<()> {
+        if self.guest_configuration != candidate.guest_configuration {
+            return Err(invalid("ordinary Host updates must preserve the signed Guest configuration revision and digest").into());
+        }
+        if running && self.guest_configuration != guest_configuration::running()?.0 {
+            return Err(invalid(
+                "the installed stable UKI differs from the running Guest configuration",
+            )
+            .into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoragePcrPolicy {
@@ -231,7 +256,7 @@ fn tool(program: &str, args: &[&Path]) -> Result<()> {
     Ok(())
 }
 
-fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<()> {
+fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<Option<GuestBinding>> {
     let uki::Policy { cmdline, pcrsig } = uki::read(efi)?;
     let mut epochs = cmdline
         .split_ascii_whitespace()
@@ -304,7 +329,7 @@ fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<()> {
             );
         }
     }
-    Ok(())
+    Ok(guest_config::binding(&cmdline)?)
 }
 
 fn verify_auto_profile(pcrsig: Option<&str>, fingerprint: &str) -> Result<()> {
@@ -329,7 +354,7 @@ fn loader(
     cert: &File,
     work: &Path,
     epoch: &ReleaseEpoch<'_>,
-) -> Result<[u8; 32]> {
+) -> Result<VerifiedLoader> {
     if esp.bytes > MAX_ESP {
         return Err(invalid("EFI System Partition exceeds its activation bound").into());
     }
@@ -351,7 +376,7 @@ fn loader(
         &[Path::new("--cert"), &fd_path(cert), &efi],
     )?;
     let signed = state::open_regular(&efi)?;
-    verify_epoch(&signed, epoch)?;
+    let guest_configuration = verify_epoch(&signed, epoch)?;
     let bytes = signed.metadata()?.len();
     let hash = digest(&signed, Extent { start: 0, bytes })?;
     if epoch.trial.is_some_and(|trial| {
@@ -362,7 +387,10 @@ fn loader(
         )
         .into());
     }
-    Ok(hash)
+    Ok(VerifiedLoader {
+        sha256: hash,
+        guest_configuration,
+    })
 }
 
 impl Artifact {
@@ -457,7 +485,7 @@ impl Artifact {
         cert: &File,
         work: &Path,
         epoch: &ReleaseEpoch<'_>,
-    ) -> Result<()> {
+    ) -> Result<VerifiedLoader> {
         self.fits(layout)?;
         let staged = loader(&self.file, self.layout.regions[0].extent, cert, work, epoch)?;
         let installed = loader(&disk.file, layout.regions[0].extent, cert, work, epoch)?;
@@ -475,7 +503,7 @@ impl Artifact {
                 .into());
             }
         }
-        Ok(())
+        Ok(installed)
     }
 
     fn write(&self, target: &File, installed: Extent, index: usize) -> io::Result<()> {
@@ -598,8 +626,8 @@ impl StandingSite {
         selected: &Selection,
         incoming: &Path,
         scratch: &Path,
-        approval: &Standing<'_>,
-        trial_key: &[u8],
+        (approval, trial_key): (&Standing<'_>, &[u8]),
+        running: bool,
     ) -> Result<()> {
         selected.require_update_from(active.1, active.2)?;
         self.require_trial_epochs(active.1, selected.epoch, approval)?;
@@ -628,7 +656,7 @@ impl StandingSite {
             }
         }
         let cert = self.certificate(scratch)?;
-        loader(
+        let stable_loader = loader(
             &stable_disk.file,
             stable_layout.regions[0].extent,
             &cert,
@@ -642,7 +670,7 @@ impl StandingSite {
                 trial_key: Some(trial_key),
             },
         )?;
-        loader(
+        let candidate_loader = loader(
             &inactive_disk.file,
             inactive_layout.regions[0].extent,
             &cert,
@@ -656,6 +684,7 @@ impl StandingSite {
                 trial_key: Some(trial_key),
             },
         )?;
+        stable_loader.require_preserved_guest_configuration(&candidate_loader, running)?;
         self.require_floor(active.1, selected.epoch)
     }
 
@@ -817,20 +846,23 @@ fn install_reviewed(
             .require_trial_epochs(plan.active_epoch, selected.epoch, live.approval)?;
         candidate.require_trial_target(live.approval, &active_layout, &inactive_layout)?;
     }
-    stable.verify_installed(
+    let stable_loader = stable.verify_installed(
         &active,
         &active_layout,
         &cert,
         scratch.path(),
         &active_epoch,
     )?;
-    loader(
+    let candidate_loader = loader(
         &candidate.file,
         candidate.layout.regions[0].extent,
         &cert,
         scratch.path(),
         &next_epoch,
     )?;
+    if standing.is_some() {
+        stable_loader.require_preserved_guest_configuration(&candidate_loader, live.is_some())?;
+    }
 
     let target = WritableSlot::claim(&inactive, &inactive_layout)?;
     if inactive_layout.fingerprint(&inactive, sector)? != plan.inactive.gpt_sha256 {
@@ -901,4 +933,46 @@ fn install_reviewed(
         selected.epoch, inactive_layout.id, selected.manifest_sha256
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standing_updates_can_change_the_uki_while_preserving_guest_intent() -> Result<()> {
+        let binding = |revision: u64, nibble: &str| GuestBinding {
+            revision,
+            sha256: nibble.repeat(64),
+        };
+        let stable = VerifiedLoader {
+            sha256: [1; 32],
+            guest_configuration: Some(binding(9, "a")),
+        };
+        let candidate = |configuration| VerifiedLoader {
+            sha256: [2; 32],
+            guest_configuration: configuration,
+        };
+        stable.require_preserved_guest_configuration(&candidate(Some(binding(9, "a"))), false)?;
+        for change in [
+            None,
+            Some(binding(8, "a")),
+            Some(binding(10, "b")),
+            Some(binding(9, "b")),
+        ] {
+            assert!(
+                stable
+                    .require_preserved_guest_configuration(&candidate(change), false)
+                    .is_err()
+            );
+        }
+        let default = candidate(None);
+        default.require_preserved_guest_configuration(&candidate(None), false)?;
+        assert!(
+            default
+                .require_preserved_guest_configuration(&stable, false)
+                .is_err()
+        );
+        Ok(())
+    }
 }

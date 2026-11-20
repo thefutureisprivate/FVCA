@@ -18,7 +18,7 @@ import guest_boot_bundle
 import host_storage
 import hypervisor_gpt
 from runtime_boot import (
-    DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_LAUNCH_FILES, GUEST_VM_SETTINGS,
+    DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_CONFIG_ARGUMENT, GUEST_LAUNCH_FILES, GUEST_VM_SETTINGS,
     GUEST_VM_SUPPORT, WORKLOAD_TRUST_FILES,
     composition_archive, prepare_core, run, verify_initrd, write_disk,
 )
@@ -276,26 +276,30 @@ def epoch_selection(path, storage, tpm):
 
 def guest_vm_settings(path):
     if path is None:
-        return ()
+        return (), ()
     settings = parse_json(read_bytes(path, 1024))
     if (
         not isinstance(settings, dict)
-        or settings.keys() != {"schema", "guest", "vcpus", "memory_mib"}
-        or settings["schema"] != "fvca-service-guest-vm-v1"
+        or settings.keys() != {"schema", "guest", "configuration_revision", "vcpus", "memory_mib"}
+        or settings["schema"] != "fvca-service-guest-vm-v2"
         or settings["guest"] != guest_boot_bundle.SERVICE_GUEST_ID
     ):
         raise ValueError("invalid Service Guest resource settings or Guest identity")
-    vcpus, memory = settings["vcpus"], settings["memory_mib"]
+    revision, vcpus, memory = (settings[key] for key in ("configuration_revision", "vcpus", "memory_mib"))
+    if type(revision) is not int or not 1 <= revision < 2**64:
+        raise ValueError("invalid Service Guest configuration revision")
     if (type(vcpus) is not int or not 1 <= vcpus <= 4
             or type(memory) is not int or not 1024 <= memory <= 4096 or memory % 256):
         raise ValueError("Service Guest resources exceed the approved machine profile")
-    record = f"FVCA-SERVICE-GUEST-VM-1\nguest={settings['guest']}\nvcpus={vcpus}\nmemory_mib={memory}\n"
-    return ((GUEST_VM_SETTINGS, record.encode("ascii")),)
+    record = (f"FVCA-SERVICE-GUEST-VM-2\nguest={settings['guest']}\nrevision={revision}\n"
+              f"vcpus={vcpus}\nmemory_mib={memory}\n").encode("ascii")
+    identity = f"{GUEST_CONFIG_ARGUMENT}={revision},{hashlib.sha256(record).hexdigest()}"
+    return ((GUEST_VM_SETTINGS, record),), (identity,)
 
 
 def assemble(args, work):
     storage = host_storage.selection(args.storage) if args.storage is not None else None
-    resources = guest_vm_settings(args.guest_vm_settings)
+    resources, resource_arguments = guest_vm_settings(args.guest_vm_settings)
     if args.guest_trial_public_key is not None and (storage is None or storage.protection != host_storage.AUTHENTICATED):
         raise ValueError("Guest trial enrollment requires authenticated Host storage")
     auto = storage is not None and storage.unlock == "tpm2-auto"
@@ -344,7 +348,7 @@ def assemble(args, work):
     ))
     required = ACTIVATION_FILES
     if resources:
-        required += (str(GUEST_VM_SUPPORT),)
+        required += (str(GUEST_VM_SUPPORT), "usr/bin/sha256sum")
         marker = runtime_work / "tree" / GUEST_VM_SUPPORT
         if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
             raise ValueError("the signed VM runtime lacks Service Guest resource settings support")
@@ -444,11 +448,12 @@ def assemble(args, work):
                *stable_trial, *candidate_trial, *watchdog, *guest_epoch,
                *authorities, *update_selection(args, authorities)),
     )
-    if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT, TRIAL_WATCHDOG_ARGUMENT)
+    if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT, TRIAL_WATCHDOG_ARGUMENT,
+                                    GUEST_CONFIG_ARGUMENT)
            for arg in cmdline.split()):
-        raise ValueError("shared core already configures a Hypervisor epoch or trial")
+        raise ValueError("shared core already configures a Hypervisor epoch, trial or Guest configuration")
     cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments,
-                        *trial_key_arguments, *watchdog_arguments))
+                        *trial_key_arguments, *watchdog_arguments, *resource_arguments))
     immutable = None
     if ids is None:
         disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)

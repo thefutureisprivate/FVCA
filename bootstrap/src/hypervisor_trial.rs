@@ -469,6 +469,7 @@ pub fn arm_if_authorized(
     guest: Option<&str>,
     active: &runtime::Activation,
     epoch: Option<&str>,
+    cmdline: &str,
 ) -> io::Result<ArmOutcome> {
     let dynamic = Path::new(TRIAL_KEY).try_exists()?;
     let directory;
@@ -600,6 +601,7 @@ pub fn arm_if_authorized(
     if let Some(standing) = &standing {
         standing::verify_candidate(standing)?;
         standing::require_fresh(standing)?;
+        standing::require_guest_configuration(&directory, tx, cmdline, last.0 == 0)?;
     }
 
     // Consume the signed authorization durably before asking firmware for the one-shot trial.
@@ -781,6 +783,7 @@ pub fn start_candidate(
             }
             standing::require_epoch(standing, epoch, standing.candidate_epoch)?;
             standing::require_fresh(standing)?;
+            standing::require_guest_configuration(&directory, trial.transaction, cmdline, false)?;
             standing.attempt
         }
         None => std::str::from_utf8(&attempt).map_err(io::Error::other)?,

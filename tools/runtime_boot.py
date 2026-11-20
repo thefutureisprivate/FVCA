@@ -21,7 +21,8 @@ DIRECT_ROOT_OPTIONS = "panic-on-corruption,root-hash-signature=/usr/lib/fvca/dir
 DIRECT_BOOT_FILES = ("direct-boot.cmdline", "direct-verity.der", "direct-root.p7s", "direct-boot-ready")
 GUEST_LAUNCH_FILES = ("guest-launch", "guest-launch.p7s")
 GUEST_VM_SETTINGS = "guest-vm-settings"
-GUEST_VM_SUPPORT = Path("usr/lib/fvca/guest-vm-settings-v1")
+GUEST_VM_SUPPORT = Path("usr/lib/fvca/guest-vm-settings-v2")
+GUEST_CONFIG_ARGUMENT = "fvca.guest_config"
 
 
 def run(*args, **kwargs):

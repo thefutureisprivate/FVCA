@@ -8,6 +8,7 @@ use std::io;
 pub mod efi;
 pub mod firmware;
 pub mod guest;
+pub mod guest_config;
 
 pub const APPROVAL_LIMIT: usize = 2048;
 pub const PENDING: &str = "pending-trial";

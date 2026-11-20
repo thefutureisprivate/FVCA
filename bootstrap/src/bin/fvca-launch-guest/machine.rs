@@ -5,7 +5,10 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
-use fvca_initrd_bootstrap::{guest_resources::Resources, invalid};
+use fvca_initrd_bootstrap::{
+    guest_resources::{self, Resources},
+    invalid,
+};
 
 const PROFILE: &str = include_str!("../../../../policy/guest-direct-boot.xml");
 const COMMAND_LINE_LIMIT: u64 = 2048;
@@ -74,8 +77,8 @@ pub(super) fn verify(boot: &Path, core: &str) -> io::Result<String> {
 
 pub(super) fn definition(boot: &Path, core: &str) -> io::Result<CString> {
     let command_line = verify(boot, core)?;
-    let resources = Resources::active()?;
-    resources.require_capacity()?;
+    let resources = guest_resources::active()?;
+    guest_resources::require_capacity(resources)?;
     CString::new(render(&command_line, boot, resources)).map_err(io::Error::other)
 }
 

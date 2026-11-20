@@ -2,6 +2,7 @@ mod channel;
 mod depot;
 mod firmware;
 mod gpt;
+mod guest_configuration;
 mod handoff;
 mod install;
 mod state;
@@ -507,6 +508,7 @@ fn run() -> Result<()> {
             }
             Some("--reconcile-firmware-update") => return firmware::reconcile_scheduled(),
             Some("--serve-firmware-writer") => return firmware::serve_writer(),
+            Some("--guest-configuration-status") => return guest_configuration::report(),
             _ => (),
         }
     }

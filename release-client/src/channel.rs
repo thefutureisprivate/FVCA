@@ -825,8 +825,8 @@ pub async fn discover(
                                 &selection,
                                 &staged,
                                 scratch.path(),
-                                &approval,
-                                key,
+                                (&approval, key),
+                                matches!(delivery, Delivery::Scheduled { .. }),
                             )?;
                         }
                         handoff::publish(

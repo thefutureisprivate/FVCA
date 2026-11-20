@@ -752,14 +752,17 @@ To configure CPU and RAM for the registered VM, pass `--guest-vm-settings PATH` 
 
 ```json
 {
-  "schema": "fvca-service-guest-vm-v1",
+  "schema": "fvca-service-guest-vm-v2",
   "guest": "e629aa43-af11-47c6-aedc-a2dc47f1cc3a",
+  "configuration_revision": 1,
   "vcpus": 3,
   "memory_mib": 2560
 }
 ```
 
-The fixed direct-boot profile accepts one to four vCPUs and 1,024–4,096 MiB in increments of 256 MiB. Its default is two vCPUs and 2,048 MiB. The composer includes the settings in the signed Host UKI, so changes take effect after a Host boot. Guest release trials and ordinary Guest OS updates use the same Host settings. The launcher reconstructs the fixed machine definition and requires enough available Host CPUs and memory for the selected Guest plus a 1,024 MiB Host reserve and 512 MiB QEMU reserve.
+The fixed direct-boot profile accepts one to four vCPUs and 1,024–4,096 MiB in increments of 256 MiB. Its default is two vCPUs and 2,048 MiB. The composer binds the revision and SHA-256 of the canonical settings record to the signed Host UKI. A Host configuration change requires a separately composed and approved UKI. An ordinary standing Host update must preserve the exact revision and digest. Its installer checks both signed slots before writing, and a standing boot trial must match the stable configuration recorded before arming. Guest release trials and ordinary Guest OS updates use the same Host settings. The launcher reconstructs the fixed machine definition and requires enough available Host CPUs and memory for the selected Guest plus a 1,024 MiB Host reserve and 512 MiB QEMU reserve.
+
+On the Hypervisor, `/usr/libexec/fvca/release-client --guest-configuration-status` reports the boot-selected revision, digest, and resource values. The default profile has null revision and digest. This read-only status reports the Host boot selection independently of Guest readiness and release generations.
 
 The Hypervisor verifies that the Guest agent answers a ping before reporting readiness. The agent runs in the Guest's SELinux policy on a fixed virtio-serial channel. Its verified configuration allows synchronization, ping, shutdown, freeze status, mount-list freeze, and thaw RPCs. SELinux confines freeze and thaw to the Btrfs mount at `/run/fvca/guest-data`. Shutdown requires a normal libvirt lifecycle event and confirmation that QEMU exited. The Hypervisor retains the disk attachment while the VM may still be using it. [QEMU Guest Agent configuration](https://www.qemu.org/docs/master/interop/qemu-ga.html) · [libvirt domain lifecycle events](https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainEventStoppedDetailType)
 

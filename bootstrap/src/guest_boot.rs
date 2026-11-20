@@ -48,6 +48,7 @@ pub enum Startup {
 pub fn activate_if_selected(
     startup: Startup,
     devices: Option<&(PathBuf, PathBuf)>,
+    cmdline: &str,
 ) -> io::Result<Option<String>> {
     let payload = match fs::read_to_string(SOURCE) {
         Ok(payload) => payload,
@@ -70,7 +71,7 @@ pub fn activate_if_selected(
     )?;
     let bundle = selection.bundle.to_owned();
     fs::write(SELECTION, payload)?;
-    crate::guest_resources::publish()?;
+    crate::guest_resources::publish(cmdline)?;
     if matches!(startup, Startup::Disabled) {
         return Ok(Some(bundle));
     }

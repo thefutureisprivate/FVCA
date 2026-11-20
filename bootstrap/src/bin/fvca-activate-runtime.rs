@@ -137,7 +137,8 @@ fn activate() -> io::Result<()> {
     } else {
         guest_boot::Startup::Automatic
     };
-    let guest = guest_boot::activate_if_selected(startup, slot.as_ref().map(|slot| &slot.guest))?;
+    let guest =
+        guest_boot::activate_if_selected(startup, slot.as_ref().map(|slot| &slot.guest), &cmdline)?;
     if !firmware_pending {
         hypervisor_trial::start_candidate(
             &cmdline,
@@ -147,7 +148,13 @@ fn activate() -> io::Result<()> {
             recovering,
             epoch,
         )?;
-        match hypervisor_trial::arm_if_authorized(esp, guest.as_deref(), &verified_runtime, epoch) {
+        match hypervisor_trial::arm_if_authorized(
+            esp,
+            guest.as_deref(),
+            &verified_runtime,
+            epoch,
+            &cmdline,
+        ) {
             Ok(hypervisor_trial::ArmOutcome::RebootIntoTrial) => {
                 return hypervisor_trial::reboot_into_trial();
             }
