@@ -201,7 +201,7 @@ candidate_esp_bytes=CANDIDATE_ESP_LENGTH_IN_BYTES
 
 Enroll two active UEFI boot entries with short-form GPT device paths to `\EFI\BOOT\BOOTX64.EFI` and put the stable entry first in `BootOrder`. The Hypervisor checks `BootCurrent`, both boot entries and the candidate ESP after opening the encrypted Btrfs mirror. After flushing the transaction record, it invokes a confined writer that exclusively creates `BootNext` at a fixed path, then verifies the value by reading it back. Firmware consumes `BootNext` before starting the candidate. The original boot order remains in effect on subsequent resets. [UEFI Boot Manager](https://uefi.org/specs/UEFI/2.10/03_Boot_Manager.html)
 
-The Fedora KVM lab test uses `python3-virt-firmware` to seed the entries in a private OVMF variable store. It copies both Btrfs members before making persistent changes. The two input slots must use the same signed storage profile.
+The Fedora KVM lab test uses `python3-virt-firmware` to seed the entries in a private OVMF variable store. The trial and tamper cases each use fresh copies of the variable store and both Btrfs members. The two input slots must use the same signed storage profile.
 
 ```sh
 python3 tests/check-hypervisor-trial.py \

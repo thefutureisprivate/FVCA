@@ -58,18 +58,23 @@ def qualify(args):
     args.output.mkdir(mode=0o700)
     variables = args.output / "trial-vars.fd"
     password = (args.lab / "storage.key").read_bytes()
-    members = [args.output / f"member-{side}.raw" for side in ("a", "b")]
-    for member in members:
-        subprocess.run(["cp", "--reflink=auto", "--sparse=always", "--", args.lab / member.name, member], check=True)
 
-    def run(name, selected, companion, marker):
+    def mirror(label):
+        members = []
+        for side in ("a", "b"):
+            source = args.lab / f"member-{side}.raw"
+            member = args.output / f"{label}-member-{side}.raw"
+            subprocess.run(["cp", "--reflink=auto", "--sparse=always", "--", source, member], check=True)
+            members.append(member)
+        return members
+
+    def run(name, selected, companion, marker, members):
         options = SimpleNamespace(guest=False, disk=args.stable, runtime=companion, variables=variables,
-                                  output=args.output, nvme_boot=True, boot_sector_size=SECTOR, persistent_boot=True,
-                                  cpus=1)
+                                  output=args.output, nvme_boot=True, boot_sector_size=SECTOR, persistent_boot=True)
         before = Edk2VarStore(variables).get_varlist().get("BootNext")
         for attempt in range(1, 4):
             transcript = name if attempt == 1 else f"{name}-retry-{attempt - 1}"
-            prompts, log = lab["boot"](options, transcript, password, *members, timeout=40)
+            prompts, log = lab["boot"](options, transcript, password, *members)
             if b"Kernel command line:" in log:
                 break
             after = Edk2VarStore(variables).get_varlist().get("BootNext")
@@ -77,7 +82,7 @@ def qualify(args):
                 # Do not retry if the firmware already consumed the override.
                 break
         selected = f"FVCA_HYPERVISOR_SLOT_VERIFIED {selected[1]['uuid'].lower()}".encode()
-        expected = (b"Secure boot enabled", selected, lab["HOST_PROFILES"], lab["READY"], marker)
+        expected = (b"Secure boot enabled", b"FVCA_SELINUX_ENFORCING", selected, lab["HOST_PROFILES"], lab["READY"], marker)
         if prompts != 2 or lab["FAIL"] in log or not all(value in log for value in expected):
             raise ValueError(f"{name} did not reach the expected Secure Boot, Btrfs and trial state. See {transcript}.log")
         print(f"{name} passed", flush=True)
@@ -92,6 +97,17 @@ def qualify(args):
             raise ValueError("unexpected persistent EFI BootNext")
         return current
 
+    prepare_vars(args.variables, variables, stable, candidate)
+    members = mirror("trial")
+    run("trial-armed-from-stable", stable, args.candidate,
+        f"FVCA_TRIAL_ARMED {args.transaction} {CANDIDATE:04x}".encode(), members)
+    order = state(CANDIDATE)
+    run("firmware-selected-candidate", candidate, args.candidate, b"FVCA_VM_RUNTIME_ACTIVE", members)
+    state(order=order)
+    run("stable-order-resumed", stable, args.candidate,
+        f"FVCA_TRIAL_PREVIOUSLY_RECORDED {args.transaction}".encode(), members)
+    state(order=order)
+
     changed = args.output / "changed-candidate.raw"
     subprocess.run(["cp", "--reflink=auto", "--sparse=always", "--", args.candidate, changed], check=True)
     part = candidate[1]
@@ -100,17 +116,11 @@ def qualify(args):
         value = disk.read(1)[0]
         disk.seek(-1, 1)
         disk.write(bytes([value ^ 1]))
+    variables = args.output / "refusal-vars.fd"
     prepare_vars(args.variables, variables, stable, candidate)
-    run("changed-candidate-refused", stable, changed, b"FVCA_TRIAL_REFUSED candidate ESP differs from the approved image")
+    run("changed-candidate-refused", stable, changed,
+        b"FVCA_TRIAL_REFUSED candidate ESP differs from the approved image", mirror("refusal"))
     state()
-
-    prepare_vars(args.variables, variables, stable, candidate)
-    run("trial-armed-from-stable", stable, args.candidate, f"FVCA_TRIAL_ARMED {args.transaction} {CANDIDATE:04x}".encode())
-    order = state(CANDIDATE)
-    run("firmware-selected-candidate", candidate, args.candidate, b"FVCA_VM_RUNTIME_ACTIVE")
-    state(order=order)
-    run("stable-order-resumed", stable, args.candidate, f"FVCA_TRIAL_PREVIOUSLY_RECORDED {args.transaction}".encode())
-    state(order=order)
 
 
 def main():
