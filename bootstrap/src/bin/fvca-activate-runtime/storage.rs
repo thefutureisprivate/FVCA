@@ -30,9 +30,14 @@ struct Token<'a> {
     digest: &'a str,
 }
 
+struct TpmUnlock<'a> {
+    mode: tpm::Mode,
+    tokens: [Token<'a>; 2],
+}
+
 struct Selection<'a> {
     members: [Member<'a>; 2],
-    tokens: Option<[Token<'a>; 2]>,
+    tpm: Option<TpmUnlock<'a>>,
     filesystem: &'a str,
     authenticated: bool,
 }
@@ -74,21 +79,22 @@ fn selection(text: &str) -> io::Result<Selection<'_>> {
         "protection=luks2-xts-hmac-sha256" => true,
         _ => return Err(invalid("unsupported Host storage protection")),
     };
-    let tokens = match (*unlock, rest) {
+    let tpm = match (*unlock, rest) {
         ("unlock=development-passphrase", [""]) => None,
-        ("unlock=tpm2-pin", [a, b, ""]) => {
+        (profile @ ("unlock=tpm2-auto" | "unlock=tpm2-pin"), [a, b, ""]) => {
             let a = token(a, "token_a=")?;
             let b = token(b, "token_b=")?;
             if a.digest == b.digest {
                 return Err(invalid("storage members require separate TPM tokens"));
             }
-            Some([a, b])
+            let mode = if profile == "unlock=tpm2-auto" { tpm::Mode::Auto } else { tpm::Mode::Pin };
+            Some(TpmUnlock { mode, tokens: [a, b] })
         }
         _ => return Err(invalid("unsupported storage unlock policy")),
     };
     Ok(Selection {
         members: [a, b],
-        tokens,
+        tpm,
         filesystem: identity(filesystem, "filesystem_uuid=", &[8, 4, 4, 4, 12], '-')?,
         authenticated,
     })
@@ -149,9 +155,9 @@ fn open_data(selection: &Selection<'_>, sources: &[PathBuf; 2]) -> io::Result<()
         for index in 0..2 {
             let source = &sources[index];
             let mapper = MAPPERS[index];
-            if let Some(tokens) = &selection.tokens {
-                let token = &tokens[index];
-                tpm::unlock(source, mapper, selection.members[index].luks, token.index, token.digest)?;
+            if let Some(tpm) = &selection.tpm {
+                let token = &tpm.tokens[index];
+                tpm::unlock(source, mapper, selection.members[index].luks, token.index, token.digest, tpm.mode)?;
             } else {
                 unlock_development(source, mapper)?;
             }
@@ -184,13 +190,21 @@ pub(super) fn activate_if_selected(protected_epoch: bool) -> io::Result<()> {
         Err(error) => return Err(error),
     };
     let selection = selection(&policy)?;
-    if protected_epoch && (!selection.authenticated || selection.tokens.is_none()) {
+    if protected_epoch && (!selection.authenticated || selection.tpm.is_none()) {
         return Err(invalid("a protected Hypervisor epoch requires authenticated TPM-bound Host storage"));
+    }
+    if !protected_epoch && selection.tpm.as_ref().is_some_and(|tpm| tpm.mode == tpm::Mode::Auto) {
+        return Err(invalid("unattended TPM unlock requires a protected Hypervisor epoch"));
     }
     let sources = find_members(&selection.members)?;
     bind_readiness_probe()?;
     open_data(&selection, &sources)?;
-    if selection.tokens.is_some() {
+    if let Some(tpm) = selection.tpm {
+        let profile = match tpm.mode {
+            tpm::Mode::Auto => "tpm2-auto",
+            tpm::Mode::Pin => "tpm2-pin",
+        };
+        println!("FVCA_HOST_STORAGE_UNLOCK_PROFILE {profile}");
         println!("FVCA_HOST_STORAGE_TPM_UNLOCKED");
     }
     println!("FVCA_HOST_STORAGE_ACTIVE");

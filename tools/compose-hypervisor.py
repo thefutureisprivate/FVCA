@@ -25,7 +25,7 @@ from runtime_image import verify as verify_runtime
 import vm_runtime
 
 
-PCR_POLICY_REF = "fvca-host-storage"
+PCR_POLICY_REFS = {"tpm2-auto": "fvca-host-storage-auto-v1", "tpm2-pin": "fvca-host-storage"}
 ROLE_BOOT_OPTIONS = ("kvm_intel.nested=0", *DISABLE_AUTOMATIC_EXTENSIONS)
 ACTIVATION_FILES = (
     "etc/systemd/system/systemd-confext-initrd.service",
@@ -39,23 +39,27 @@ ACTIVATION_FILES = (
 )
 
 
-def verify_tpm_token(path, expected, pcr_public):
+def verify_tpm_token(path, expected, pcr_public, unlock):
     raw = path.read_bytes()
     if hashlib.sha256(raw).hexdigest() != expected:
         raise ValueError("exported LUKS2 token does not match the signed storage selection")
     token = json.loads(raw, object_pairs_hook=host_storage.unique_fields)
+    pin = unlock == "tpm2-pin"
     if (
         token["type"] != "systemd-tpm2"
-        or token["tpm2-pin"] is not True
+        or token.get("tpm2-pin", False) is not pin
         or token["tpm2-pcrs"] != [7, 12, 13]
         or token["tpm2-pcr-bank"] != "sha256"
         or token["tpm2_pubkey_pcrs"] != [11]
-        or token["tpm2_pubkey_ref"] != PCR_POLICY_REF
+        or token["tpm2_pubkey_ref"] != PCR_POLICY_REFS[unlock]
     ):
-        raise ValueError("LUKS2 token does not require a PIN and the approved PCR policy")
+        raise ValueError("LUKS2 token does not match the selected TPM unlock profile and PCR policy")
     for parameter in ("memcost", "iterations", "lanes"):
-        value = token[f"tpm2_argon2id_{parameter}"]
-        if type(value) is not int or value < 1:
+        field = f"tpm2_argon2id_{parameter}"
+        if not pin and field in token:
+            raise ValueError("the PIN-less LUKS2 token must omit PIN hardening parameters")
+        value = token.get(field)
+        if pin and (type(value) is not int or value < 1):
             raise ValueError("the LUKS2 token must harden the PIN with Argon2id")
     token_public = base64.b64decode(token["tpm2_pubkey"], validate=True)
     if run("openssl", "pkey", "-pubin", "-outform", "DER",
@@ -229,6 +233,9 @@ def epoch_selection(path, storage, tpm):
 
 def assemble(args, work):
     storage = host_storage.selection(args.storage) if args.storage is not None else None
+    auto = storage is not None and storage.unlock == "tpm2-auto"
+    if auto and args.epoch_policy is None:
+        raise ValueError("unattended TPM unlock requires a protected Hypervisor epoch")
     digests = [member.token_digest for member in storage.members] if storage is not None else (None, None)
     tpm = digests[0] is not None
     token_paths = (args.tpm_token_a, args.tpm_token_b)
@@ -244,10 +251,10 @@ def assemble(args, work):
         if pcr_public == boot_public:
             raise ValueError("PCR policy and Secure Boot must use different signing keys")
         for path, digest in zip(token_paths, digests, strict=True):
-            verify_tpm_token(path, digest, pcr_public)
+            verify_tpm_token(path, digest, pcr_public, storage.unlock)
         pcr_options = [
             f"--pcr-private-key={args.pcr_key}",
-            "--pcr-banks=sha256", "--phases=enter-initrd", f"--policyref={PCR_POLICY_REF}",
+            "--pcr-banks=sha256", "--phases=enter-initrd", f"--policyref={PCR_POLICY_REFS[storage.unlock]}",
         ]
     data = None
     if args.host_data_disk is not None:
@@ -268,6 +275,8 @@ def assemble(args, work):
     if storage is not None:
         required += ("usr/lib/fvca/host-storage-support-v4", "usr/bin/dmsetup",
                      "usr/lib/udev/rules.d/12-fvca-host-storage.rules")
+    if auto:
+        required += ("usr/lib/fvca/host-storage-tpm-auto-support-v1",)
     if args.gpt_slot:
         required += (f"usr/lib/fvca/{hypervisor_gpt.SUPPORT}",)
     if epoch:

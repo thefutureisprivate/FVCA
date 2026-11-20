@@ -27,6 +27,7 @@ class Member:
 @dataclass(frozen=True)
 class Selection:
     raw: bytes
+    unlock: str
     protection: str
     members: tuple[Member, Member]
 
@@ -36,7 +37,7 @@ def selection(path):
     uuid = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
     token = r"(0|[1-9]|[12][0-9]|3[01]),([0-9a-f]{64})"
     match = re.fullmatch(
-        rf"FVCA-HOST-STORAGE-4\nunlock=(development-passphrase|tpm2-pin)\n"
+        rf"FVCA-HOST-STORAGE-4\nunlock=(development-passphrase|tpm2-auto|tpm2-pin)\n"
         rf"protection=(development-luks2|{AUTHENTICATED})\n"
         rf"member_a=({uuid}),({uuid})\nmember_b=({uuid}),({uuid})\n"
         rf"filesystem=btrfs\nfilesystem_uuid={uuid}\n"
@@ -48,10 +49,11 @@ def selection(path):
     unlock, protection, partition_a, volume_a, partition_b, volume_b, index_a, digest_a, index_b, digest_b = match.groups()
     if partition_a == partition_b or volume_a == volume_b:
         raise ValueError("storage selection must name distinct partitions and LUKS2 volumes")
-    if (unlock == "tpm2-pin") != (digest_a is not None) or (digest_a is not None and digest_a == digest_b):
+    uses_tpm = unlock != "development-passphrase"
+    if uses_tpm != (digest_a is not None) or (uses_tpm and digest_a == digest_b):
         raise ValueError("TPM storage selection requires separate authorization for both tokens")
-    return Selection(content, protection, (Member(partition_a, volume_a, index_a, digest_a),
-                                           Member(partition_b, volume_b, index_b, digest_b)))
+    members = (Member(partition_a, volume_a, index_a, digest_a), Member(partition_b, volume_b, index_b, digest_b))
+    return Selection(content, unlock, protection, members)
 
 
 def unique_fields(pairs):
