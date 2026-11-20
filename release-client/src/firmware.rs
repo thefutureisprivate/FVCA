@@ -8,6 +8,9 @@ mod live;
 mod qualification;
 mod result;
 mod transition;
+mod writer;
+
+pub(crate) use writer::serve as serve_writer;
 
 use std::fs::{self, File, Permissions};
 use std::io::{self, Write};
@@ -969,6 +972,16 @@ async fn refresh(
         &check_cabinet,
     )
     .await?;
+    if scheduled.is_some() {
+        let file = state::open_regular(&staged.join(OFFER))?;
+        rustix::fs::fsetxattr(
+            &file,
+            "security.selinux",
+            b"system_u:object_r:fvca_firmware_state_t:s0\0",
+            rustix::fs::XattrFlags::empty(),
+        )?;
+        file.sync_all()?;
+    }
     let (capsule_delivery, boot_transition, operational_preflight) =
         if let ObservationSource::Scheduled(_, pool) = source {
             let preflight = || -> Result<_> {

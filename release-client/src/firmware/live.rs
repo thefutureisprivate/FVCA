@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{Result, invalid, state};
 
-const ADDRESS: &CStr = c"unix:path=/run/fvca/firmware-bus";
+const ADDRESS: &CStr = c"unix:path=/run/fvca/firmware-bus-inventory";
 const DAEMON: &str = "/usr/libexec/fwupd/fwupd";
 const FWUPD: &CStr = c"org.freedesktop.fwupd";
 const DBUS: &CStr = c"org.freedesktop.DBus";

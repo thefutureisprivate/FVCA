@@ -91,7 +91,8 @@ def assemble(args, work):
     root = prepared / "root"
     if any(os.path.lexists(root / path) for path in (
         "usr/libexec/fwupd", "usr/lib64/libfwupd.so.3", "usr/bin/fwupdmgr", "usr/bin/fwupdtool",
-        "usr/lib/fvca/firmware-bus.conf", "usr/share/fvca/firmware-build.txt",
+        "usr/lib/fvca/firmware-bus-common.conf", "usr/lib/fvca/firmware-bus-inventory.conf",
+        "usr/lib/fvca/firmware-bus-writer.conf", "usr/share/fvca/firmware-build.txt",
     )):
         raise ValueError("Service Guest core carries the Host firmware facility")
     verify_initrd(args.initrd, uname, ACTIVATION_FILES, FORBIDDEN, "Service Guest")

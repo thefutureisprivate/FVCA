@@ -14,6 +14,19 @@
 ; Let the firmware daemon traverse to its separately labeled history directory.
 (allow fwupd_t fvca_host_data_t (dir (getattr search)))
 
+; Firmware policy, staged offers and activation records have a separate scope
+; on the Host pool. Only fwupd's own history has a writable daemon label.
+(type fvca_firmware_state_t)
+(typeattributeset file_type (fvca_firmware_state_t))
+(roletype object_r fvca_firmware_state_t)
+(allow fvca_firmware_state_t fs_t (filesystem (associate)))
+(allow init_t fvca_firmware_state_t (dir (add_name create getattr open read relabelfrom relabelto remove_name rename reparent rmdir search setattr write)))
+(allow init_t fvca_firmware_state_t (file (create getattr lock open read relabelfrom relabelto rename setattr unlink write)))
+(allow fwupd_t fvca_firmware_state_t (dir (getattr open search)))
+(allow fwupd_t fvca_firmware_state_t (file (getattr open read)))
+(allow init_t fvca_os_stage_t (file (relabelfrom)))
+(allow fwupd_t fvca_os_stage_t (dir (getattr search)))
+
 ; Cold restore moves two recorded VM subvolume roots between private parents.
 ; The launcher gives only those roots a movable label before the exchange.
 (type fvca_vm_slot_t)

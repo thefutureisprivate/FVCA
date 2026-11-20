@@ -388,9 +388,10 @@ index 8768a8b..097c4b3 100644
 @@ -3136 +3193 @@ fu_dbus_daemon_method_call(GDBusConnection *connection,
 -	      g_strcmp0(method_name, "VerifyFvcaCabinet") != 0))) {
 +	      g_strcmp0(method_name, "VerifyFvcaCabinet") != 0 && !stage_allowed)))) {
-@@ -3503,0 +3561,4 @@ fu_dbus_daemon_setup(FuDaemon *daemon,
+@@ -3503,0 +3561,5 @@ fu_dbus_daemon_setup(FuDaemon *daemon,
 +	/* Only fwupd's FVCA mode supplies this initrd-authenticated volume. */
-+	if (!fu_fvca_capsule_bind_esp(engine, error))
++	if (!fu_fvca_lock_history(G_OBJECT(daemon), error) ||
++	    !fu_fvca_capsule_bind_esp(engine, error))
 +		return FALSE;
 +
 diff --git a/src/fu-fvca-capsule.c b/src/fu-fvca-capsule.c
@@ -398,7 +399,7 @@ new file mode 100644
 index 0000000..14d0cd2
 --- /dev/null
 +++ b/src/fu-fvca-capsule.c
-@@ -0,0 +1,387 @@
+@@ -0,0 +1,417 @@
 +/*
 + * SPDX-License-Identifier: LGPL-2.1-or-later
 + */
@@ -424,6 +425,7 @@ index 0000000..14d0cd2
 +
 +#define FU_FVCA_RUN "/run/fvca"
 +#define FU_FVCA_POOL FU_FVCA_RUN "/host-data"
++#define FU_FVCA_HISTORY FU_FVCA_POOL "/firmware-update/history"
 +#define FU_FVCA_ESP_BINDING "firmware-esp-binding"
 +#define FU_FVCA_DRAIN_RECEIPT "firmware-guest-drained"
 +#define FU_FVCA_LEASE "guest-capture.lock"
@@ -482,6 +484,35 @@ index 0000000..14d0cd2
 +		return NULL;
 +	}
 +	return g_bytes_new_take(g_steal_pointer(&data), st.st_size);
++}
++
++static void
++fu_fvca_release_history(gpointer user_data)
++{
++	gint *fd = user_data;
++	close(*fd);
++	g_free(fd);
++}
++
++gboolean
++fu_fvca_lock_history(GObject *daemon, GError **error)
++{
++	g_autofd gint fd = -1;
++	struct stat st;
++	struct statfs fs;
++	gint *lease;
++
++	if (g_strcmp0(g_getenv("FVCA_FWUPD_PERSISTENT_HISTORY"), "1") != 0)
++		return TRUE;
++	fd = open(FU_FVCA_HISTORY, FU_FVCA_DIR_FLAGS);
++	if (fd < 0 || !fu_fvca_private(fd, S_IFDIR | 0700, &st) ||
++	    fstatfs(fd, &fs) != 0 || fs.f_type != BTRFS_SUPER_MAGIC ||
++	    flock(fd, LOCK_EX | LOCK_NB) != 0)
++		return fu_fvca_deny(error, "FVCA requires exclusive custody of Host firmware history");
++	lease = g_new(gint, 1);
++	*lease = g_steal_fd(&fd);
++	g_object_set_data_full(daemon, "fvca-history-lease", lease, fu_fvca_release_history);
++	return TRUE;
 +}
 +
 +gboolean
@@ -791,7 +822,7 @@ new file mode 100644
 index 0000000..de05c59
 --- /dev/null
 +++ b/src/fu-fvca-capsule.h
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,40 @@
 +/*
 + * SPDX-License-Identifier: LGPL-2.1-or-later
 + */
@@ -815,6 +846,8 @@ index 0000000..de05c59
 +	guint32 to_raw;
 +} FuFvcaCabinet;
 +
++gboolean
++fu_fvca_lock_history(GObject *daemon, GError **error);
 +gboolean
 +fu_fvca_capsule_writer_enabled(void);
 +gboolean

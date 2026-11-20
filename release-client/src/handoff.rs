@@ -72,9 +72,14 @@ pub fn require_pool_directory(path: &Path) -> Result<File> {
 }
 
 pub fn lock_install() -> Result<File> {
+    let lock = install_lease()?;
+    lock.try_lock().map_err(io::Error::other)?;
+    Ok(lock)
+}
+
+pub(crate) fn install_lease() -> Result<File> {
     let lock = state::open_regular(Path::new(GUEST_CAPTURE_LOCK))?;
     private_file(&lock)?;
-    lock.try_lock().map_err(io::Error::other)?;
     Ok(lock)
 }
 

@@ -16,7 +16,7 @@ import time
 
 FWUPD = "org.freedesktop.fwupd"
 DBUS = "org.freedesktop.DBus"
-CONFIG = Path("/usr/lib/fvca/firmware-bus.conf")
+CONFIG = Path("/usr/lib/fvca/firmware-bus-inventory.conf")
 MFD_NOEXEC_SEAL = 0x0008  # Linux memfd UAPI, not exposed by Python's os module.
 P3_ARCHIVE = "a90d488cc31ba8eade423a9a980c96bc793c0e51cff375ae7da2a9336735a3ba"
 P3_PAYLOAD = "78ea6a1e305ed7cba594493a798878e6b10f54dab81a2714b2d96facaa685553"

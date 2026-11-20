@@ -1,0 +1,53 @@
+[Unit]
+Description=Stage the authorized FVCA Host firmware capsule
+Wants=fvca-firmware-bus@writer.service
+After=fvca-base-ready.service fvca-firmware-bus@writer.service
+ConditionVirtualization=!container
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+AssertPathExists=/run/fvca/firmware-update-owner
+AssertPathExists=/run/fvca/host-data/firmware-update/activation.json
+AssertPathExists=/run/fvca/firmware-guest-drained
+AssertPathIsMountPoint=/run/fvca/host-data
+AssertPathIsMountPoint=/run/fvca/firmware-esp
+AssertPathIsMountPoint=/sys/firmware/efi/efivars
+AssertPathExists=!/run/fvca/boot-trial-started
+
+[Service]
+Type=notify
+NotifyAccess=main
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/libexec/fvca/release-client --serve-firmware-writer
+RuntimeDirectory=fvca-firmware-writer
+RuntimeDirectoryMode=0700
+TimeoutStartSec=60s
+TimeoutStopSec=infinity
+SendSIGKILL=no
+UMask=0077
+# The launcher drops both capabilities from every set before executing fwupd.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SETPCAP
+DevicePolicy=closed
+InaccessiblePaths=-/run/dbus -/run/systemd/private -/run/libvirt -/run/fvca/firmware-bus-inventory
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoExecPaths=/run /tmp /var
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateMounts=yes
+PrivateNetwork=yes
+PrivateTmp=disconnected
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ReadOnlyPaths=/run/fvca/firmware-esp /run/fvca/host-data
+ReadWritePaths=/sys/firmware/efi/efivars /run/fvca/host-data/firmware-update/history
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=mnt
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native

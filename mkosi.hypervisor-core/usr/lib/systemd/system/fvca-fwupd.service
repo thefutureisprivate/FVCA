@@ -1,14 +1,14 @@
 [Unit]
 Description=FVCA Host firmware inventory
-BindsTo=fvca-firmware-bus.service
-After=fvca-firmware-bus.service
+BindsTo=fvca-firmware-bus@inventory.service
+After=fvca-firmware-bus@inventory.service
 ConditionVirtualization=!container
 
 [Service]
 Type=notify
 NotifyAccess=main
 ExecStart=/usr/libexec/fwupd/fwupd
-Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/fvca/firmware-bus
+Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/fvca/firmware-bus-inventory
 TimeoutStartSec=60s
 RuntimeDirectory=fvca-firmware
 RuntimeDirectoryMode=0700
@@ -20,7 +20,7 @@ UMask=0077
 CapabilityBoundingSet=
 DevicePolicy=closed
 DeviceAllow=char-nvme r
-InaccessiblePaths=-/run/dbus -/run/systemd/private
+InaccessiblePaths=-/run/dbus -/run/systemd/private -/run/fvca/firmware-bus-writer
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 NoExecPaths=/run /tmp /var

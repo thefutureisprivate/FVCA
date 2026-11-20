@@ -46,8 +46,8 @@ for file in etc/fwupd/remotes.d/lvfs.conf usr/share/fwupd/quirks.d/builtin.quirk
     etc/pki/fwupd-metadata/{LVFS-CA,LVFS-CA-2025PQ}.pem; do
     install -Dm644 "$work/staged/$file" "$DESTDIR/$file"
 done
-for file in etc/fwupd/fwupd.conf usr/lib/fvca/firmware-bus.conf \
-    usr/lib/systemd/system/{fvca-firmware-bus.socket,fvca-firmware-bus.service,fvca-fwupd.service}; do
+for file in etc/fwupd/fwupd.conf usr/lib/fvca/firmware-bus-{common,inventory,writer}.conf \
+    usr/lib/systemd/system/{fvca-firmware-bus@.socket,fvca-firmware-bus@.service,fvca-fwupd.service}; do
     install -Dm644 "$SRCDIR/mkosi.hypervisor-core/$file" "$DESTDIR/$file"
 done
 install -Dm644 "$work/source/COPYING" "$DESTDIR/usr/share/licenses/fvca-fwupd/COPYING"
@@ -59,7 +59,7 @@ install -Dm644 /usr/share/licenses/dbus-daemon/COPYING "$DESTDIR/usr/share/licen
     printf '%s\n' 'cabinet_payload_size=v1'
     printf '%s\n' 'operation_history=v1'
     printf '%s\n' 'device_preflight=v1'
-    printf '%s\n' 'capsule_writer=v2'
+    printf '%s\n' 'capsule_writer=v3'
     rpm -q dbus-daemon dbus-libs gcc glib2 libxmlb meson
     sha256sum "$SRCDIR/tools/fwupd-inventory.patch" | cut -d ' ' -f1 | sed 's/^/patch_sha256=/'
     sha256sum "$SRCDIR/tools/fwupd-catalog.patch" | cut -d ' ' -f1 | sed 's/^/catalog_patch_sha256=/'

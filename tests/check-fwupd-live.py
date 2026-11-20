@@ -70,6 +70,11 @@ def serve(address, mode):
                 assert content == b"exact cabinet" and archive == sha256(content).hexdigest()
             return dbus.UInt64(16_908_288), dbus.Boolean(mode.read_text() != "other-capsule-backend")
 
+        @dbus.service.method(interface, in_signature="hh", out_signature="")
+        def StageFvcaCapsule(self, cabinet, lease):
+            for descriptor in (cabinet, lease):
+                os.close(descriptor.take())
+
         @dbus.service.method(interface, in_signature="", out_signature="aa{sv}")
         def GetDevices(self):
             setting = mode.read_text()
@@ -182,6 +187,54 @@ def check(daemon, binary):
                 )
 
 
+def check_packaged_policy(daemon, policies):
+    import dbus
+    from dbus.lowlevel import MethodCallMessage
+    from dbus.types import UnixFd
+
+    interface = "org.freedesktop.fwupd"
+    with tempfile.TemporaryDirectory(prefix="fvca-fwupd-policy-") as path:
+        directory = Path(path)
+        common = (policies / "firmware-bus-common.conf").read_text()
+        for endpoint in ("inventory", "writer"):
+            socket = directory / f"{endpoint}-bus"
+            (directory / "firmware-bus-common.conf").write_text(
+                common.replace("systemd:", f"unix:path={escape(str(socket))}", 1)
+            )
+            config = directory / f"firmware-bus-{endpoint}.conf"
+            config.write_bytes((policies / config.name).read_bytes())
+            mode = directory / "mode"
+            mode.write_text("normal")
+            with running([daemon, f"--config-file={config}", "--nofork", "--print-address=1"]) as (_, address):
+                with running([sys.executable, __file__, "--serve", address, str(mode)]) as (_, ready):
+                    assert ready == "ready"
+                    peer = dbus.bus.BusConnection(address)
+                    try:
+                        owner = peer.get_name_owner(interface)
+                        with open(os.devnull, "rb") as harmless:
+                            fds = (UnixFd(harmless.fileno()), UnixFd(harmless.fileno()))
+                            for destination in (interface, owner):
+                                for method, signature, args, allowed in (
+                                    ("StageFvcaCapsule", "hh", fds, endpoint == "writer"),
+                                    ("StageFvcaCapsule", "h", fds[:1], False),
+                                    ("StageFvcaCapsule", "", (), False),
+                                    ("GetDevices", "", (), endpoint == "inventory"),
+                                    ("Install", "", (), False),
+                                    ("Quit", "", (), False),
+                                ):
+                                    message = MethodCallMessage(destination, "/", interface, method)
+                                    message.append(*args, signature=signature)
+                                    try:
+                                        peer.send_message_with_reply_and_block(message, 3)
+                                    except dbus.DBusException as error:
+                                        assert not allowed and error.get_dbus_name() == "org.freedesktop.DBus.Error.AccessDenied", error
+                                    else:
+                                        assert allowed, (endpoint, destination, method, signature)
+                    finally:
+                        peer.close()
+    print("FVCA_FWUPD_INVENTORY_AND_WRITER_BUS_POLICIES_ARE_DISTINCT")
+
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--serve"]:
         serve(sys.argv[2], Path(sys.argv[3]))
@@ -189,5 +242,8 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument("--dbus-daemon", default="dbus-daemon")
         parser.add_argument("--test-binary", required=True)
+        parser.add_argument("--policy-directory", type=Path)
         arguments = parser.parse_args()
         check(arguments.dbus_daemon, arguments.test_binary)
+        if arguments.policy_directory is not None:
+            check_packaged_policy(arguments.dbus_daemon, arguments.policy_directory)

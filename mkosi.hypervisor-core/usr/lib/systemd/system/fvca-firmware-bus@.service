@@ -1,11 +1,11 @@
 [Unit]
-Description=FVCA private firmware inventory bus
-Requires=fvca-firmware-bus.socket
-After=fvca-firmware-bus.socket
+Description=FVCA private firmware %I bus
+Requires=fvca-firmware-bus@%i.socket
+After=fvca-firmware-bus@%i.socket
 
 [Service]
 Type=exec
-ExecStart=/usr/bin/dbus-daemon --config-file=/usr/lib/fvca/firmware-bus.conf --nofork --nopidfile
+ExecStart=/usr/bin/dbus-daemon --config-file=/usr/lib/fvca/firmware-bus-%i.conf --nofork --nopidfile
 CapabilityBoundingSet=
 LockPersonality=yes
 MemoryDenyWriteExecute=yes

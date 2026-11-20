@@ -1,7 +1,7 @@
 ; Reuse Fedora's system bus socket and configuration labels for the private bus.
-(filecon "/run/fvca/firmware-bus" socket (system_u object_r system_dbusd_var_run_t ((s0) (s0))))
-(filecon "/usr/lib/fvca/firmware-bus\.conf" file (system_u object_r dbusd_etc_t ((s0) (s0))))
-(filecon "/run/fvca-firmware(/.*)?" any (system_u object_r fwupd_var_lib_t ((s0) (s0))))
+(filecon "/run/fvca/firmware-bus-(inventory|writer)" socket (system_u object_r system_dbusd_var_run_t ((s0) (s0))))
+(filecon "/usr/lib/fvca/firmware-bus-(common|inventory|writer)\.conf" file (system_u object_r dbusd_etc_t ((s0) (s0))))
+(filecon "/run/fvca-firmware(-writer)?(/.*)?" any (system_u object_r fwupd_var_lib_t ((s0) (s0))))
 
 ; Permit the existing Fedora transitions with NoNewPrivileges set by PID 1.
 (allow init_t system_dbusd_t (process2 (nnp_transition)))
@@ -9,7 +9,8 @@
 
 ; Only the fwupd history directory on the authenticated Host pool uses this label.
 (allow fwupd_var_lib_t fs_t (filesystem (associate)))
-(allow init_t fwupd_var_lib_t (dir (getattr mounton relabelto)))
+(allow init_t fwupd_var_lib_t (dir (getattr mounton relabelfrom relabelto)))
+(allow fwupd_t fwupd_var_lib_t (dir (lock)))
 
 ; Permit PID 1 to mask its private control socket in the fwupd mount namespace.
 (allow init_t init_var_run_t (sock_file (mounton)))
@@ -21,3 +22,12 @@
 (allow fvca_firmware_drain_t tmpfs_t (filesystem (associate)))
 (allow init_t fvca_firmware_drain_t (file (getattr open read relabelfrom relabelto rename unlink)))
 (allow fwupd_t fvca_firmware_drain_t (file (getattr open read)))
+
+; Only the verified ESP binding and shared lifecycle lock receive this label.
+(type fvca_firmware_boot_input_t)
+(typeattributeset file_type (fvca_firmware_boot_input_t))
+(roletype object_r fvca_firmware_boot_input_t)
+(allow fvca_firmware_boot_input_t tmpfs_t (filesystem (associate)))
+(allow init_t fvca_firmware_boot_input_t (file (getattr lock open read relabelto write)))
+(allow fwupd_t fvca_firmware_boot_input_t (file (getattr lock open read)))
+(allow fwupd_t init_t (fd (use)))

@@ -64,9 +64,19 @@ fn prepare_staging(name: &str) -> io::Result<()> {
             ));
         }
     }
-    run(Command::new("/usr/bin/chcon")
-        .args(["--no-dereference", "system_u:object_r:fvca_os_stage_t:s0"])
-        .arg(staging))
+    let mut label = Command::new("/usr/bin/chcon");
+    label.arg("--no-dereference");
+    if name == FIRMWARE_STATE {
+        label
+            .arg("system_u:object_r:fvca_firmware_state_t:s0")
+            .arg(&state)
+            .arg(&staging);
+    } else {
+        label
+            .arg("system_u:object_r:fvca_os_stage_t:s0")
+            .arg(staging);
+    }
+    run(&mut label)
 }
 
 fn prepare_firmware_history() -> io::Result<()> {
@@ -172,7 +182,12 @@ fn prepare_firmware_lease() -> io::Result<()> {
     {
         return Err(invalid("invalid Host lifecycle lease file"));
     }
-    Ok(())
+    run(Command::new("/usr/bin/chcon")
+        .args([
+            "--no-dereference",
+            "system_u:object_r:fvca_firmware_boot_input_t:s0",
+        ])
+        .arg(lock))
 }
 
 pub fn activate_if_selected() -> io::Result<()> {

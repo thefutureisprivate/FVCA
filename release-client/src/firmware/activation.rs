@@ -85,6 +85,30 @@ impl Activation {
             Phase::OutcomeUnknown => "outcome-unknown",
         }
     }
+
+    pub(super) fn writer_operation(pool: &File, current_boot: &str) -> Result<Self> {
+        let file = File::from(fs::openat2(
+            pool,
+            ACTIVATION,
+            PRIVATE_READ,
+            Mode::empty(),
+            WITHIN_POOL,
+        )?);
+        handoff::private_file(&file)?;
+        let record = Self::read(file)?;
+        record.require_writer_boot(current_boot)?;
+        Ok(record)
+    }
+
+    fn require_writer_boot(&self, current_boot: &str) -> Result<()> {
+        if !matches!(self.phase, Phase::Draining | Phase::Flashing) || self.boot_id != current_boot
+        {
+            return Err(
+                invalid("firmware writer requires an active operation on this boot").into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 pub(super) struct Recovery {
@@ -277,6 +301,23 @@ mod tests {
         assert_eq!(recovered.disposition(), "draining");
         assert_eq!(std::fs::read(&path)?, before);
         Ok(())
+    }
+
+    #[test]
+    fn writer_start_needs_the_current_boot_and_a_pre_dispatch_phase() {
+        for phase in [Phase::Draining, Phase::Flashing] {
+            let activation = record(phase);
+            assert!(activation.require_writer_boot(&activation.boot_id).is_ok());
+            assert!(activation.require_writer_boot("another boot").is_err());
+        }
+        for phase in [
+            Phase::RebootPending,
+            Phase::OutcomeUnknown,
+            Phase::PowerTransitionPending,
+        ] {
+            let activation = record(phase);
+            assert!(activation.require_writer_boot(&activation.boot_id).is_err());
+        }
     }
 
     #[test]

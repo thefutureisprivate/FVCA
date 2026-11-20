@@ -301,7 +301,16 @@ pub(crate) fn publish_firmware_esp(esp: &str) -> io::Result<()> {
     }
     let mut binding = device_id.to_le_bytes().to_vec();
     binding.extend_from_slice(&path);
-    publish(Path::new(efi::FIRMWARE_ESP_BINDING), &binding)
+    let record = Path::new(efi::FIRMWARE_ESP_BINDING);
+    publish(record, &binding)?;
+    crate::run(
+        Command::new("/usr/bin/chcon")
+            .args([
+                "--no-dereference",
+                "system_u:object_r:fvca_firmware_boot_input_t:s0",
+            ])
+            .arg(record),
+    )
 }
 
 pub(crate) fn publish_firmware_boot(

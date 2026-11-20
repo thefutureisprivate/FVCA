@@ -2,12 +2,14 @@
 
 use std::fs::File;
 use std::io::{self, Read};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use fvca_trial_authorization::efi;
 use rustix::fs::{self, CWD, Dir, Mode, OFlags, ResolveFlags, StatFs, StatVfsMountFlags};
 use rustix::io::Errno;
+use rustix::mount::{MountFlags, mount_remount};
 use serde::Serialize;
 
 use super::{Esrt, boot_id, live::VerifiedCabinet};
@@ -145,6 +147,34 @@ pub(super) fn require_clear_queue() -> Result<()> {
     Ok(())
 }
 
+pub(super) fn prepare_writer_mount() -> Result<()> {
+    let variables = File::from(fs::openat(CWD, EFIVARS, DIRECTORY, Mode::empty())?);
+    efivar_space(&fs::fstatfs(&variables)?)?;
+    if fs::fstatvfs(&variables)?
+        .f_flag
+        .contains(StatVfsMountFlags::RDONLY)
+    {
+        return Err(invalid("firmware writer requires the writable kernel efivarfs mount").into());
+    }
+    let binding = read_binding()?;
+    let (device_id, expected) = esp_binding(&binding)?;
+    require_secure_boot(&variables)?;
+    require_capsule_on_disk(&variables)?;
+    ordinary_boot(&variables, expected)?;
+    let path = Path::new(efi::FIRMWARE_ESP);
+    let root = verified_esp(path, device_id, false)?;
+    require_empty_capsule_directory(&root)?;
+    // The private writer mount becomes writable and the original mount
+    // retains its read-only VFS flag.
+    mount_remount(
+        format!("/proc/self/fd/{}", root.as_raw_fd()),
+        MountFlags::NODEV | MountFlags::NOSUID | MountFlags::NOEXEC,
+        c"",
+    )?;
+    verified_esp(path, device_id, true)?;
+    Ok(())
+}
+
 fn require_efivarfs(space: &StatFs) -> io::Result<()> {
     if space.f_type as u64 != EFIVARFS_MAGIC {
         return Err(invalid(
@@ -201,27 +231,34 @@ fn required_space(payload_bytes: u64) -> io::Result<u64> {
         .ok_or_else(|| invalid("invalid firmware payload size for ESP reservation"))
 }
 
-fn esp_space(path: &Path, device_id: u64) -> io::Result<u64> {
+fn verified_esp(path: &Path, device_id: u64, writable: bool) -> Result<File> {
     let root = File::from(fs::openat(CWD, path, DIRECTORY, Mode::empty())?);
-    let flags = StatVfsMountFlags::RDONLY
-        | StatVfsMountFlags::NODEV
-        | StatVfsMountFlags::NOSUID
-        | StatVfsMountFlags::NOEXEC;
-    let space = fs::fstatvfs(&root)?;
+    let flags = StatVfsMountFlags::NODEV | StatVfsMountFlags::NOSUID | StatVfsMountFlags::NOEXEC;
+    let actual = fs::fstatvfs(&root)?.f_flag;
     if root.metadata()?.dev() != device_id
         || fs::fstatfs(&root)?.f_type as u64 != VFAT_MAGIC
-        || !space.f_flag.contains(flags)
+        || !actual.contains(flags)
+        || writable == actual.contains(StatVfsMountFlags::RDONLY)
     {
-        return Err(invalid(
-            "firmware ESP is not the verified read-only VFAT mount",
-        ));
+        return Err(invalid(if writable {
+            "firmware ESP is not the verified writable VFAT mount"
+        } else {
+            "firmware ESP is not the verified read-only VFAT mount"
+        })
+        .into());
     }
+    Ok(root)
+}
+
+fn esp_space(path: &Path, device_id: u64) -> Result<u64> {
+    let root = verified_esp(path, device_id, false)?;
     require_empty_capsule_directory(&root)?;
+    let space = fs::fstatvfs(&root)?;
     space
         .f_bavail
         .checked_mul(space.f_frsize)
         .filter(|_| space.f_frsize != 0)
-        .ok_or_else(|| invalid("invalid firmware ESP space accounting"))
+        .ok_or_else(|| invalid("invalid firmware ESP space accounting").into())
 }
 
 fn require_empty_capsule_directory(root: &File) -> io::Result<()> {
@@ -285,10 +322,15 @@ fn route(variables: &File, expected: &[u8], esrt: &Esrt, target: u32) -> Result<
         return Err(invalid("ESRT already records an attempt at this capsule target").into());
     }
     require_secure_boot(variables)?;
+    require_capsule_on_disk(variables)?;
+    ordinary_boot(variables, expected)
+}
+
+fn require_capsule_on_disk(variables: &File) -> Result<()> {
     if mask(&read(variables, "OsIndicationsSupported")?, BOOT_RUNTIME)? & FILE_CAPSULE == 0 {
         return Err(invalid("firmware does not advertise capsule-on-disk delivery").into());
     }
-    ordinary_boot(variables, expected)
+    Ok(())
 }
 
 fn require_secure_boot(variables: &File) -> Result<()> {

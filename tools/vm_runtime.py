@@ -39,9 +39,10 @@ GUEST_UPDATE_UNITS = tuple(
 FIRMWARE_UPDATE_UNITS = tuple(
     Path(f"usr/lib/systemd/system/{unit}") for unit in (
         "fvca-firmware-update.service", "fvca-firmware-update.timer", "fvca-firmware-recovery.service",
+        "fvca-fwupd-writer.service",
     )
 )
-FIRMWARE_UPDATE_SUPPORT = Path("usr/lib/fvca/firmware-update-support-v12")
+FIRMWARE_UPDATE_SUPPORT = Path("usr/lib/fvca/firmware-update-support-v13")
 BASE_BINDING = Path("usr/share/fvca/vm-runtime-base.roothash")
 EXTENSION_RELEASE = Path("usr/lib/extension-release.d/extension-release.vm-runtime")
 REQUIRED_FILES = {
