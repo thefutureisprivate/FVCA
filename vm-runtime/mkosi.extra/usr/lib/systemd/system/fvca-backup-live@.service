@@ -1,0 +1,18 @@
+[Unit]
+Description=Back up the running FVCA Service Guest as %i
+Requires=fvca-virtqemud.service
+After=fvca-virtqemud.service
+AssertPathExists=/run/fvca/vm-backup-policy
+AssertSecurity=selinux
+AssertSecurity=uefi-secureboot
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/libexec/fvca/launch-guest --backup-live %i
+TimeoutStartSec=14h
+UMask=0077
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+StandardOutput=journal+console
+StandardError=journal+console

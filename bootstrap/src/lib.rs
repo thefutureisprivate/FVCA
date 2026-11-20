@@ -6,6 +6,7 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+pub mod backup_policy;
 pub mod btrfs;
 pub mod direct_boot;
 pub mod guest_boot;

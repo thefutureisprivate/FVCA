@@ -23,6 +23,8 @@ const O_NOFOLLOW: i32 = 0o400000;
 pub(super) mod live;
 #[path = "restore.rs"]
 pub(super) mod restore;
+#[path = "backup.rs"]
+pub(super) mod backup;
 
 #[derive(Clone, Copy)]
 enum Consistency {

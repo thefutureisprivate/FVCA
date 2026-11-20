@@ -12,6 +12,11 @@ fvca-libvirt-boundary = { path = "libvirt-boundary", optional = true }
 
 [features]
 libvirt = ["dep:fvca-btrfs-boundary", "dep:fvca-libvirt-boundary"]
+backup = []
+
+[[bin]]
+name = "fvca-backup-worker"
+required-features = ["backup"]
 
 [[bin]]
 name = "fvca-qualify-libvirt"

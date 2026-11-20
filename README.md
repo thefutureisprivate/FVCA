@@ -272,7 +272,26 @@ Stop `fvca-service-guest.service` and start `fvca-restore-guest@CAPTURE_UUID.RES
 
 The isolated Guest cold-boots with the currently authorized Guest bundle. The coordinator publishes a verified receipt after the ordinary Guest readiness check and confirms that the running instance owns the restored disk attachment. A rejected trial boot puts the previous volume back and leaves the Guest stopped. Reuse the same restore UUID to reconcile an interrupted transaction. The terminal receipt makes a duplicate request idempotent.
 
-The nested restore test uses the `restore` fixture and `tests/check-storage.py --nested-guest-restore` with the stopped capture lab. Retention and encrypted S3 backup remain pending.
+The nested restore test uses the `restore` fixture and `tests/check-storage.py --nested-guest-restore` with the stopped capture lab.
+
+### Encrypted Service Guest backups
+
+Provision a restic format 2 repository in a dedicated S3 bucket or prefix. Give the Hypervisor a repository password and S3 credentials scoped to that repository. Place them under `/run/fvca/host-data/backup-credentials` on the unlocked encrypted Host Btrfs pool. Set the directory to root:root mode `0700` and the `repository-password` and `s3-credentials` files to root:root mode `0400` or `0600`. The credentials file uses the AWS shared credentials format with a `[default]` profile, `aws_access_key_id`, `aws_secret_access_key`, and an optional `aws_session_token`, in that order. Keep an independently recoverable copy of the repository credentials with the recovery material.
+
+Supply `--backup-policy` and `--backup-ca` when composing the Hypervisor for an authorized Guest. The CA file is a PEM trust bundle. The Hypervisor needs a route to the selected endpoint, whose certificate must cover its literal IP address. Use the repository ID from `restic cat config` in the policy. An empty `prefix=` selects the bucket root.
+
+```text
+FVCA-VM-BACKUP-1
+endpoint=192.0.2.10:443
+bucket=fvca-recovery
+prefix=service-guest
+region=us-east-1
+repository=REPLACE_WITH_64_LOWERCASE_HEX_DIGITS
+```
+
+Start `fvca-backup-live@CAPTURE_UUID.service` to capture a running Guest or `fvca-backup-stopped@CAPTURE_UUID.service` to use an orderly stop. Upload begins after Guest recovery. The isolated worker authenticates the authorized repository, reads back the exact snapshot inventory and manifest, then returns the full snapshot ID. The coordinator records the result in `backup-REPOSITORY_ID` beside the finalized capture manifest. After an upload failure, retry with the same capture UUID and the same capture mode to reuse the sealed disk. The pending record identifies the sealed disk and its SHA-256 digest.
+
+Automated retention and restore from S3 on a clean Hypervisor are pending.
 
 ## Off-node Stalwart workload derivation
 

@@ -4,6 +4,7 @@
 import argparse
 import base64
 import hashlib
+import ipaddress
 import json
 from pathlib import Path
 import re
@@ -110,6 +111,31 @@ def guest_selection(args, work):
     return tuple(zip(GUEST_LAUNCH_FILES, (selection, (directory / "root.p7s").read_bytes()), strict=True))
 
 
+BACKUP_FILES = ("vm-backup-policy", "vm-backup-ca.pem")
+
+
+def backup_selection(args):
+    if args.backup_policy is None:
+        return ()
+    policy = args.backup_policy.read_bytes()
+    ca = args.backup_ca.read_bytes()
+    label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    selected = re.fullmatch(
+        rf"FVCA-VM-BACKUP-1\nendpoint=(\[[a-fA-F0-9:]+\]|[0-9.]+):([0-9]{{1,5}})\n"
+        rf"bucket=([a-z0-9][a-z0-9-]{{1,61}}[a-z0-9])\nprefix=((?:{label}(?:/{label})*)?)\n"
+        r"region=([a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?)\nrepository=([0-9a-f]{64})\n",
+        policy.decode("ascii"),
+    )
+    if selected is None or len(policy) > 2048:
+        raise ValueError("invalid VM backup destination policy")
+    address = ipaddress.ip_address(selected[1].strip("[]"))
+    if address.is_unspecified or address.is_multicast or not 0 < int(selected[2]) <= 65535 or len(selected[4]) > 160:
+        raise ValueError("invalid VM backup endpoint or prefix")
+    if not ca.startswith(b"-----BEGIN CERTIFICATE-----") or len(ca) > 65_536:
+        raise ValueError("invalid VM backup CA bundle")
+    return tuple(zip(BACKUP_FILES, (policy, ca), strict=True))
+
+
 def assemble(args, work):
     storage, digests = storage_selection(args.storage) if args.storage is not None else (None, (None, None))
     tpm = digests[0] is not None
@@ -136,13 +162,13 @@ def assemble(args, work):
     runtime_hash = verify_runtime(args.runtime, args.runtime_certificate, prepared, runtime_work, vm_runtime)
     forbidden = tuple(f"usr/lib/fvca/{name}" for name in (
         "hypervisor.composition", "vm-runtime.p7s", "host-storage",
-        *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES,
+        *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, *BACKUP_FILES,
     ))
     verify_initrd(args.initrd, uname, ACTIVATION_FILES, forbidden, "Hypervisor")
     extra = (("host-storage", storage),) if storage is not None else ()
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
-        extra=(*extra, *guest_selection(args, work)),
+        extra=(*extra, *guest_selection(args, work), *backup_selection(args)),
     )
     cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS))
     disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)
@@ -157,6 +183,8 @@ def main():
     parser.add_argument("--storage", type=Path, help="host storage selection to embed in the signed UKI")
     parser.add_argument("--guest-boot", type=Path, help="verified Guest boot bundle disk to authorize")
     parser.add_argument("--guest-release-certificate", type=Path, help="trusted Guest release signer")
+    parser.add_argument("--backup-policy", type=Path, help="S3 destination and repository ID to authorize in this UKI")
+    parser.add_argument("--backup-ca", type=Path, help="PEM trust bundle for the selected S3 endpoint")
     parser.add_argument("--pcr-key", type=Path, help="separate RSA private key for the initrd PCR policy")
     for member in ("a", "b"):
         parser.add_argument(f"--tpm-token-{member}", type=Path, help=f"exported LUKS2 token for member {member}")
@@ -167,6 +195,10 @@ def main():
         parser.error("Guest boot requires its signed bundle disk, release certificate, and Host storage")
     if args.output.exists():
         parser.error("output disk already exists")
+    if (args.backup_policy is None) != (args.backup_ca is None) or (
+        args.backup_policy is not None and args.guest_boot is None
+    ):
+        parser.error("VM backup requires an authorized Guest, destination policy, and endpoint CA")
     try:
         with tempfile.TemporaryDirectory(prefix=".fvca-hypervisor-", dir=args.output.parent) as directory:
             assemble(args, Path(directory))

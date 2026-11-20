@@ -8,8 +8,9 @@ export CARGO_TARGET_DIR="$build_dir/target"
 export RUSTFLAGS="-Dwarnings"
 
 target=x86_64-unknown-linux-gnu
-cargo build --frozen --release --target "$target" --bin fvca-qualify-libvirt --bin fvca-launch-guest --features libvirt \
+cargo build --frozen --release --target "$target" --bin fvca-qualify-libvirt --bin fvca-launch-guest --bin fvca-backup-worker \
+    --features libvirt,backup \
     --manifest-path "$SRCDIR/bootstrap/Cargo.toml"
-for program in qualify-libvirt launch-guest; do
+for program in qualify-libvirt launch-guest backup-worker; do
     install -Dm755 "$CARGO_TARGET_DIR/$target/release/fvca-$program" "$DESTDIR/usr/libexec/fvca/$program"
 done

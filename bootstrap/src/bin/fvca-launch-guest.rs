@@ -271,6 +271,8 @@ fn activate() -> io::Result<()> {
         [option, id] if option == "--live-window" => capture::live::capture_window(id),
         [option, id] if option == "--recover-live" => capture::live::recover(id),
         [option, request] if option == "--restore" => capture::restore::cold_restore(request),
+        [option, id] if option == "--backup-live" => capture::backup::upload(id, true),
+        [option, id] if option == "--backup-stopped" => capture::backup::upload(id, false),
         _ => Err(invalid("unsupported Service Guest operation")),
     }
 }
