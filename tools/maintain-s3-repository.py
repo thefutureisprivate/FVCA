@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Verify and retain independently enrolled FVCA recovery points off the appliance."""
+"""Verify, retain and archive enrolled FVCA recovery points off the appliance."""
 
 import argparse
 from contextlib import closing
 from dataclasses import dataclass
+import errno
 import fcntl
 import hashlib
 import json
@@ -16,6 +17,7 @@ import stat
 import subprocess
 import tempfile
 import time
+from uuid import UUID as FilesystemUUID
 
 import backup_destination
 from image_verity import verify_cms
@@ -24,6 +26,7 @@ from image_verity import verify_cms
 HASH = r"[0-9a-f]{64}"
 UUID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 IO_DEADLINE = 120
+BTRFS_IOC_FS_INFO = 0x8400941F  # _IOR(0x94, 31, struct btrfs_ioctl_fs_info_args) on Fedora amd64.
 
 
 def read(path, limit):
@@ -60,7 +63,7 @@ def policy_from(args, work):
         "operation_timeout_seconds": (60, 604800),
     }
     hashes = {"destination_sha256", "ca_sha256", "restic_sha256"}
-    if type(policy) is not dict or set(policy) != set(bounds) | hashes | {"protect"}:
+    if type(policy) is not dict or set(policy) - {"offline_archive"} != set(bounds) | hashes | {"protect"}:
         raise ValueError("unexpected signed maintenance policy fields")
     for key, (minimum, maximum) in bounds.items():
         value = policy[key]
@@ -74,6 +77,11 @@ def policy_from(args, work):
         not isinstance(item, str) or re.fullmatch(HASH, item) is None for item in protected
     ) or len(set(protected)) != len(protected):
         raise ValueError("invalid protected recovery-point IDs")
+    if "offline_archive" in policy:
+        archive = policy["offline_archive"]
+        if (type(archive) is not dict or set(archive) != {"btrfs_uuid", "repository"}
+                or not valid_id(archive["btrfs_uuid"], UUID) or not valid_id(archive["repository"], HASH)):
+            raise ValueError("invalid offline archive approval")
     return policy
 
 
@@ -92,43 +100,16 @@ def private_file(path, modes, limit=None):
     return path
 
 
-class Repository:
-    def __init__(self, args, policy, work):
-        source = read(args.destination, 2048)
-        ca = read(args.ca, 65_536)
-        self.destination = backup_destination.parse(source, ca)
-        self.engine = args.restic.resolve(strict=True)
-        with self.engine.open("rb") as stream:
-            engine_hash = hashlib.file_digest(stream, "sha256").hexdigest()
-        if (digest(source), digest(ca), engine_hash) != (
-            policy["destination_sha256"], policy["ca_sha256"], policy["restic_sha256"]
-        ):
-            raise ValueError("destination, CA or restic executable differs from signed approval")
-        credentials = private_directory(args.credentials)
-        password = private_file(credentials / "repository-password", {0o400, 0o600}, 4096)
-        s3 = private_file(credentials / "s3-credentials", {0o400, 0o600}, 8192)
-        fields = read(s3, 8192).decode("ascii").splitlines()
-        if not re.fullmatch(
-            r"\[default\]\naws_access_key_id *= *[A-Za-z0-9+=/_.-]+\n"
-            r"aws_secret_access_key *= *[A-Za-z0-9+=/_.-]+(?:\naws_session_token *= *[A-Za-z0-9+=/_.-]+)?",
-            "\n".join(fields),
-        ):
-            raise ValueError("invalid maintenance AWS shared credentials profile")
-        ca_file = work / "s3-ca.pem"
-        ca_file.write_bytes(ca)
-        self.base = work
-        self.timeout = policy["operation_timeout_seconds"]
-        self.env = {
-            "HOME": str(work), "TMPDIR": str(work), "AWS_SHARED_CREDENTIALS_FILE": str(s3),
-            "AWS_PROFILE": "default", "AWS_EC2_METADATA_DISABLED": "true", "GOMAXPROCS": "2",
-            "GOMEMLIMIT": "512MiB",
-        }
-        bandwidth = str(policy["bandwidth_kib"])
-        self.command = [
-            str(self.engine), "--repo", self.destination.url, "--cacert", str(ca_file), "--password-file",
-            str(password), "--no-cache", "--limit-download", bandwidth, "--limit-upload", bandwidth,
-            "-o", "s3.bucket-lookup=path", "-o", f"s3.region={self.destination.region}", "-o", "s3.connections=2",
-        ]
+def valid_id(value, pattern):
+    return isinstance(value, str) and re.fullmatch(pattern, value) is not None
+
+
+@dataclass(frozen=True)
+class Restic:
+    command: list[str]
+    base: Path
+    env: dict[str, str]
+    timeout: int
 
     def run(self, *args, limit=0, timeout=None):
         deadline = time.monotonic() + (timeout if timeout is not None else self.timeout)
@@ -161,10 +142,55 @@ class Repository:
                         child.kill()
         return bytes(output)
 
-    def verify(self):
+    def verify(self, repository):
         config = json.loads(self.run("cat", "config", limit=65_536, timeout=IO_DEADLINE))
-        if not isinstance(config, dict) or config.get("version") != 2 or config.get("id") != self.destination.repository:
+        if not isinstance(config, dict) or config.get("version") != 2 or config.get("id") != repository:
             raise ValueError("repository format or ID differs from signed approval")
+
+
+class Repository:
+    def __init__(self, args, policy, work):
+        source = read(args.destination, 2048)
+        ca = read(args.ca, 65_536)
+        self.destination = backup_destination.parse(source, ca)
+        engine = args.restic.resolve(strict=True)
+        with engine.open("rb") as stream:
+            engine_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+        if (digest(source), digest(ca), engine_hash) != (
+            policy["destination_sha256"], policy["ca_sha256"], policy["restic_sha256"]
+        ):
+            raise ValueError("destination, CA or restic executable differs from signed approval")
+        credentials = private_directory(args.credentials)
+        self.password = private_file(credentials / "repository-password", {0o400, 0o600}, 4096)
+        s3 = private_file(credentials / "s3-credentials", {0o400, 0o600}, 8192)
+        fields = read(s3, 8192).decode("ascii").splitlines()
+        if not re.fullmatch(
+            r"\[default\]\naws_access_key_id *= *[A-Za-z0-9+=/_.-]+\n"
+            r"aws_secret_access_key *= *[A-Za-z0-9+=/_.-]+(?:\naws_session_token *= *[A-Za-z0-9+=/_.-]+)?",
+            "\n".join(fields),
+        ):
+            raise ValueError("invalid maintenance AWS shared credentials profile")
+        ca_file = work / "s3-ca.pem"
+        ca_file.write_bytes(ca)
+        self.local_env = {"HOME": str(work), "TMPDIR": str(work), "GOMAXPROCS": "2", "GOMEMLIMIT": "512MiB"}
+        env = {**self.local_env, "AWS_SHARED_CREDENTIALS_FILE": str(s3), "AWS_PROFILE": "default",
+               "AWS_EC2_METADATA_DISABLED": "true"}
+        bandwidth = str(policy["bandwidth_kib"])
+        self.engine = [str(engine), "--no-cache", "--limit-download", bandwidth, "--limit-upload", bandwidth]
+        self.transport = [
+            "--cacert", str(ca_file),
+            "-o", "s3.bucket-lookup=path", "-o", f"s3.region={self.destination.region}", "-o", "s3.connections=2",
+        ]
+        command = [*self.engine, *self.transport, "--repo", self.destination.url, "--password-file", str(self.password)]
+        if args.operation == "archive":
+            command.append("--no-lock")
+        self.restic = Restic(command, work, env, policy["operation_timeout_seconds"])
+
+    def run(self, *args, limit=0, timeout=None):
+        return self.restic.run(*args, limit=limit, timeout=timeout)
+
+    def verify(self):
+        self.restic.verify(self.destination.repository)
 
     def snapshots(self):
         output = self.run("list", "snapshots", limit=4 * 1024 * 1024, timeout=IO_DEADLINE).decode("ascii")
@@ -323,6 +349,101 @@ def maintain(db, repo, policy, apply):
         print(f"FVCA_S3_RETIRED {snapshot}")
 
 
+def archive_directory(path, btrfs_uuid):
+    directory = private_directory(path)
+    info = bytearray(1024)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.ioctl(fd, BTRFS_IOC_FS_INFO, info)
+    except OSError as error:
+        if error.errno != errno.ENOTTY:
+            raise
+        raise ValueError("offline archive requires a mounted Btrfs filesystem") from error
+    finally:
+        os.close(fd)
+    # The filesystem UUID follows two u64 fields in the UAPI structure.
+    if str(FilesystemUUID(bytes=bytes(info[16:32]))) != btrfs_uuid:
+        raise ValueError("offline archive must be on the approved Btrfs filesystem")
+    return directory
+
+
+def publish_archive_receipt(directory, snapshot, receipt):
+    destination = directory / f"{snapshot}.json"
+    data = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode()
+    if destination.exists():
+        private_file(destination, {0o600}, 65_536)
+        if read(destination, 65_536) != data:
+            raise ValueError("offline archive differs from its independently retained receipt")
+    else:
+        with tempfile.TemporaryDirectory(prefix=".receipt-", dir=directory) as temporary:
+            draft = Path(temporary) / "receipt.json"
+            with draft.open("xb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            draft.replace(destination)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def archive_point(args, db, repo, policy):
+    approval = policy.get("offline_archive")
+    source_id = repo.destination.repository
+    if approval is None or approval["repository"] == source_id or not valid_id(args.snapshot, HASH):
+        raise ValueError("archive requires a distinct approved repository and a full source snapshot ID")
+    point = db.execute(
+        "SELECT capture, captured, manifest, receipt FROM points WHERE snapshot = ? AND status = 'active'",
+        (args.snapshot,),
+    ).fetchone()
+    if point is None:
+        raise ValueError("archive source is not an active independently enrolled recovery point")
+    capture, captured, manifest, source_receipt = point
+    archive = archive_directory(args.archive, approval["btrfs_uuid"])
+    repository = archive_directory(archive / "repository", approval["btrfs_uuid"])
+    receipts = archive_directory(archive / "receipts", approval["btrfs_uuid"])
+    password = private_file(args.archive_password.absolute(), {0o400, 0o600}, 4096)
+    if read(password, 4096).strip() == read(repo.password, 4096).strip():
+        raise ValueError("offline archive requires a separate password")
+    command = [*repo.engine, "--repo", f"local:{repository}", "--password-file", str(password)]
+    target = Restic(command, repo.restic.base, repo.local_env, repo.restic.timeout)
+    copier = Restic([*command, *repo.transport, "--no-lock"], target.base, repo.restic.env, target.timeout)
+
+    lock = os.open(receipts / "archive.lock", os.O_NOFOLLOW | os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(lock, "rb") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        target.verify(approval["repository"])
+        source = json.loads(repo.run("cat", "snapshot", args.snapshot, limit=65_536, timeout=IO_DEADLINE))
+        if not isinstance(source, dict) or source.get("original") is not None or not valid_id(source.get("tree"), HASH):
+            raise ValueError("archive requires an original FVCA snapshot with an authenticated tree")
+        tree = source["tree"]
+        if repo.run("dump", args.snapshot, "/manifest", limit=8192, timeout=IO_DEADLINE) != manifest:
+            raise ValueError("source manifest differs from the independently enrolled recovery point")
+        copier.run("copy", "--from-repo", repo.destination.url, "--from-password-file", str(repo.password),
+                   "--", args.snapshot)
+        target.verify(approval["repository"])
+        snapshots = json.loads(target.run("snapshots", "--json", limit=4 * 1024 * 1024, timeout=IO_DEADLINE))
+        if not isinstance(snapshots, list) or any(not isinstance(item, dict) for item in snapshots):
+            raise ValueError("unexpected offline snapshot inventory")
+        copied = [item.get("id") for item in snapshots if item.get("original") == args.snapshot
+                  and item.get("tree") == tree]
+        if len(copied) != 1 or not valid_id(copied[0], HASH):
+            raise ValueError("archive does not contain one exact copy of the approved source tree")
+        if target.run("dump", copied[0], "/manifest", limit=8192, timeout=IO_DEADLINE) != manifest:
+            raise ValueError("offline manifest differs from the enrolled recovery point")
+        target.run("check", "--read-data")
+        subprocess.run(["/usr/bin/sync", "--file-system", repository], check=True, timeout=target.timeout, env={})
+        publish_archive_receipt(receipts, args.snapshot, {
+            "schema": "fvca-offline-archive-v1", "source_repository": source_id, "source_snapshot": args.snapshot,
+            "archive_repository": approval["repository"], "archive_snapshot": copied[0], "tree": tree,
+            "capture": capture, "captured": captured, "manifest_sha256": digest(manifest),
+            "manifest": manifest.decode("utf-8"), "source_receipt": source_receipt.decode("ascii"),
+        })
+    print(f"FVCA_OFFLINE_ARCHIVED {args.snapshot} repository={approval['repository']} snapshot={copied[0]}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("policy", "signature", "authority", "destination", "ca", "state", "credentials", "restic"):
@@ -334,6 +455,10 @@ def main():
     commands.add_parser("verify", help="verify all packs and independently enrolled recovery-point freshness")
     retention = commands.add_parser("retain", help="plan or apply approved snapshot retention")
     retention.add_argument("--apply", action="store_true", help="forget approved snapshots and prune unreferenced packs")
+    archive = commands.add_parser("archive", help="copy one independently enrolled point to an approved offline repository")
+    archive.add_argument("--snapshot", required=True)
+    archive.add_argument("--archive", type=Path, required=True)
+    archive.add_argument("--archive-password", type=Path, required=True)
     args = parser.parse_args()
     os.umask(0o077)
     try:
@@ -351,6 +476,8 @@ def main():
                         Receipt.read(args, repo.destination.repository).save(db, repo)
                     elif args.operation == "verify":
                         verify_packs(db, repo, policy)
+                    elif args.operation == "archive":
+                        archive_point(args, db, repo, policy)
                     else:
                         maintain(db, repo, policy, args.apply)
     except (OSError, ValueError, subprocess.SubprocessError, sqlite3.Error) as error:

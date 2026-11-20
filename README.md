@@ -398,7 +398,29 @@ Run all commands as the off-node `fvca-s3` service account against the same priv
 
 `retain` previews eligible IDs using the original capture times in the ledger. For an authorized retention run, select the off-node maintenance credentials and run `retain --apply`. The tool requires the approved minimum of known recovery points and a fresh capture, verifies pack integrity, journals selected IDs, then calls restic forget and prune. A retry resumes the journaled set. Maintenance stops if an active snapshot disappears or a retired ID reappears. Schedule retention separately from independent copies and protect the full dependency set of any off-node copy.
 
-S3 versioning or Object Lock profiles are pending.
+### Keep an independent offline copy of a VM recovery point
+
+On an off-node Fedora amd64 machine, mount operator-controlled Btrfs archive media. Give the archive account a private `0700` directory on the media with private `repository` and `receipts` subdirectories. Initialize `repository` as a fresh restic format 2 repository with its own strong password. Keep that password and a copy of the resulting archive receipts with independent recovery material. Keep the archive media and its credentials outside the appliance and S3 administration environments.
+
+Add `"offline_archive": {"btrfs_uuid": "BTRFS_FILESYSTEM_UUID", "repository": "ARCHIVE_REPOSITORY_ID"}` to the signed maintenance policy. Obtain the filesystem UUID from the mounted Btrfs volume and the repository ID from `restic cat config`. Use the read-only `restore` S3 identity during the archive run. The archive command shares the receipt ledger lock with maintenance. Pause any source pruning or repacking operated outside that ledger while the read-only copy runs.
+
+```sh
+restic --repo /mnt/fvca-archive/repository --password-file /run/fvca-archive/password \
+  init --repository-version 2
+
+python3 /opt/fvca/tools/maintain-s3-repository.py \
+  --policy /etc/fvca/retention.json --signature /etc/fvca/retention.p7s \
+  --authority /etc/fvca/maintenance.crt --destination /etc/fvca/destination.conf \
+  --ca /etc/fvca/s3-ca.pem --restic /usr/bin/restic --state /var/lib/fvca-s3 \
+  --credentials /run/fvca-s3-read-only archive --snapshot "$source_snapshot" \
+  --archive /mnt/fvca-archive --archive-password /run/fvca-archive/password
+```
+
+Archive each point by its full enrolled snapshot ID and record `FVCA_OFFLINE_ARCHIVED` in the off-node audit log. Restic re-encrypts the snapshot and every needed object, including data shared with older points. Publication requires a matching enrolled manifest, source and archive tree IDs, a full archive pack check, and a durable `receipts/SOURCE_SNAPSHOT_ID.json`. A retry of the same point reuses the existing copy and checks its receipt. Unmount and disconnect the media after a successful copy. Choose how often to attach and copy it according to the approved recovery-point age. Primary `retain --apply` has no archive deletion path. Manage archive capacity and any retirement under separate operator control using repository-aware maintenance. [restic snapshot copy and repository checks](https://restic.readthedocs.io/en/v0.19.1/045_working_with_repos.html)
+
+During recovery, verify the media's repository ID and select the exact archive snapshot from the independently retained receipt. Run `restic check --read-data` on the offline repository and compare `restic dump ARCHIVE_SNAPSHOT_ID /manifest` with the receipt's manifest and SHA-256. To use the Hypervisor's [S3 recovery procedure](#recover-a-service-guest-from-s3), initialize a fresh isolated HTTPS S3 repository with new credentials and a new repository password. Use the installed restic executable with the new destination's approved CA and S3 options to `copy --from-repo local:/mnt/fvca-archive/repository --from-password-file FILE -- ARCHIVE_SNAPSHOT_ID` into that repository. Select the new full snapshot ID by the exact `original` (the primary source snapshot ID) and `tree` from the offline receipt in `restic snapshots --json`. Require one match and check the manifest digest again. Use the new repository and snapshot IDs plus the retained capture UUID and manifest/disk digests for the signed recovery authorization. Use an isolated Guest trial boot and check the application before restoring service exposure.
+
+S3 Object Lock and provider version recovery require separate qualification.
 
 ## Off-node Stalwart workload derivation
 
