@@ -21,7 +21,7 @@ use crate::{
 pub enum Operation {
     Discover,
     PrepareGpt,
-    DeliverTrial,
+    DeliverTrial { activate: bool },
 }
 
 #[derive(Deserialize)]
@@ -167,6 +167,7 @@ struct Status<'a> {
     staged: Option<String>,
     prepared_inactive_slot: Option<Slot>,
     delivered_trial: Option<String>,
+    requested_trial: Option<String>,
     hold_until: Option<i64>,
     security_deadline_missed: bool,
 }
@@ -450,13 +451,13 @@ pub async fn discover(
     }
     let installation = match operation {
         Operation::Discover => None,
-        Operation::PrepareGpt | Operation::DeliverTrial => Some(
+        Operation::PrepareGpt | Operation::DeliverTrial { .. } => Some(
             policy.hypervisor_gpt.as_ref().zip(active.slot).ok_or_else(|| {
-                invalid("offline preparation requires a signed Hypervisor disk policy and the active slot")
+                invalid("this operation requires a signed Hypervisor disk policy and the active slot")
             })?,
         ),
     };
-    if matches!(operation, Operation::DeliverTrial) && trial_key.is_none() {
+    if matches!(operation, Operation::DeliverTrial { .. }) && trial_key.is_none() {
         return Err(invalid("trial delivery requires a pinned standing trial authority").into());
     }
     checkpoint(
@@ -477,6 +478,7 @@ pub async fn discover(
         staged: None,
         prepared_inactive_slot: None,
         delivered_trial: None,
+        requested_trial: None,
         hold_until: None,
         security_deadline_missed: false,
     };
@@ -540,6 +542,7 @@ pub async fn discover(
             ))
         }
     };
+    let mut request_result = Ok(());
     status.disposition = match &head.release {
         None => Disposition::NoRelease,
         Some(candidate) if candidate.manifest_sha256 == active.manifest_sha256 => {
@@ -579,7 +582,7 @@ pub async fn discover(
                 };
                 let active = (slot, active.epoch, active.manifest_sha256.as_str());
                 match operation {
-                    Operation::DeliverTrial => {
+                    Operation::DeliverTrial { activate } => {
                         let member = candidate.trial_approval.as_ref().ok_or_else(|| {
                             invalid("qualified channel does not authorize a trial envelope")
                         })?;
@@ -614,6 +617,13 @@ pub async fn discover(
                         handoff::publish(&envelope, &authorize)?;
                         status.delivered_trial =
                             Some(approval.authorization.trial.transaction.into());
+                        if activate {
+                            request_result =
+                                authorize().and_then(|()| handoff::request_activation());
+                            if request_result.is_ok() {
+                                status.requested_trial.clone_from(&status.delivered_trial);
+                            }
+                        }
                     }
                     Operation::PrepareGpt => {
                         site.install(active, &selection, &staged, directory, &eligible)?
@@ -628,7 +638,8 @@ pub async fn discover(
         }
     };
     require_fresh(Timestamp::now())?;
-    report(directory, &status)
+    report(directory, &status)?;
+    request_result
 }
 
 fn report(directory: &Path, status: &Status<'_>) -> Result<()> {

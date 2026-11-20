@@ -5,6 +5,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 use fvca_trial_authorization::{APPROVAL_LIMIT, PENDING};
 use rustix::fs::{self, AtFlags, CWD, Mode, OFlags, StatxFlags};
@@ -13,6 +14,7 @@ use rustix::io::Errno;
 use crate::{Result, install::BTRFS_SUPER_MAGIC, invalid};
 
 const HOST_DATA: &str = "/run/fvca/host-data";
+const ACTIVATE_TRIAL: &str = "fvca-activate-hypervisor-trial.service";
 const DIRECTORY: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
@@ -106,5 +108,27 @@ pub fn publish(envelope: &[u8], authorize: &dyn Fn() -> Result<()>) -> Result<()
         fs::RenameFlags::NOREPLACE,
     )?;
     inbox.sync_all()?;
+    Ok(())
+}
+
+pub fn request_activation() -> Result<()> {
+    let status = Command::new("/usr/bin/systemctl")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .args([
+            "--no-ask-password",
+            "--no-block",
+            "--job-mode=fail",
+            "start",
+            ACTIVATE_TRIAL,
+        ])
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "systemd declined the Hypervisor activation job ({status})"
+        ))
+        .into());
+    }
     Ok(())
 }

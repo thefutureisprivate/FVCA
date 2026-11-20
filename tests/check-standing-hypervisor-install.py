@@ -23,6 +23,15 @@ tuf = runpy.run_path(HERE / "check-release-intake.py")
 gpt = runpy.run_path(HERE / "check-hypervisor-gpt-install.py")
 channel = runpy.run_path(HERE / "check-release-channel.py")
 
+ACTIVATION_PROBE = Path("/run/fvca/test-activation")
+TEST_SYSTEMCTL = b"""#!/bin/bash
+set -euo pipefail
+[[ $# == 5 && $1 == --no-ask-password && $2 == --no-block && $3 == --job-mode=fail
+   && $4 == start && $5 == fvca-activate-hypervisor-trial.service ]]
+/usr/bin/sha256sum /run/fvca/host-data/boot-trials/pending-trial >> /run/fvca/test-activation/requests
+test ! -e /run/fvca/test-activation/refuse
+"""
+
 
 @contextmanager
 def software_tpm(source):
@@ -72,6 +81,11 @@ def trial_target(root, original, candidate, key, stamp):
 
 
 def qualify(args):
+    if args.activation_probe and (args.trial_key is None or Path("/usr/bin/systemctl").read_bytes() != TEST_SYSTEMCTL):
+        raise ValueError("activation checks require a trial key and an isolated systemctl recorder")
+    requests = ACTIVATION_PROBE / "requests"
+    if args.activation_probe:
+        assert ACTIVATION_PROBE.is_dir() and not requests.exists()
     root = args.output
     root.mkdir(mode=0o700)
     original = args.fixture
@@ -186,15 +200,24 @@ def qualify(args):
     assert status["disposition"] == "hold" and status["prepared_inactive_slot"] is None
     inbox = Path("/run/fvca/host-data/boot-trials/pending-trial")
     deliver = "--deliver-prepared-trial"
+    activate = "--activate-prepared-trial"
     if approval_target is not None:
         assert not inbox.exists()
         status = run("hold-delivery", policy | {"hold": hold}, os.environ, operation=deliver)
         assert status["disposition"] == "hold" and status["delivered_trial"] is None and not inbox.exists()
+        if args.activation_probe:
+            status = run("hold-activation", policy | {"hold": hold}, os.environ, operation=activate)
+            assert status["disposition"] == "hold" and status["requested_trial"] is None
+            assert not requests.exists() and not inbox.exists()
     live = policy | {"revision": 2}
     if approval_target is not None:
         with software_tpm(args.floor_one) as env:
             run("unprepared-delivery-refused", live, env, operation=deliver,
                 refusal=b"installed inactive slot differs from the prepared trial release")
+            if args.activation_probe:
+                run("unprepared-activation-refused", live, env, operation=activate,
+                    refusal=b"installed inactive slot differs from the prepared trial release")
+                assert not requests.exists()
         assert not inbox.exists()
     with software_tpm(args.floor_two) as env:
         run("floor-refusal", live, env, refusal=b"below the live TPM floor")
@@ -262,12 +285,27 @@ def qualify(args):
             assert inbox.read_bytes() == occupied
             inbox.unlink()
             receipt = run("delivered", live, env, operation=deliver)
-            assert receipt["delivered_trial"] == transaction
+            assert receipt["delivered_trial"] == transaction and receipt["requested_trial"] is None
             assert inbox.read_bytes() == approval_target.read_bytes()
             assert inbox.stat().st_mode & 0o777 == 0o600
             received = inbox.stat()
             assert run("identical-delivery", live, env, operation=deliver)["delivered_trial"] == transaction
             assert inbox.stat().st_ino == received.st_ino
+            if args.activation_probe:
+                assert not requests.exists()
+                refuse = ACTIVATION_PROBE / "refuse"
+                refuse.touch(exist_ok=False)
+                run("activation-queue-refused", live, env, operation=activate,
+                    refusal=b"systemd declined the Hypervisor activation job")
+                denied = json.loads((cache / "os-update-status.json").read_text())
+                assert denied["delivered_trial"] == transaction and denied["requested_trial"] is None
+                refuse.unlink()
+                requested = run("activation-requested", live, env, operation=activate)
+                assert requested["requested_trial"] == requested["delivered_trial"] == transaction
+                assert requested["active"] == booted and inbox.stat().st_ino == received.st_ino
+                digest = tuf["sha256"](approval_target)
+                assert requests.read_text().splitlines() == [f"{digest}  {inbox}"] * 2
+                print("only eligible installed bytes reached the activation job boundary", flush=True)
         assert gpt["sparse_fingerprint"](inactive) == disk_before_delivery
         assert gpt["sparse_fingerprint"](active) == stable
         print("installed bytes and the live TPM floor authorized exactly one durable inbox publication", flush=True)
@@ -279,5 +317,7 @@ if __name__ == "__main__":
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute(), required=True)
     parser.add_argument("--trial-key", type=lambda value: Path(value).absolute(),
                         help="also test delivery against a disposable mounted /run/fvca/host-data")
+    parser.add_argument("--activation-probe", action="store_true",
+                        help="exercise activation with the test recorder mounted as /usr/bin/systemctl")
     os.umask(0o077)
     qualify(parser.parse_args())

@@ -504,7 +504,10 @@ fn run() -> Result<()> {
                 channel::Operation::PrepareGpt
             }
             [flag] if flag.as_os_str() == "--deliver-prepared-trial" => {
-                channel::Operation::DeliverTrial
+                channel::Operation::DeliverTrial { activate: false }
+            }
+            [flag] if flag.as_os_str() == "--activate-prepared-trial" => {
+                channel::Operation::DeliverTrial { activate: true }
             }
             _ => return Err(usage().into()),
         };
@@ -569,7 +572,7 @@ fn runtime() -> io::Result<tokio::runtime::Runtime> {
 
 fn usage() -> io::Error {
     invalid(
-        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --discover-os-release TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE STANDING_POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY [--prepare-inactive-gpt | --deliver-prepared-trial]\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE\n       fvca-release-client --verify-hypervisor-floor-approval PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE\n       fvca-release-client --advance-hypervisor-floor PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE INCREMENT_TPM_PUBLIC POLICY_REFERENCE",
+        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --discover-os-release TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE STANDING_POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY [--prepare-inactive-gpt | --deliver-prepared-trial | --activate-prepared-trial]\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE\n       fvca-release-client --verify-hypervisor-floor-approval PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE\n       fvca-release-client --advance-hypervisor-floor PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE INCREMENT_TPM_PUBLIC POLICY_REFERENCE",
     )
 }
 
