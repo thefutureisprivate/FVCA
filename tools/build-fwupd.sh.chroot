@@ -15,6 +15,7 @@ patch --directory="$work/source" --strip=1 --fuzz=0 < "$SRCDIR/tools/fwupd-catal
 patch --directory="$work/source" --strip=1 --fuzz=0 < "$SRCDIR/tools/fwupd-cabinet.patch"
 patch --directory="$work/source" --strip=1 --fuzz=0 < "$SRCDIR/tools/fwupd-history.patch"
 patch --directory="$work/source" --strip=1 --fuzz=0 < "$SRCDIR/tools/fwupd-device-preflight.patch"
+patch --directory="$work/source" --strip=1 --fuzz=0 < "$SRCDIR/tools/fwupd-capsule-writer.patch"
 
 meson setup "$work/build" "$work/source" \
     --wrap-mode=nodownload --prefix=/usr --libdir=lib64 --sysconfdir=/etc --localstatedir=/var \
@@ -58,12 +59,14 @@ install -Dm644 /usr/share/licenses/dbus-daemon/COPYING "$DESTDIR/usr/share/licen
     printf '%s\n' 'cabinet_payload_size=v1'
     printf '%s\n' 'operation_history=v1'
     printf '%s\n' 'device_preflight=v1'
+    printf '%s\n' 'capsule_writer=v1'
     rpm -q dbus-daemon dbus-libs gcc glib2 libxmlb meson
     sha256sum "$SRCDIR/tools/fwupd-inventory.patch" | cut -d ' ' -f1 | sed 's/^/patch_sha256=/'
     sha256sum "$SRCDIR/tools/fwupd-catalog.patch" | cut -d ' ' -f1 | sed 's/^/catalog_patch_sha256=/'
     sha256sum "$SRCDIR/tools/fwupd-cabinet.patch" | cut -d ' ' -f1 | sed 's/^/cabinet_patch_sha256=/'
     sha256sum "$SRCDIR/tools/fwupd-history.patch" | cut -d ' ' -f1 | sed 's/^/history_patch_sha256=/'
     sha256sum "$SRCDIR/tools/fwupd-device-preflight.patch" | cut -d ' ' -f1 | sed 's/^/device_preflight_patch_sha256=/'
+    sha256sum "$SRCDIR/tools/fwupd-capsule-writer.patch" | cut -d ' ' -f1 | sed 's/^/capsule_writer_patch_sha256=/'
     (cd "$DESTDIR" && sha256sum usr/libexec/fwupd/fwupd usr/bin/dbus-daemon)
 } > "$work/provenance"
 install -Dm644 "$work/provenance" "$DESTDIR/usr/share/fvca/firmware-build.txt"

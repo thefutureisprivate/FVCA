@@ -306,6 +306,8 @@ An accepted cabinet reports `staged`. Live intake gives fwupd a sealed copy of t
 
 The native verifier also resolves the exact live fwupd device ID, checks its starting version, flags, and protocol, and runs fwupd's release and engine requirements with fixed install flags. The capsule-on-disk preflight requires fwupd's native capsule-on-disk backend together with the verified EFI route. [fwupd UEFI capsule plugin](https://fwupd.github.io/libfwupdplugin/uefi-capsule-README.html)
 
+The native capsule writer uses one exact staged offer and sealed cabinet, the already held Host lifecycle lease, and a synchronized flashing record on the authenticated Btrfs pool. It binds the selected native volume to the initramfs-verified ESP, adds the exact operation ID to fwupd history, and flushes the capsule before setting the EFI delivery flag. The inventory service has writer mode disabled. The activation broker still needs to hand the writer the drained Guest, verified EFI route, and qualified TPM transition.
+
 Read-only inventory of the future Proxmox host on 2026-11-20 observed ThinkStation P3 Ultra board 1066, BIOS S0JKT2AA (fwupd 1.42), EC 1.13 and two Toshiba KXG50PNV1T02 drives at AFDA4103. The two drives reported the same model GUIDs. Live EFI variables advertised capsule-on-disk delivery and capsule result reporting. The LVFS BIOS 1.51 cabinet contains an AMI BIOS Guard payload. Device-side signature enforcement and the physical transition remain unqualified. [UEFI indication flags](https://uefi.org/specs/UEFI/2.11/08_Services_Runtime_Services.html#exchanging-information-between-the-os-and-firmware)
 
 ### Enroll scheduled Host firmware discovery

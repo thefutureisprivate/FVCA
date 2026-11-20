@@ -1,0 +1,849 @@
+diff --git a/plugins/uefi-capsule/fu-uefi-cod-device.c b/plugins/uefi-capsule/fu-uefi-cod-device.c
+index 67cc691..80b8bab 100644
+--- a/plugins/uefi-capsule/fu-uefi-cod-device.c
++++ b/plugins/uefi-capsule/fu-uefi-cod-device.c
+@@ -8,0 +9,6 @@
++#include <dirent.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <glib-unix.h>
++#include <linux/magic.h>
++#include <linux/openat2.h>
+@@ -9,0 +16,3 @@
++#include <sys/statfs.h>
++#include <sys/syscall.h>
++#include <unistd.h>
+@@ -242,0 +252,84 @@ fu_uefi_cod_device_get_filename(FuUefiCapsuleDevice *self, GError **error)
++static gboolean
++fu_uefi_cod_device_require_idle_efi(FuEfivars *efivars, GError **error)
++{
++	const FuEfiVariableAttrs required =
++	    FU_EFI_VARIABLE_ATTR_NON_VOLATILE | FU_EFI_VARIABLE_ATTR_BOOTSERVICE_ACCESS |
++	    FU_EFI_VARIABLE_ATTR_RUNTIME_ACCESS;
++	FuEfiVariableAttrs attributes = 0;
++	g_autoptr(GError) local_error = NULL;
++	g_autoptr(GBytes) data = NULL;
++	guint64 indications = 0;
++
++	data = fu_efivars_get_data_bytes(efivars, FU_EFIVARS_GUID_EFI_GLOBAL, "BootNext",
++					NULL, &local_error);
++	if (data != NULL) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_NOT_SUPPORTED,
++				    "FVCA cannot stage a capsule with BootNext pending");
++		return FALSE;
++	}
++	if (!g_error_matches(local_error, FWUPD_ERROR, FWUPD_ERROR_NOT_FOUND)) {
++		g_propagate_error(error, g_steal_pointer(&local_error));
++		return FALSE;
++	}
++	g_clear_error(&local_error);
++	data = fu_efivars_get_data_bytes(efivars, FU_EFIVARS_GUID_EFI_GLOBAL, "OsIndications",
++					&attributes, &local_error);
++	if (data == NULL) {
++		if (g_error_matches(local_error, FWUPD_ERROR, FWUPD_ERROR_NOT_FOUND))
++			return TRUE;
++		g_propagate_error(error, g_steal_pointer(&local_error));
++		return FALSE;
++	}
++	if (attributes != required || g_bytes_get_size(data) != sizeof(indications) ||
++	    memcmp(g_bytes_get_data(data, NULL), &indications, sizeof(indications)) != 0) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_NOT_SUPPORTED,
++				    "FVCA requires a clear EFI OsIndications mask");
++		return FALSE;
++	}
++	return TRUE;
++}
++
++static gboolean
++fu_uefi_cod_device_require_empty_queue(gint esp, GError **error)
++{
++	struct open_how how = {
++	    .flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC,
++	    .resolve = RESOLVE_BENEATH | RESOLVE_NO_XDEV | RESOLVE_NO_SYMLINKS,
++	};
++	g_autofd gint efi = syscall(SYS_openat2, esp, "EFI", &how, sizeof(how));
++	g_autofd gint queue = -1;
++	DIR *directory;
++	struct dirent *entry;
++
++	if (efi < 0)
++		goto unreadable;
++	queue = syscall(SYS_openat2, efi, "UpdateCapsule", &how, sizeof(how));
++	if (queue < 0 && errno == ENOENT)
++		return TRUE;
++	if (queue < 0)
++		goto unreadable;
++	directory = fdopendir(queue);
++	if (directory == NULL)
++		goto unreadable;
++	(void)g_steal_fd(&queue);
++	errno = 0;
++	while ((entry = readdir(directory)) != NULL) {
++		if (g_strcmp0(entry->d_name, ".") != 0 && g_strcmp0(entry->d_name, "..") != 0) {
++			closedir(directory);
++			g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_NOT_SUPPORTED,
++					    "FVCA ESP already contains a queued capsule or foreign entry");
++			return FALSE;
++		}
++	}
++	if (errno != 0) {
++		closedir(directory);
++		goto unreadable;
++	}
++	closedir(directory);
++	return TRUE;
++unreadable:
++	g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++			    "FVCA could not verify the capsule directory on the bound ESP");
++	return FALSE;
++}
++
+@@ -252,0 +346,2 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
++	FuVolume *volume = fu_uefi_capsule_device_get_esp(self);
++	g_autofree gchar *esp_path = NULL;
+@@ -253,0 +349 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
++	g_autofree gchar *directory = NULL;
+@@ -255,0 +352,3 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
++	g_autofd gint esp = -1;
++	struct statfs fs;
++	const guint64 indications = GUINT64_TO_LE(EFI_OS_INDICATIONS_FILE_CAPSULE_DELIVERY_SUPPORTED);
+@@ -257,6 +356,6 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
+-	/* ensure we have the existing state */
+-	if (fu_uefi_capsule_device_get_guid(self) == NULL) {
+-		g_set_error_literal(error,
+-				    FWUPD_ERROR,
+-				    FWUPD_ERROR_INTERNAL,
+-				    "cannot update device info with no GUID");
++	if (g_strcmp0(g_getenv("FVCA_FWUPD_CAPSULE_WRITER"), "1") != 0 || volume == NULL ||
++	    fu_uefi_capsule_device_get_guid(self) == NULL ||
++	    fu_device_has_private_flag(device, FU_UEFI_CAPSULE_DEVICE_FLAG_NO_RT_SET_VARIABLE) ||
++	    fu_device_has_private_flag(device, FU_UEFI_CAPSULE_DEVICE_FLAG_COD_DELL_RECOVERY)) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_NOT_SUPPORTED,
++				    "FVCA capsule writer requires the qualified native delivery route");
+@@ -264,0 +364,11 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
++	esp_path = fu_volume_get_mount_point(volume);
++	if (g_strcmp0(esp_path, "/run/fvca/firmware-esp") != 0 ||
++	    (esp = open(esp_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)) < 0 ||
++	    fstatfs(esp, &fs) != 0 || fs.f_type != MSDOS_SUPER_MAGIC) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++				    "FVCA capsule device lost its verified ESP");
++		return FALSE;
++	}
++	if (!fu_uefi_cod_device_require_idle_efi(efivars, error) ||
++	    !fu_uefi_cod_device_require_empty_queue(esp, error))
++		return FALSE;
+@@ -266 +376 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
+-	/* copy the capsule */
++	/* Retain fwupd's firmware fixup and native filename selection. */
+@@ -276,2 +386,4 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
+-	g_info("using %s", cod_path);
+-	if (!fu_volume_write_file(fu_uefi_capsule_device_get_esp(self), cod_path, fixed_fw, error))
++	directory = g_path_get_dirname(cod_path);
++	if (g_strcmp0(directory, "/run/fvca/firmware-esp/EFI/UpdateCapsule") != 0) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++				    "FVCA capsule path is outside the selected ESP queue");
+@@ -279,44 +390,0 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
+-
+-	/*
+-	 * NOTE: The EFI spec requires setting OsIndications!
+-	 * RT->SetVariable is not supported for all hardware, and so when using
+-	 * U-Boot, it applies the capsule even if OsIndications isn't set.
+-	 * The capsule is then deleted by U-Boot after it has been deployed.
+-	 */
+-	if (!fu_device_has_private_flag(device, FU_UEFI_CAPSULE_DEVICE_FLAG_NO_RT_SET_VARIABLE)) {
+-		gsize bufsz = 0;
+-		guint64 os_indications = 0;
+-		g_autofree guint8 *buf = NULL;
+-		g_autoptr(GError) error_local = NULL;
+-
+-		/* the firmware does not normally populate OsIndications by default */
+-		if (!fu_efivars_get_data(efivars,
+-					 FU_EFIVARS_GUID_EFI_GLOBAL,
+-					 "OsIndications",
+-					 &buf,
+-					 &bufsz,
+-					 NULL,
+-					 &error_local)) {
+-			g_debug("failed to read EFI variable: %s", error_local->message);
+-		} else {
+-			if (!fu_memread_uint64_safe(buf,
+-						    bufsz,
+-						    0x0,
+-						    &os_indications,
+-						    G_LITTLE_ENDIAN,
+-						    error))
+-				return FALSE;
+-		}
+-		os_indications |= EFI_OS_INDICATIONS_FILE_CAPSULE_DELIVERY_SUPPORTED;
+-		if (!fu_efivars_set_data(efivars,
+-					 FU_EFIVARS_GUID_EFI_GLOBAL,
+-					 "OsIndications",
+-					 (guint8 *)&os_indications,
+-					 sizeof(os_indications),
+-					 FU_EFI_VARIABLE_ATTR_NON_VOLATILE |
+-					     FU_EFI_VARIABLE_ATTR_BOOTSERVICE_ACCESS |
+-					     FU_EFI_VARIABLE_ATTR_RUNTIME_ACCESS,
+-					 error)) {
+-			g_prefix_error_literal(error, "Could not set OsIndications: ");
+-			return FALSE;
+-		}
+@@ -324,3 +392,15 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
+-
+-	/* success */
+-	return TRUE;
++	if (!fu_volume_write_file(volume, cod_path, fixed_fw, error))
++		return FALSE;
++	if (syncfs(esp) != 0) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_WRITE,
++				    "FVCA could not synchronize the staged capsule");
++		return FALSE;
++	}
++	if (!fu_uefi_cod_device_require_idle_efi(efivars, error))
++		return FALSE;
++	return fu_efivars_set_data(efivars, FU_EFIVARS_GUID_EFI_GLOBAL, "OsIndications",
++				   (const guint8 *)&indications, sizeof(indications),
++				   FU_EFI_VARIABLE_ATTR_NON_VOLATILE |
++				       FU_EFI_VARIABLE_ATTR_BOOTSERVICE_ACCESS |
++				       FU_EFI_VARIABLE_ATTR_RUNTIME_ACCESS,
++				   error);
+diff --git a/src/fu-dbus-daemon.c b/src/fu-dbus-daemon.c
+index 8768a8b..097c4b3 100644
+--- a/src/fu-dbus-daemon.c
++++ b/src/fu-dbus-daemon.c
+@@ -30,0 +31 @@
++#include "fu-fvca-capsule.h"
+@@ -49,0 +51 @@ struct _FuDbusDaemon {
++	gboolean fvca_capsule_started;
+@@ -2041,13 +2042,0 @@ fu_dbus_daemon_cabinet_version_matches(XbNode *node, const gchar *version, guint
+-typedef struct {
+-	const gchar *device_id;
+-	const gchar *archive_sha256;
+-	const gchar *payload_sha256;
+-	const gchar *guid;
+-	const gchar *protocol;
+-	const gchar *from;
+-	const gchar *to;
+-	const gchar *format;
+-	guint32 from_raw;
+-	guint32 to_raw;
+-} FuFvcaCabinet;
+-
+@@ -2059,0 +2049 @@ fu_dbus_daemon_check_fvca_device(FuEngine *engine,
++				FuRelease **approved,
+@@ -2110 +2100,4 @@ fu_dbus_daemon_check_fvca_device(FuEngine *engine,
+-	    g_strcmp0(G_OBJECT_TYPE_NAME(device), "FuUefiCodDevice") == 0;
++	    g_strcmp0(G_OBJECT_TYPE_NAME(device), "FuUefiCodDevice") == 0 &&
++	    !fu_device_has_private_flag(device, "no-rt-set-variable") &&
++	    !fu_device_has_private_flag(device, "cod-dell-recovery");
++	*approved = g_steal_pointer(&release);
+@@ -2117,0 +2111 @@ fu_dbus_daemon_verify_cabinet(FuEngine *engine,
++			    FuRelease **approved,
+@@ -2215,7 +2209,23 @@ fu_dbus_daemon_verify_cabinet(FuEngine *engine,
+-	return fu_dbus_daemon_check_fvca_device(engine,
+-					       cabinet,
+-					       selected_component,
+-					       selected,
+-					       identity,
+-					       capsule_on_disk,
+-					       error);
++	if (!fu_dbus_daemon_check_fvca_device(engine, cabinet, selected_component, selected,
++					    identity, approved, capsule_on_disk, error))
++		return FALSE;
++	/* Check the stream selected by the live device loader as well. */
++	payload = fu_release_get_stream(*approved);
++	if (payload == NULL ||
++	    !fu_release_has_flag(*approved, FWUPD_RELEASE_FLAG_TRUSTED_METADATA) ||
++	    !fu_release_has_flag(*approved, FWUPD_RELEASE_FLAG_TRUSTED_PAYLOAD) ||
++	    g_strcmp0(fu_release_get_protocol(*approved), identity->protocol) != 0) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++				    "native release selection differs from the trusted cabinet");
++		return FALSE;
++	}
++	g_clear_pointer(&digest, g_free);
++	digest = fu_input_stream_compute_checksum(payload, G_CHECKSUM_SHA256, error);
++	if (digest == NULL)
++		return FALSE;
++	if (g_strcmp0(digest, identity->payload_sha256) != 0) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++				    "native release payload differs from the approved cabinet");
++		return FALSE;
++	}
++	return TRUE;
+@@ -2226,4 +2236,4 @@ static void
+-fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
+-					GVariant *parameters,
+-					FuEngineRequest *request,
+-					GDBusMethodInvocation *invocation)
++fu_dbus_daemon_method_fvca_cabinet(FuDbusDaemon *self,
++				 GVariant *parameters,
++				 FuEngineRequest *request,
++				 GDBusMethodInvocation *invocation)
+@@ -2232,0 +2243 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
++	FuContext *ctx = fu_engine_get_context(engine);
+@@ -2234,0 +2246,2 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
++	const gboolean stage =
++	    g_strcmp0(g_dbus_method_invocation_get_method_name(invocation), "StageFvcaCapsule") == 0;
+@@ -2235,0 +2249,2 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
++	const gchar *transaction = NULL;
++	const gchar *offer_sha256 = NULL;
+@@ -2236,0 +2252 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
++	gint lease_handle = -1;
+@@ -2237,0 +2254 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
++	g_autofd gint lease = -1;
+@@ -2238,0 +2256 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
++	g_autoptr(FuRelease) approved = NULL;
+@@ -2241 +2259 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
+-	gboolean verified;
++	g_autofree gchar *operation = NULL;
+@@ -2245,4 +2263,12 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
+-	g_variant_get(parameters, "(&s&s&s&s&s&s&s&suuh)",
+-		      &identity.device_id, &identity.archive_sha256, &identity.payload_sha256,
+-		      &identity.guid, &identity.protocol, &identity.from, &identity.to,
+-		      &identity.format, &identity.from_raw, &identity.to_raw, &handle);
++	if (stage) {
++		g_variant_get(parameters, "(&s&s&s&s&s&s&s&s&s&suuhh)",
++			      &identity.device_id, &identity.archive_sha256, &identity.payload_sha256,
++			      &identity.guid, &identity.protocol, &identity.from, &identity.to,
++			      &identity.format, &transaction, &offer_sha256,
++			      &identity.from_raw, &identity.to_raw, &handle, &lease_handle);
++	} else {
++		g_variant_get(parameters, "(&s&s&s&s&s&s&s&suuh)",
++			      &identity.device_id, &identity.archive_sha256, &identity.payload_sha256,
++			      &identity.guid, &identity.protocol, &identity.from, &identity.to,
++			      &identity.format, &identity.from_raw, &identity.to_raw, &handle);
++	}
+@@ -2250,2 +2276,2 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
+-	    !fu_context_get_config_bool(fu_engine_get_context(engine), "OnlyTrusted") ||
+-	    fu_context_get_config_bool(fu_engine_get_context(engine), "IgnoreRequirements") ||
++	    !fu_context_get_config_bool(ctx, "OnlyTrusted") ||
++	    fu_context_get_config_bool(ctx, "IgnoreRequirements") ||
+@@ -2253 +2279 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
+-	    list == NULL || g_unix_fd_list_get_length(list) != 1 || handle != 0 ||
++	    list == NULL || g_unix_fd_list_get_length(list) != (stage ? 2 : 1) || handle != 0 ||
+@@ -2258 +2284,9 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
+-	    !fu_dbus_daemon_approved_version(identity.protocol, identity.to, identity.format, identity.to_raw)) {
++	    !fu_dbus_daemon_approved_version(identity.protocol, identity.to, identity.format, identity.to_raw) ||
++	    (stage && (!fu_fvca_capsule_writer_enabled() || self->fvca_capsule_started ||
++		       g_strcmp0(g_getenv("FVCA_FWUPD_PERSISTENT_HISTORY"), "1") != 0 ||
++		       fu_context_get_config_bool(ctx, "IgnorePower") ||
++		       fu_context_get_config_bool(ctx, "IgnoreEfivarsFreeSpace") ||
++		       g_strcmp0(identity.protocol, "org.uefi.capsule") != 0 ||
++		       !g_uuid_string_is_valid(transaction) ||
++		       strlen(offer_sha256) != 64 || strspn(offer_sha256, "0123456789abcdef") != 64 ||
++		       identity.from_raw >= identity.to_raw || lease_handle != 1))) {
+@@ -2263,0 +2298,7 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
++	if (stage) {
++		lease = g_unix_fd_list_get(list, lease_handle, &error);
++		if (lease < 0 ||
++		    !fu_fvca_capsule_authorize(lease, &identity, transaction, offer_sha256,
++					       self->fvca_catalog, &error))
++			goto fail;
++	}
+@@ -2274,4 +2315,3 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
+-		g_dbus_method_invocation_return_error_literal(invocation, FWUPD_ERROR,
+-							      FWUPD_ERROR_INVALID_FILE,
+-							      "cabinet SHA-256 differs from the approved digest");
+-		return;
++		g_set_error_literal(&error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++				    "cabinet SHA-256 differs from the approved digest");
++		goto fail;
+@@ -2279,4 +2319,2 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
+-	verified = fu_dbus_daemon_verify_cabinet(engine, stream, &identity,
+-					      &payload_size, &capsule_on_disk, &error);
+-	fu_daemon_set_status(FU_DAEMON(self), FWUPD_STATUS_IDLE);
+-	if (!verified)
++	if (!fu_dbus_daemon_verify_cabinet(engine, stream, &identity, &approved,
++					  &payload_size, &capsule_on_disk, &error))
+@@ -2284,2 +2322,16 @@ fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
+-	g_dbus_method_invocation_return_value(invocation,
+-					      g_variant_new("(tb)", (guint64)payload_size, capsule_on_disk));
++	if (stage) {
++		if (!capsule_on_disk) {
++			g_set_error_literal(&error, FWUPD_ERROR, FWUPD_ERROR_NOT_SUPPORTED,
++					    "FVCA requires the native capsule-on-disk backend");
++			goto fail;
++		}
++		self->fvca_capsule_started = TRUE;
++		operation = g_strdup_printf("%s:%s", transaction, offer_sha256);
++		if (!fu_fvca_capsule_install(engine, approved, operation, &error))
++			goto fail;
++		g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
++	} else {
++		g_dbus_method_invocation_return_value(invocation,
++						      g_variant_new("(tb)", (guint64)payload_size, capsule_on_disk));
++	}
++	fu_daemon_set_status(FU_DAEMON(self), FWUPD_STATUS_IDLE);
+@@ -2287,0 +2340 @@ fail:
++	fu_daemon_set_status(FU_DAEMON(self), FWUPD_STATUS_IDLE);
+@@ -3108 +3161,2 @@ fu_dbus_daemon_method_call(GDBusConnection *connection,
+-	    {"VerifyFvcaCabinet", fu_dbus_daemon_method_verify_fvca_cabinet},
++	    {"VerifyFvcaCabinet", fu_dbus_daemon_method_fvca_cabinet},
++	    {"StageFvcaCapsule", fu_dbus_daemon_method_fvca_cabinet},
+@@ -3130 +3184,4 @@ fu_dbus_daemon_method_call(GDBusConnection *connection,
+-	if (g_strcmp0(method_name, "GetDevices") != 0 &&
++	const gboolean stage_allowed = fu_fvca_capsule_writer_enabled() &&
++	    g_strcmp0(method_name, "StageFvcaCapsule") == 0;
++	if ((self->fvca_capsule_started && g_strcmp0(method_name, "UpdateMetadata") == 0) ||
++	    (g_strcmp0(method_name, "GetDevices") != 0 &&
+@@ -3136 +3193 @@ fu_dbus_daemon_method_call(GDBusConnection *connection,
+-	      g_strcmp0(method_name, "VerifyFvcaCabinet") != 0))) {
++	      g_strcmp0(method_name, "VerifyFvcaCabinet") != 0 && !stage_allowed)))) {
+@@ -3503,0 +3561,4 @@ fu_dbus_daemon_setup(FuDaemon *daemon,
++	/* Only fwupd's FVCA mode supplies this initrd-authenticated volume. */
++	if (!fu_fvca_capsule_bind_esp(engine, error))
++		return FALSE;
++
+diff --git a/src/fu-fvca-capsule.c b/src/fu-fvca-capsule.c
+new file mode 100644
+index 0000000..14d0cd2
+--- /dev/null
++++ b/src/fu-fvca-capsule.c
+@@ -0,0 +1,375 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ */
++
++#include "config.h"
++
++#include <fwupdplugin.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <glib-unix.h>
++#include <linux/magic.h>
++#include <linux/openat2.h>
++#include <sys/file.h>
++#include <sys/stat.h>
++#include <sys/statfs.h>
++#include <sys/statvfs.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++
++#include "fu-context-private.h"
++#include "fu-fvca-capsule.h"
++#include "fu-volume-private.h"
++
++#define FU_FVCA_RUN "/run/fvca"
++#define FU_FVCA_POOL FU_FVCA_RUN "/host-data"
++#define FU_FVCA_ESP_BINDING "firmware-esp-binding"
++#define FU_FVCA_LEASE "guest-capture.lock"
++#define FU_FVCA_FILE_FLAGS (O_RDONLY | O_NOCTTY | O_NONBLOCK | O_CLOEXEC)
++#define FU_FVCA_DIR_FLAGS (O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)
++
++static gboolean
++fu_fvca_deny(GError **error, const gchar *message)
++{
++	g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_PERMISSION_DENIED, message);
++	return FALSE;
++}
++
++static gint
++fu_fvca_openat(gint parent, const gchar *name, guint64 flags)
++{
++	struct open_how how = {
++	    .flags = flags,
++	    .resolve = RESOLVE_BENEATH | RESOLVE_NO_XDEV | RESOLVE_NO_SYMLINKS,
++	};
++	return syscall(SYS_openat2, parent, name, &how, sizeof(how));
++}
++
++static gboolean
++fu_fvca_private(gint fd, mode_t mode, struct stat *st)
++{
++	return fstat(fd, st) == 0 && st->st_uid == 0 && st->st_gid == 0 &&
++	       (st->st_mode & (S_IFMT | 07777)) == mode &&
++	       (!S_ISREG(mode) || st->st_nlink == 1);
++}
++
++static GBytes *
++fu_fvca_record(gint parent,
++		const gchar *name,
++		mode_t mode,
++		gsize limit,
++		gboolean durable,
++		GError **error)
++{
++	g_autofd gint fd = fu_fvca_openat(parent, name, FU_FVCA_FILE_FLAGS);
++	struct stat st;
++	g_autofree guint8 *data = NULL;
++
++	if (fd < 0 || !fu_fvca_private(fd, S_IFREG | mode, &st) ||
++	    st.st_size <= 0 || (guint64)st.st_size > limit) {
++		fu_fvca_deny(error, "FVCA firmware record is missing, untrusted or outside its size bound");
++		return NULL;
++	}
++	data = g_malloc(st.st_size);
++	if (pread(fd, data, st.st_size, 0) != st.st_size) {
++		fu_fvca_deny(error, "FVCA could not read the entire firmware record");
++		return NULL;
++	}
++	if (durable && (fsync(fd) != 0 || fsync(parent) != 0)) {
++		fu_fvca_deny(error, "FVCA could not synchronize the firmware operation record");
++		return NULL;
++	}
++	return g_bytes_new_take(g_steal_pointer(&data), st.st_size);
++}
++
++gboolean
++fu_fvca_capsule_writer_enabled(void)
++{
++	return g_strcmp0(g_getenv("FVCA_FWUPD_CAPSULE_WRITER"), "1") == 0;
++}
++
++gint
++fu_fvca_capsule_open_esp(gboolean writable, GError **error)
++{
++	g_autofd gint run = open(FU_FVCA_RUN, FU_FVCA_DIR_FLAGS);
++	g_autofd gint esp = -1;
++	g_autoptr(GBytes) binding = NULL;
++	guint64 device_id = 0;
++	struct stat st;
++	struct statfs fs;
++	struct statvfs flags;
++
++	if (run < 0)
++		goto invalid;
++	binding = fu_fvca_record(run, FU_FVCA_ESP_BINDING, 0600, 102, FALSE, error);
++	if (binding == NULL)
++		return -1;
++	/* Eight bytes for dev_t followed by the signed UKI EFI device path. */
++	if (g_bytes_get_size(binding) != 102)
++		goto invalid;
++	memcpy(&device_id, g_bytes_get_data(binding, NULL), sizeof(device_id));
++	esp = open(FU_FVCA_ESP, FU_FVCA_DIR_FLAGS);
++	if (esp < 0 || fstat(esp, &st) != 0 || st.st_dev != GUINT64_FROM_LE(device_id) ||
++	    fstatfs(esp, &fs) != 0 || fs.f_type != MSDOS_SUPER_MAGIC ||
++	    fstatvfs(esp, &flags) != 0 ||
++	    (flags.f_flag & (ST_NODEV | ST_NOSUID | ST_NOEXEC)) !=
++		    (ST_NODEV | ST_NOSUID | ST_NOEXEC) ||
++	    writable == ((flags.f_flag & ST_RDONLY) != 0))
++		goto invalid;
++	return g_steal_fd(&esp);
++invalid:
++	fu_fvca_deny(error, "FVCA requires the verified VFAT ESP with the expected access mode");
++	return -1;
++}
++
++gboolean
++fu_fvca_capsule_bind_esp(FuEngine *engine, GError **error)
++{
++	const gboolean writer = fu_fvca_capsule_writer_enabled();
++	g_autofd gint esp = -1;
++	g_autoptr(FuVolume) volume = NULL;
++	struct stat binding;
++
++	/* Unenrolled discovery can run without a Host ESP binding. */
++	if (!writer && lstat(FU_FVCA_RUN "/" FU_FVCA_ESP_BINDING, &binding) != 0 && errno == ENOENT)
++		return TRUE;
++	esp = fu_fvca_capsule_open_esp(writer, error);
++	if (esp < 0)
++		return FALSE;
++	volume = fu_volume_new_from_mount_path(FU_FVCA_ESP);
++	fu_volume_set_partition_kind(volume, FU_VOLUME_KIND_ESP);
++	fu_context_add_esp_volume(fu_engine_get_context(engine), volume);
++	return TRUE;
++}
++
++static FwupdJsonObject *
++fu_fvca_json(GBytes *bytes, GError **error)
++{
++	g_autoptr(FwupdJsonParser) parser = fwupd_json_parser_new();
++	g_autoptr(FwupdJsonNode) node = NULL;
++
++	fwupd_json_parser_set_max_depth(parser, 8);
++	fwupd_json_parser_set_max_items(parser, 256);
++	fwupd_json_parser_set_max_quoted(parser, 1024);
++	node = fwupd_json_parser_load_from_bytes(parser, bytes, FWUPD_JSON_LOAD_FLAG_NONE, error);
++	if (node == NULL)
++		return NULL;
++	return fwupd_json_node_get_object(node, error);
++}
++
++static gboolean
++fu_fvca_match(FwupdJsonObject *obj, const gchar *key, const gchar *expected)
++{
++	g_autoptr(GRefString) value = fwupd_json_object_get_string(obj, key, NULL);
++	return g_strcmp0(value, expected) == 0;
++}
++
++static gboolean
++fu_fvca_match_version(FwupdJsonObject *offer, const gchar *key, const gchar *text, guint32 raw)
++{
++	g_autoptr(FwupdJsonObject) version = fwupd_json_object_get_object(offer, key, NULL);
++	gint64 value = 0;
++
++	return version != NULL && fu_fvca_match(version, "text", text) &&
++	       fwupd_json_object_get_integer(version, "raw", &value, NULL) && value == raw;
++}
++
++static gboolean
++fu_fvca_match_catalog(FwupdJsonObject *offer, const gchar *catalog)
++{
++	g_autoptr(FwupdJsonObject) record = fwupd_json_object_get_object(offer, "catalog", NULL);
++	g_autoptr(FwupdJsonObject) metadata = NULL;
++	g_autoptr(FwupdJsonObject) signature = NULL;
++	g_autoptr(GRefString) metadata_sha = NULL;
++	g_autoptr(GRefString) signature_sha = NULL;
++	g_autofree gchar *suffix = NULL;
++	const gchar *separator = strchr(catalog, ':');
++
++	if (record == NULL || separator == NULL)
++		return FALSE;
++	metadata = fwupd_json_object_get_object(record, "metadata", NULL);
++	signature = fwupd_json_object_get_object(record, "signature", NULL);
++	if (metadata == NULL || signature == NULL)
++		return FALSE;
++	metadata_sha = fwupd_json_object_get_string(metadata, "sha256", NULL);
++	signature_sha = fwupd_json_object_get_string(signature, "sha256", NULL);
++	if (metadata_sha == NULL || signature_sha == NULL)
++		return FALSE;
++	suffix = g_strconcat(metadata_sha, ":", signature_sha, NULL);
++	return g_strcmp0(separator + 1, suffix) == 0;
++}
++
++static gboolean
++fu_fvca_match_offer(GBytes *body,
++		    const FuFvcaCabinet *identity,
++		    const gchar *offer_sha256,
++		    const gchar *catalog,
++		    GError **error)
++{
++	g_autofree gchar *digest = g_compute_checksum_for_bytes(G_CHECKSUM_SHA256, body);
++	g_autoptr(FwupdJsonObject) head = NULL;
++	g_autoptr(FwupdJsonObject) offer = NULL;
++	g_autoptr(FwupdJsonObject) device = NULL;
++	g_autoptr(FwupdJsonObject) archive = NULL;
++
++	if (g_strcmp0(digest, offer_sha256) != 0)
++		return fu_fvca_deny(error, "FVCA staged offer differs from the active operation digest");
++	head = fu_fvca_json(body, error);
++	if (head == NULL)
++		return FALSE;
++	offer = fwupd_json_object_get_object(head, "offer", error);
++	if (offer == NULL)
++		return FALSE;
++	device = fwupd_json_object_get_object(offer, "device", error);
++	if (device == NULL)
++		return FALSE;
++	archive = fwupd_json_object_get_object(offer, "archive", error);
++	if (archive == NULL)
++		return FALSE;
++	if (!fu_fvca_match(head, "schema", "fvca-firmware-channel-v1") ||
++	    !fu_fvca_match(head, "role", "hypervisor") ||
++	    !fu_fvca_match(head, "fwupd_version", VERSION) ||
++	    !fu_fvca_match(offer, "remote", "lvfs") ||
++	    !fu_fvca_match(device, "device_id", identity->device_id) ||
++	    !fu_fvca_match(device, "guid", identity->guid) ||
++	    (!fu_fvca_match(device, "component", "system-firmware") &&
++	     !fu_fvca_match(device, "component", "embedded-controller")) ||
++	    !fu_fvca_match(device, "version_format", identity->format) ||
++	    !fu_fvca_match_version(offer, "from", identity->from, identity->from_raw) ||
++	    !fu_fvca_match_version(offer, "to", identity->to, identity->to_raw) ||
++	    !fu_fvca_match(archive, "sha256", identity->archive_sha256) ||
++	    !fu_fvca_match(offer, "payload_sha256", identity->payload_sha256) ||
++	    !fu_fvca_match_catalog(offer, catalog))
++		return fu_fvca_deny(error, "FVCA cabinet or catalog differs from the exact staged offer");
++	return TRUE;
++}
++
++gboolean
++fu_fvca_capsule_authorize(gint lease,
++			  const FuFvcaCabinet *identity,
++			  const gchar *transaction,
++			  const gchar *offer_sha256,
++			  const gchar *catalog,
++			  GError **error)
++{
++	g_autofd gint run = open(FU_FVCA_RUN, FU_FVCA_DIR_FLAGS);
++	g_autofd gint lock = -1;
++	g_autofd gint pool = -1;
++	g_autofd gint directory = -1;
++	g_autoptr(GBytes) activation = NULL;
++	g_autoptr(GBytes) offer = NULL;
++	g_autoptr(FwupdJsonObject) record = NULL;
++	g_autofree gchar *boot_id = NULL;
++	g_autofree gchar *offer_path = NULL;
++	struct stat lock_stat;
++	struct stat lease_stat;
++	struct stat dir_stat;
++	struct statx run_mount;
++	struct statx pool_mount;
++	struct statfs fs;
++	gsize boot_id_size = 0;
++
++	if (run < 0)
++		return fu_fvca_deny(error, "FVCA firmware runtime directory is unavailable");
++	lock = fu_fvca_openat(run, FU_FVCA_LEASE, FU_FVCA_FILE_FLAGS);
++	if (lock < 0 || !fu_fvca_private(lock, S_IFREG | 0600, &lock_stat) ||
++	    !fu_fvca_private(lease, S_IFREG | 0600, &lease_stat) ||
++	    lock_stat.st_dev != lease_stat.st_dev || lock_stat.st_ino != lease_stat.st_ino ||
++	    flock(lock, LOCK_EX | LOCK_NB) == 0 || errno != EWOULDBLOCK ||
++	    flock(lease, LOCK_EX | LOCK_NB) != 0)
++		return fu_fvca_deny(error, "FVCA firmware writer requires the Host lifecycle lease");
++	pool = open(FU_FVCA_POOL, FU_FVCA_DIR_FLAGS);
++	if (pool < 0 || !fu_fvca_private(pool, S_IFDIR | 0700, &dir_stat) ||
++	    fstatfs(pool, &fs) != 0 || fs.f_type != BTRFS_SUPER_MAGIC ||
++	    statx(run, "", AT_EMPTY_PATH, STATX_MNT_ID, &run_mount) != 0 ||
++	    statx(pool, "", AT_EMPTY_PATH, STATX_MNT_ID, &pool_mount) != 0 ||
++	    (run_mount.stx_mask & pool_mount.stx_mask & STATX_MNT_ID) == 0 ||
++	    run_mount.stx_mnt_id == pool_mount.stx_mnt_id)
++		return fu_fvca_deny(error, "FVCA firmware activation requires the private Btrfs Host pool");
++	directory = fu_fvca_openat(pool, "firmware-update", FU_FVCA_DIR_FLAGS);
++	if (directory < 0 || !fu_fvca_private(directory, S_IFDIR | 0700, &dir_stat))
++		return fu_fvca_deny(error, "FVCA firmware activation directory is unavailable");
++	activation = fu_fvca_record(directory, "activation.json", 0600, 1024, TRUE, error);
++	if (activation == NULL)
++		return FALSE;
++	record = fu_fvca_json(activation, error);
++	if (record == NULL)
++		return FALSE;
++	if (!g_file_get_contents("/proc/sys/kernel/random/boot_id", &boot_id, &boot_id_size, error))
++		return FALSE;
++	if (boot_id_size != 37 || boot_id[36] != '\n')
++		return fu_fvca_deny(error, "FVCA firmware writer cannot determine the current boot");
++	boot_id[36] = '\0';
++	if (!g_uuid_string_is_valid(boot_id) ||
++	    !fu_fvca_match(record, "schema", "fvca-firmware-activation-v1") ||
++	    !fu_fvca_match(record, "phase", "flashing") ||
++	    !fu_fvca_match(record, "boot_id", boot_id) ||
++	    !fu_fvca_match(record, "transaction", transaction) ||
++	    !fu_fvca_match(record, "offer_sha256", offer_sha256) ||
++	    !fu_fvca_match(record, "device_id", identity->device_id))
++		return fu_fvca_deny(error, "FVCA firmware request differs from the durable flashing operation");
++
++	offer_path = g_build_filename("staged", offer_sha256, "offer.json", NULL);
++	offer = fu_fvca_record(directory, offer_path, 0400, 64 * FU_KB, FALSE, error);
++	return offer != NULL && fu_fvca_match_offer(offer, identity, offer_sha256, catalog, error);
++}
++
++gboolean
++fu_fvca_capsule_install(FuEngine *engine, FuRelease *release, const gchar *operation, GError **error)
++{
++	FuEngineRequest *request = fu_release_get_request(release);
++	FuDevice *device = fu_release_get_device(release);
++	const gchar *id = fu_device_get_id(device);
++	g_autoptr(FuDevice) history = NULL;
++	g_autoptr(GError) error_history = NULL;
++	g_autoptr(GPtrArray) releases = g_ptr_array_new();
++	g_autoptr(FuProgress) progress = fu_progress_new(G_STRLOC);
++	FwupdRelease *previous;
++	g_autofd gint esp = -1;
++	g_autofd gint efivars = -1;
++	struct statfs fs;
++
++	if (g_strcmp0(G_OBJECT_TYPE_NAME(device), "FuUefiCodDevice") != 0 ||
++	    fu_device_has_private_flag(device, "no-rt-set-variable") ||
++	    fu_device_has_private_flag(device, "cod-dell-recovery"))
++		return fu_fvca_deny(error, "FVCA firmware writer requires a standard capsule-on-disk device");
++
++	history = fu_engine_get_fvca_history(engine, id, &error_history);
++	if (history == NULL) {
++		if (!g_error_matches(error_history, FWUPD_ERROR, FWUPD_ERROR_NOT_FOUND)) {
++			g_propagate_error(error, g_steal_pointer(&error_history));
++			return FALSE;
++		}
++	} else {
++		previous = fu_device_get_release_default(history);
++		if ((previous != NULL &&
++		     g_strcmp0(fu_release_get_metadata_item(FU_RELEASE(previous), "FvcaOperation"),
++			       operation) == 0) ||
++		    fu_device_get_update_state(history) == FWUPD_UPDATE_STATE_NEEDS_REBOOT ||
++		    fu_device_get_update_state(history) == FWUPD_UPDATE_STATE_PENDING)
++			return fu_fvca_deny(error, "FVCA firmware operation already has history or is pending");
++	}
++
++	esp = fu_fvca_capsule_open_esp(TRUE, error);
++	if (esp < 0)
++		return FALSE;
++	efivars = open("/sys/firmware/efi/efivars", FU_FVCA_DIR_FLAGS);
++	if (efivars < 0 || fstatfs(efivars, &fs) != 0 || fs.f_type != EFIVARFS_MAGIC ||
++	    (fs.f_flags & ST_RDONLY) != 0 || fs.f_bsize != 1 ||
++	    fs.f_bavail < 256 || fs.f_bfree < fs.f_bavail || fs.f_bfree - fs.f_bavail < 5 * 1024)
++		return fu_fvca_deny(error, "FVCA requires the writable EFI variable store and its capacity reserve");
++	fu_release_add_metadata_item(release, "FvcaOperation", operation);
++	g_ptr_array_add(releases, release);
++	if (!fu_engine_install_releases(engine, request, releases, progress, FWUPD_INSTALL_FLAG_NONE, error))
++		return FALSE;
++	g_clear_object(&history);
++	history = fu_engine_get_fvca_history(engine, id, error);
++	if (history == NULL)
++		return FALSE;
++	previous = fu_device_get_release_default(history);
++	if (previous == NULL ||
++	    g_strcmp0(fu_release_get_metadata_item(FU_RELEASE(previous), "FvcaOperation"), operation) != 0 ||
++	    fu_device_get_update_state(history) != FWUPD_UPDATE_STATE_NEEDS_REBOOT)
++		return fu_fvca_deny(error, "FVCA could not verify the pending native capsule result");
++	return TRUE;
++}
+diff --git a/src/fu-fvca-capsule.h b/src/fu-fvca-capsule.h
+new file mode 100644
+index 0000000..de05c59
+--- /dev/null
++++ b/src/fu-fvca-capsule.h
+@@ -0,0 +1,38 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ */
++
++#pragma once
++
++#include "fu-engine.h"
++
++#define FU_FVCA_ESP "/run/fvca/firmware-esp"
++
++typedef struct {
++	const gchar *device_id;
++	const gchar *archive_sha256;
++	const gchar *payload_sha256;
++	const gchar *guid;
++	const gchar *protocol;
++	const gchar *from;
++	const gchar *to;
++	const gchar *format;
++	guint32 from_raw;
++	guint32 to_raw;
++} FuFvcaCabinet;
++
++gboolean
++fu_fvca_capsule_writer_enabled(void);
++gboolean
++fu_fvca_capsule_bind_esp(FuEngine *engine, GError **error);
++gint
++fu_fvca_capsule_open_esp(gboolean writable, GError **error);
++gboolean
++fu_fvca_capsule_authorize(gint lease,
++			  const FuFvcaCabinet *identity,
++			  const gchar *transaction,
++			  const gchar *offer_sha256,
++			  const gchar *catalog,
++			  GError **error);
++gboolean
++fu_fvca_capsule_install(FuEngine *engine, FuRelease *release, const gchar *operation, GError **error);
+diff --git a/src/meson.build b/src/meson.build
+index 10a5ab8..bb49f24 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -280 +280 @@ if build_daemon
+-    sources: [daemon_loader_src, 'fu-daemon.c', 'fu-dbus-daemon.c'],
++    sources: [daemon_loader_src, 'fu-daemon.c', 'fu-dbus-daemon.c', 'fu-fvca-capsule.c'],
+diff --git a/src/org.freedesktop.fwupd.xml b/src/org.freedesktop.fwupd.xml
+index 30f2b50..ee0b7ff 100644
+--- a/src/org.freedesktop.fwupd.xml
++++ b/src/org.freedesktop.fwupd.xml
+@@ -796,0 +797,17 @@
++    <method name='StageFvcaCapsule'>
++      <arg type='s' name='device_id' direction='in'/>
++      <arg type='s' name='archive_sha256' direction='in'/>
++      <arg type='s' name='payload_sha256' direction='in'/>
++      <arg type='s' name='guid' direction='in'/>
++      <arg type='s' name='protocol' direction='in'/>
++      <arg type='s' name='version_from' direction='in'/>
++      <arg type='s' name='version_to' direction='in'/>
++      <arg type='s' name='version_format' direction='in'/>
++      <arg type='s' name='transaction' direction='in'/>
++      <arg type='s' name='offer_sha256' direction='in'/>
++      <arg type='u' name='version_from_raw' direction='in'/>
++      <arg type='u' name='version_to_raw' direction='in'/>
++      <arg type='h' name='fd' direction='in'/>
++      <arg type='h' name='lease' direction='in'/>
++    </method>
++

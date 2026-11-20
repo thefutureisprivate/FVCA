@@ -146,6 +146,7 @@ def check(directory, metadata, signature, cabinet, unsigned):
                 "NOTIFY_SOCKET": str(ready),
                 "STATE_DIRECTORY": str(directory / "state"),
                 "CACHE_DIRECTORY": str(directory / "cache"),
+                "FVCA_FWUPD_CAPSULE_WRITER": "0",
             },
         ) as daemon:
             assert notify.recv(4096) == b"READY=1"
@@ -165,7 +166,8 @@ def check(directory, metadata, signature, cabinet, unsigned):
 
             # Exercise both the real well-known-name policy and the unique-name path used by Rust.
             for peer in (FWUPD, owner):
-                for interface, method in ((FWUPD, "Install"), (FWUPD, "ModifyConfig"), (FWUPD, "Quit"),
+                for interface, method in ((FWUPD, "Install"), (FWUPD, "StageFvcaCapsule"),
+                                          (FWUPD, "ModifyConfig"), (FWUPD, "Quit"),
                                           (f"{DBUS}.Properties", "Set")):
                     try:
                         subprocess.run(
@@ -177,7 +179,7 @@ def check(directory, metadata, signature, cabinet, unsigned):
                         assert "Rejected send message" in error.stderr, error.stderr
                     else:
                         raise RuntimeError(f"private bus allowed {method}")
-            print("the private bus rejects install, configuration changes and daemon shutdown")
+            print("the private discovery bus rejects firmware writes, configuration changes and daemon shutdown")
 
 
 if __name__ == "__main__":
