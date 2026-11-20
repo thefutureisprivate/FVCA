@@ -1,0 +1,25 @@
+[package]
+name = "fvca-release-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+futures-util = "0.3"
+hex = "0.4"
+jiff = "0.2"
+rustix = { version = "1", features = ["fs", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "fs", "io-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tough = { version = "=0.24.0", default-features = false }
+url = "2"
+
+[profile.release]
+panic = "abort"
+strip = "symbols"

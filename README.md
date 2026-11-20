@@ -1,8 +1,8 @@
 # Fedora Verified Compute Appliance
 
-The first implementation milestone is a shared x86-64 development boot image for the VM-only Hypervisor and OCI Service Guest described in FVCA design v0.4.3. The Fedora 45 mkosi build produces a disk with a signed Unified Kernel Image (UKI), a read-only EROFS root, a dm-verity hash tree, and a detached root hash signature in its own GPT partition. The UKI embeds the expected root hash and execution policy. A Rust initramfs entrypoint loads dm-verity with signature enforcement before systemd attaches the global BPF execution policy. The kernel verifies the detached signature during root activation. Systemd closes the initramfs trust window after switch-root. [systemd execution policy](https://www.freedesktop.org/software/systemd/man/262/systemd-system.conf.html#RestrictFileSystemAccess=)
+The FVCA design v0.4.4 defines a VM-only Hypervisor and an OCI Service Guest. Both development roles use a shared x86-64 boot image. The Fedora 45 mkosi build produces a disk with a signed Unified Kernel Image (UKI), a read-only EROFS root, a dm-verity hash tree, and a detached root hash signature in its own GPT partition. The UKI embeds the expected root hash and execution policy. A Rust initramfs entrypoint loads dm-verity with signature enforcement before systemd attaches the global BPF execution policy. The kernel verifies the detached signature during root activation. Systemd closes the initramfs trust window after switch-root. [systemd execution policy](https://www.freedesktop.org/software/systemd/man/262/systemd-system.conf.html#RestrictFileSystemAccess=)
 
-The image uses a boot-status target and volatile `/var`. It disables automatic extension and additional GPT partition discovery. Build workers run Fedora's package scripts before removing shells, login tools and maintenance hooks from the base and initramfs. Both trees must pass an audit for prohibited commands, executable scripts, setuid/setgid files and file capabilities. Emergency and rescue targets report `FVCA_BOOT_FAILED` on the console. Both roles use Btrfs for mutable data. Service Guest runtime and workload qualification, physical TPM qualification, attestation and release authorization remain pending.
+The image uses a boot-status target and volatile `/var`. It disables automatic extension and additional GPT partition discovery. Build workers run Fedora's package scripts before removing shells, login tools and maintenance hooks from the base and initramfs. Both trees must pass an audit for prohibited commands, executable scripts, setuid/setgid files and file capabilities. Emergency and rescue targets report `FVCA_BOOT_FAILED` on the console. Both roles use Btrfs for mutable data. Physical TPM qualification, attestation and production release approval remain pending.
 
 The design draws on AOS's use of signed UKIs and integrity-protected disk images. [Amutable Foundations technical overview](https://amutable.com/blog/amutable-foundations-technical-overview)
 
@@ -59,6 +59,44 @@ Use the same QEMU command with `build/exec-check/fvca-dev-exec-check.raw` as the
 ## Open Build Service
 
 [`obs/project.conf`](obs/project.conf) is the starting configuration for a dedicated native mkosi image repository. OBS still needs a verified worker package set, a source service pinned to a reviewed Git revision, and a staging-signing configuration. Keep production signing separate from OBS candidate builds. The local build uses development keys and keeps them outside Git. [OBS mkosi build documentation](https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-package-formats#sec-obs-mkosi)
+
+## Verify and stage a signed role release
+
+`fvca-release-client` accepts an exact role release from a local TUF depot on the release or recovery workstation. Use an out-of-band trusted root and a separately authorized local selection record. Keep the TUF root and approved targets signing keys offline. Assign distinct Ed25519 keys to all four top-level TUF roles, and use consistent snapshots with SHA-256 and lengths at both metadata links. The client accepts timestamp metadata with up to 24 hours of remaining validity and snapshot metadata with up to seven days. Use a trusted clock and preserve the private metadata state across imports. [TUF specification](https://theupdateframework.github.io/specification/latest/) · [Amutable Quarry distribution](https://amutable.com/blog/distributing-images-quarry)
+
+Publish a top-level target named `ROLE-EPOCH-release.json`. The Hypervisor tuple contains the composed boot disk, the VM runtime disk, and its authorized Guest boot disk. The Service Guest tuple contains the packed Guest boot disk holding the signed UKI, core and OCI runtime. Publish a qualification record as a separate target and include its digest and byte count in the manifest. Before signing targets, independently review the actual qualification evidence and verify the signed boot and runtime artifacts with the role's release authorities.
+
+For example, the Service Guest manifest uses this shape. Replace the digest strings and lengths with the exact values of the reviewed release files.
+
+```json
+{
+  "schema": "fvca-os-release-v1",
+  "epoch": 19,
+  "composition": {
+    "role": "service-guest",
+    "guest_boot": {"bytes": 587538944, "sha256": "GUEST_BOOT_SHA256"}
+  },
+  "qualification": {"bytes": 1024, "sha256": "QUALIFICATION_SHA256"}
+}
+```
+
+The Hypervisor composition instead uses `role` set to `hypervisor` and requires `boot`, `vm_runtime` and `guest_boot` member records. Add `ROLE-EPOCH-boot.raw`, `ROLE-EPOCH-vm-runtime.raw`, `ROLE-EPOCH-guest-boot.raw` and `ROLE-EPOCH-qualification.json` targets as applicable. In the depot, use `metadata/` for the TUF role documents and `targets/` for hash-prefixed target files. Mount imported media with `nodev,nosuid,noexec` and keep it read-only for intake.
+
+Prepare a private state directory owned by the intake account with mode `0700`. In the trusted selection JSON, supply `role`, `epoch`, the independently authorized `minimum_epoch`, `manifest_sha256`, and `max_release_bytes` for the total logical size of the selected set. Supply the initial trusted root from verified configuration, and keep its bytes stable when the client advances the repository's trusted root through TUF rotation.
+
+```sh
+umask 077
+cargo vendor --locked --versioned-dirs --manifest-path release-client/Cargo.toml \
+  "$PWD/build/release-client-vendor" > build/release-client-cargo.toml
+# Run the build below in a Fedora Rust 1.100 environment with networking disabled.
+cargo build --frozen --release --manifest-path release-client/Cargo.toml \
+  --config build/release-client-cargo.toml
+release-client/target/release/fvca-release-client trusted-root.json depot intake-state selection.json
+```
+
+`FVCA_RELEASE_STAGED` names the complete verified tuple under `intake-state/staged/MANIFEST_SHA256`. Treat staged artifacts as inputs to the role's boot and installation verifiers. The current client handles local intake. HTTPS transport, on-node activation and an independently protected on-node security epoch are separate release gates.
+
+Run `tests/check-release-intake.py` with Python TUF 7.0.1 and securesystemslib 1.6.0 with crypto support. Supply `--client`, `--hypervisor`, `--vm-runtime`, `--guest` and a new `--output` directory on the same filesystem as the three disposable lab images. The fixture signs a test depot with ephemeral keys and exercises staging, expiry, role and epoch mismatches, artifact corruption, and persistent metadata and root rollback checks.
 
 ## Hypervisor runtime candidate
 
