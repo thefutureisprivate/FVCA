@@ -274,6 +274,25 @@ python3 tools/sign-hypervisor-promotion.py --trial signed-trial.bin \
 
 Publish the grant as `hypervisor-EPOCH-MANIFEST_SHA256-boot-promotion.bin` and list its exact `bytes` and `sha256` under `promotion_approval` in the qualified channel release. The scheduled client authenticates the grant and delivers it with the trial authorization. After recording local Guest health, the candidate drains the Guest and returns to the stable slot. The stable initrd checks the reviewed ESP geometry, the exact EFI loader bytes and all three candidate verity trees. It writes the promotion intent to Btrfs and commits the new EFI order before rebooting. The first normal boot verifies the intent and the scheduler records the promoted manifest as active. A later boot may use the confirmed release as the second EFI entry while its epoch remains eligible.
 
+### Stage a qualified Host firmware cabinet
+
+Run the firmware intake gate on a trusted maintenance system. It checks an exact Host and device transition against a signed standing policy, an independently signed TUF offer, and a recent fwupd observation. It then writes the approved cabinet and signed offer to a private, durable staging directory.
+
+```sh
+fvca-release-client --stage-host-firmware trusted-root.json depot.json private-state \
+  policy.json policy.sig owner.public observation.json
+```
+
+`private-state` is a dedicated mode-`0700` firmware state directory. Use the pinned 32-byte Ed25519 owner key and a 64-byte detached signature over the exact policy JSON. The `fvca-firmware-policy-v1` policy binds the `hypervisor` role, the enrolled platform, exact fwupd version, allowed device profiles and remotes, TUF root, depot configuration, independent qualification key, archive budget and firmware epoch floor. The platform record contains the SMBIOS system UUID, vendor, product, board and board revision. Keep it private.
+
+Publish `fvca-firmware-CHANNEL.json` and `fvca-firmware-CHANNEL.sig` as TUF targets. The `fvca-firmware-offer-v1` document binds the exact enrolled device, current and target version, cabinet length and SHA-256, embedded payload SHA-256, and independent evidence for distribution trust, vendor authentication, transition, reboot policy and recovery. Publish the exact cabinet as `fvca-firmware-ARCHIVE_SHA256.cab`. Consult the signed fixtures in `tests/check-firmware-intake.py` for complete policy and offer fields.
+
+Use an `fvca-firmware-observation-v1` document with the same platform and fwupd version, an `observed_at` Unix timestamp, the complete `fwupdmgr get-devices --json` and `fwupdmgr get-updates --json` results under `devices` and `upgrades`, and the ESRT entries under `esrt`. The observation must be less than five minutes old when staging finishes. Capsule admission compares the exact ESRT class, type and raw version. NVMe admission also requires the individual fwupd device ID and SHA-256 of the reported serial bytes. A model or GUID can identify multiple controllers. [fwupd capsule inventory](https://fwupd.github.io/libfwupdplugin/uefi-capsule-README.html) · [fwupd NVMe identities](https://fwupd.github.io/libfwupdplugin/nvme-README.html)
+
+An accepted cabinet reports `staged`. Activation requires the Host-only fwupd execution boundary, live device revalidation, independent verification of the cabinet's embedded payload and vendor authentication, and qualified power, TPM and recovery checks. fwupd metadata trust and on-device signature enforcement provide separate evidence. [fwupd distribution trust](https://fwupd.github.io/libfwupdplugin/only-trusted.html)
+
+Read-only inventory of the future Proxmox host on 2026-11-20 observed ThinkStation P3 Ultra board 1066, BIOS S0JKT2AA (fwupd 1.42), EC 1.13 and two Toshiba KXG50PNV1T02 drives at AFDA4103. The two drives reported the same model GUIDs. Local fwupd metadata listed BIOS 1.51. This inventory establishes the device matching inputs. Hardware transition qualification remains open.
+
 ## Hypervisor runtime candidate
 
 The separate mkosi recipe builds `vm-runtime.raw`, a signed EROFS system extension. It contains QEMU, the modular libvirt QEMU, log and lock daemons, the selected OVMF firmware, restic, and `/usr/libexec/fvca/release-client`. The release client checks the hardened allocator before running. It uses a bundled IANA time-zone database and the native EFI helpers in the verified runtime. The VMM is built offline from the pinned upstream QEMU release and the build checks that KVM is its only accelerator. The development appliance uses private UNIX sockets for libvirt and requires SELinux confinement for QEMU processes. The build strips Fedora's automatic service hooks and management commands before signing, records the exact core root hash in the extension and checks the shared package versions. [QEMU release archive and signing key](https://www.qemu.org/download/)

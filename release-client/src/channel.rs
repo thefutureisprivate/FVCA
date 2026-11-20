@@ -290,11 +290,11 @@ impl Head {
     }
 }
 
-fn digest(bytes: &[u8]) -> String {
+pub(super) fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-fn verify(key: &[u8], bytes: &[u8], signature: &[u8], message: &str) -> Result<()> {
+pub(super) fn verify(key: &[u8], bytes: &[u8], signature: &[u8], message: &str) -> Result<()> {
     UnparsedPublicKey::new(&ED25519, key)
         .verify(bytes, signature)
         .map_err(|_| invalid(message).into())
@@ -380,7 +380,7 @@ fn reconcile_promotion(directory: &Path, active: Active) -> Result<Active> {
     Ok(promoted)
 }
 
-fn checkpoint(path: &Path, name: &str, sequence: u64, bytes: &[u8]) -> Result<()> {
+pub(super) fn checkpoint(path: &Path, name: &str, sequence: u64, bytes: &[u8]) -> Result<()> {
     let next = Checkpoint {
         sequence,
         sha256: digest(bytes),
@@ -429,7 +429,7 @@ fn staging_budget(directory: &Path, candidate: &str, policy: &Policy) -> Result<
     Ok(budget.min(policy.max_release_bytes))
 }
 
-async fn target(repo: &Repository, name: String, limit: u64) -> Result<Vec<u8>> {
+pub(super) async fn target(repo: &Repository, name: String, limit: u64) -> Result<Vec<u8>> {
     let target = TargetName::new(name)?;
     let length = repo
         .targets()
