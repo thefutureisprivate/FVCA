@@ -1,3 +1,4 @@
+mod attestation;
 mod channel;
 mod depot;
 mod firmware;
@@ -7,6 +8,7 @@ mod handoff;
 mod install;
 mod management;
 mod state;
+mod tpm;
 
 use std::collections::HashSet;
 use std::error::Error;
@@ -186,6 +188,18 @@ fn valid_digest(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+        && value != "00000000-0000-0000-0000-000000000000"
 }
 
 fn validate_root(bytes: &[u8], limits: Limits) -> Result<()> {
@@ -496,6 +510,18 @@ fn run() -> Result<()> {
         .skip(1)
         .map(PathBuf::from)
         .collect::<Vec<_>>();
+    match operands.as_slice() {
+        [option, reference, destination] if option.as_os_str() == "--issue-boot-challenge" => {
+            return attestation::issue(reference, destination);
+        }
+        [option, nonce] if option.as_os_str() == "--collect-boot-quote" => {
+            return attestation::collect(nonce.to_str().ok_or_else(usage)?);
+        }
+        [option, reference, challenge, evidence] if option.as_os_str() == "--appraise-boot-quote" => {
+            return attestation::appraise(reference, challenge, evidence);
+        }
+        _ => (),
+    }
     if let [option] = operands.as_slice() {
         match option.to_str() {
             Some("--run-host-update") => {
@@ -512,6 +538,7 @@ fn run() -> Result<()> {
             Some("--guest-configuration-status") => return guest_configuration::report(),
             Some("--serve-management-broker") => return runtime()?.block_on(management::broker()),
             Some("--serve-management") => return runtime()?.block_on(management::gateway()),
+            Some("--collect-boot-quote") => return attestation::collect_from_stdin(),
             _ => (),
         }
     }
@@ -671,7 +698,7 @@ fn runtime() -> io::Result<tokio::runtime::Runtime> {
 
 fn usage() -> io::Error {
     invalid(
-        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --discover-os-release TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE STANDING_POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY [--prepare-inactive-gpt | --deliver-prepared-trial | --activate-prepared-trial]\n       fvca-release-client --stage-host-firmware TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY [OBSERVATION | --live]\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE\n       fvca-release-client --verify-hypervisor-floor-approval PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE\n       fvca-release-client --advance-hypervisor-floor PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE INCREMENT_TPM_PUBLIC POLICY_REFERENCE",
+        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --discover-os-release TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE STANDING_POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY [--prepare-inactive-gpt | --deliver-prepared-trial | --activate-prepared-trial]\n       fvca-release-client --stage-host-firmware TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY [OBSERVATION | --live]\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE\n       fvca-release-client --verify-hypervisor-floor-approval PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE\n       fvca-release-client --advance-hypervisor-floor PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE INCREMENT_TPM_PUBLIC POLICY_REFERENCE\n       fvca-release-client --issue-boot-challenge TRUSTED_REFERENCE NEW_CHALLENGE\n       fvca-release-client --collect-boot-quote NONCE_HEX\n       fvca-release-client --appraise-boot-quote TRUSTED_REFERENCE PENDING_CHALLENGE EVIDENCE",
     )
 }
 

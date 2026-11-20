@@ -8,7 +8,7 @@ use fvca_trial_authorization::{MANAGEMENT_UID, private_management_address};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::{Result, channel, invalid, valid_digest};
+use crate::{Result, channel, invalid, valid_digest, valid_uuid};
 
 pub(super) const REQUEST_BYTES: usize = 2048;
 pub(super) const RESPONSE_BYTES: usize = 4096;
@@ -31,7 +31,7 @@ pub(super) struct Enrollment {
 impl Enrollment {
     pub fn validate(&self) -> Result<()> {
         if self.schema != "fvca-hypervisor-management-v1"
-            || !uuid(&self.host)
+            || !valid_uuid(&self.host)
             || self.host.as_bytes() == SERVICE_GUEST_UUID.to_bytes()
             || !private_management_address(self.address)
             || self.gateway_uid != MANAGEMENT_UID
@@ -49,18 +49,6 @@ impl Enrollment {
         }
         Ok(())
     }
-}
-
-fn uuid(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(index, byte)| {
-            if matches!(index, 8 | 13 | 18 | 23) {
-                byte == b'-'
-            } else {
-                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-            }
-        })
-        && value != "00000000-0000-0000-0000-000000000000"
 }
 
 #[derive(Clone, Deserialize)]

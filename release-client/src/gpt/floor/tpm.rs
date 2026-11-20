@@ -43,33 +43,18 @@ fn checked(code: u32, action: &str) -> io::Result<()> {
 
 impl Tpm {
     pub(super) fn open(policy: &[u8; 32]) -> io::Result<Self> {
-        #[cfg(feature = "swtpm-test")]
-        let test_transport = {
-            let location = std::env::var("FVCA_TEST_SWTPM_SOCKET").map_err(io::Error::other)?;
-            if !location.starts_with('/') || location.contains(',') {
-                return Err(io::Error::other(
-                    "expected an absolute disposable software TPM socket",
-                ));
-            }
-            std::ffi::CString::new(format!("swtpm:path={location}")).map_err(io::Error::other)?
-        };
-        #[cfg(feature = "swtpm-test")]
-        let transport = test_transport.as_c_str();
-        #[cfg(not(feature = "swtpm-test"))]
-        let transport = c"device:/dev/tpmrm0";
-
         let mut context = ptr::null_mut();
         let mut name = [0u8; 34];
         // The pointers refer to a NUL-terminated string, fixed arrays and a writable
         // out-pointer. Success transfers exclusive ownership of the C allocation.
-        let status = unsafe {
+        let status = crate::tpm::with_transport(|transport| unsafe {
             fvca_floor_open(
                 transport.as_ptr(),
                 policy.as_ptr(),
                 &mut context,
                 name.as_mut_ptr(),
             )
-        };
+        })?;
         checked(status, "verify the enrolled floor counter")?;
         let context =
             NonNull::new(context).ok_or_else(|| io::Error::other("missing TPM context"))?;

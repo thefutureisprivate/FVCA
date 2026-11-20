@@ -2,7 +2,7 @@
 
 The FVCA design v0.4.5 defines a VM-only Hypervisor and an OCI Service Guest. Both development roles share an x86-64 image recipe. The Fedora 45 mkosi build produces a disk with a signed Unified Kernel Image (UKI), a read-only EROFS root, a dm-verity hash tree, and a detached root hash signature in its own GPT partition. The UKI embeds the expected root hash and execution policy. A Rust initramfs entrypoint loads dm-verity with signature enforcement before systemd attaches the global BPF execution policy. The kernel verifies the detached signature during root activation. Systemd closes the initramfs trust window after switch-root. [systemd execution policy](https://www.freedesktop.org/software/systemd/man/262/systemd-system.conf.html#RestrictFileSystemAccess=)
 
-The image uses a boot-status target and volatile `/var`. It disables automatic extension and additional GPT partition discovery. Build workers run Fedora's package scripts before removing shells, login tools and maintenance hooks from the base and initramfs. Both trees must pass an audit for prohibited commands, executable scripts, setuid/setgid files and file capabilities. Emergency and rescue targets report `FVCA_BOOT_FAILED` on the console. Both roles use Btrfs for mutable data. Physical TPM qualification, attestation and production release approval remain pending.
+The image uses a boot-status target and volatile `/var`. It disables automatic extension and additional GPT partition discovery. Build workers run Fedora's package scripts before removing shells, login tools and maintenance hooks from the base and initramfs. Both trees must pass an audit for prohibited commands, executable scripts, setuid/setgid files and file capabilities. Emergency and rescue targets report `FVCA_BOOT_FAILED` on the console. Both roles use Btrfs for mutable data. Physical TPM qualification and production release approval remain pending.
 
 The design draws on AOS's use of signed UKIs and integrity-protected disk images. [Amutable Foundations technical overview](https://amutable.com/blog/amutable-foundations-technical-overview)
 
@@ -63,6 +63,34 @@ Use the same QEMU command with `build/exec-check/fvca-dev-exec-check.raw` as the
 ## Open Build Service
 
 [`obs/project.conf`](obs/project.conf) is the starting configuration for a dedicated native mkosi image repository. OBS still needs a verified worker package set, a source service pinned to a reviewed Git revision, and a staging-signing configuration. Keep production signing separate from OBS candidate builds. The local build uses development keys and keeps them outside Git. [OBS mkosi build documentation](https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-package-formats#sec-obs-mkosi)
+
+## Appraise a Hypervisor boot quote
+
+In trusted maintenance, enroll a TPM-generated restricted ECDSA P-256 key with SHA-256 at persistent handle `0x81004656`. The key uses the `PolicyCommandCode(TPM2_CC_Quote)` policy and the `fixedtpm`, `fixedparent`, `sensitivedataorigin`, `adminwithpolicy`, `noda`, `restricted`, and `sign` attributes. Preserve the enrolled public point and TPM qualified name on the separate verifier. The runtime collector opens `/dev/tpmrm0` and accepts one 32-byte challenge. [TPM 2.0 Library](https://www.trustedcomputinggroup.org/resources/documents/tpm-library-specification) · [TPM quote command](https://tpm2-tss.readthedocs.io/en/latest/group___esys___quote.html)
+
+Keep the approved `fvca-hypervisor-boot-reference-v1` JSON on the verifier. Establish the reference in a controlled qualification boot of the exact Hypervisor release on the enrolled platform. Review which components the firmware and UKI measure before approving those values. Enroll a new reference for a qualified firmware or release change. [systemd-stub boot measurements](https://www.freedesktop.org/software/systemd/man/262/systemd-stub.html)
+
+| Field | Value |
+| --- | --- |
+| `schema` | `fvca-hypervisor-boot-reference-v1` |
+| `host` | Enrolled Hypervisor UUID |
+| `release_manifest_sha256` | Independently approved release manifest digest |
+| `ak_public` | Uncompressed SEC1 point as hex, starting with `04` |
+| `ak_qualified_name` | TPM qualified name as hex, including the SHA-256 algorithm identifier `000b` |
+| `sha256_pcrs` | Eight 32-byte hex digests for PCRs 0, 2, 4, 7, 9, 11, 12 and 13 in that order |
+
+On the verifier, create a new 0700 directory and issue a challenge into it. Send the printed nonce to the collector through the authenticated test or maintenance channel, then return the collector's JSON to the verifier. Pass the nonce as `NONCE_HEX` to `--collect-boot-quote`, or supply one newline-terminated hex line on stdin. Each challenge expires after two minutes. Successful appraisal consumes the challenge before it prints the verdict. [RATS architecture](https://www.rfc-editor.org/rfc/rfc9334.html)
+
+```sh
+mkdir -m 700 verifier-state
+fvca-release-client --issue-boot-challenge trusted-reference.json verifier-state/pending
+# On the Hypervisor, collect the quote for the nonce printed by the verifier.
+fvca-release-client --collect-boot-quote NONCE_HEX
+# On the verifier, supply the returned evidence JSON.
+fvca-release-client --appraise-boot-quote trusted-reference.json verifier-state/pending evidence.json
+```
+
+The verdict identifies the approved measured boot and its enrolled Host. Guest identity, application authorization and runtime health are separate checks. Management transport integration and physical TPM enrollment qualification remain open. The disposable TPM test uses a client built with `--features swtpm-test` and runs `python3 tests/check-boot-attestation.py CLIENT` on the off-node test machine.
 
 ## Verify and stage a signed role release
 
