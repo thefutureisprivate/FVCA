@@ -186,6 +186,31 @@ def retention_selection(path, backup):
     return ((RETENTION_FILE, policy),)
 
 
+TRIAL_FILE = "hypervisor-trial"
+TRIAL_SUPPORT = "hypervisor-trial-support-v1"
+
+
+def trial_selection(path, ids):
+    if path is None:
+        return ()
+    uuid = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+    policy = path.read_bytes()
+    selected = re.fullmatch(
+        rf"FVCA-HYPERVISOR-TRIAL-1\ntransaction={uuid}\n"
+        rf"stable=([0-9a-f]{{4}}),({uuid})\ncandidate=([0-9a-f]{{4}}),({uuid})\n"
+        r"candidate_esp_sha256=[0-9a-f]{64}\ncandidate_esp_bytes=([1-9][0-9]{0,9})\n",
+        policy.decode("ascii"),
+    )
+    if selected is None or ids is None:
+        raise ValueError("invalid Hypervisor boot trial authorization")
+    stable_id, stable, candidate_id, candidate, size = selected.groups()
+    size = int(size)
+    if (stable != ids["esp"] or stable == candidate or stable_id == candidate_id
+            or not 4096 <= size <= 4 * 1024**3 or size % 4096):
+        raise ValueError("trial requires the signed stable ESP and a distinct, bounded candidate ESP")
+    return ((TRIAL_FILE, policy),)
+
+
 def assemble(args, work):
     storage, digests = storage_selection(args.storage) if args.storage is not None else (None, (None, None))
     tpm = digests[0] is not None
@@ -213,11 +238,13 @@ def assemble(args, work):
     forbidden = tuple(f"usr/lib/fvca/{name}" for name in (
         "hypervisor.composition", "vm-runtime.p7s", "host-storage",
         *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, *BACKUP_FILES, BACKUP_JOB_FILE,
-        RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE,
+        RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE, TRIAL_FILE,
     ))
     required = ACTIVATION_FILES
     if args.gpt_slot:
         required += (f"usr/lib/fvca/{hypervisor_gpt.SUPPORT}",)
+    if args.boot_trial is not None:
+        required += (f"usr/lib/fvca/{TRIAL_SUPPORT}", "usr/lib/fvca/set-boot-next")
     verify_initrd(args.initrd, uname, required, forbidden, "Hypervisor")
     extra = (("host-storage", storage),) if storage is not None else ()
     ids = None
@@ -229,7 +256,7 @@ def assemble(args, work):
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
         extra=(*extra, *guest_selection(args, work), *backup, *backup_job_selection(args.backup_job, backup),
                *restore_selection(args.restore_authorization, backup),
-               *retention_selection(args.retention_policy, backup)),
+               *retention_selection(args.retention_policy, backup), *trial_selection(args.boot_trial, ids)),
     )
     cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS))
     if ids is None:
@@ -249,6 +276,7 @@ def main():
     parser.add_argument("--guest-release-certificate", type=Path, help="trusted Guest release signer")
     parser.add_argument("--gpt-slot", type=UUID, help="assign one unique UUID to a self-contained Hypervisor GPT slot image")
     parser.add_argument("--gpt-sector-size", type=int, choices=(512, 4096), help="GPT slot logical sector size (default 4096)")
+    parser.add_argument("--boot-trial", type=Path, help="authorize a specific one-shot UEFI trial from the stable GPT slot")
     parser.add_argument("--backup-policy", type=Path, help="S3 destination and repository ID to authorize in this UKI")
     parser.add_argument("--backup-ca", type=Path, help="PEM trust bundle for the selected S3 endpoint")
     parser.add_argument("--backup-job", type=Path, help="authorize the periodic live Service Guest backup job")
@@ -268,6 +296,8 @@ def main():
         parser.error("a GPT slot requires its authorized Guest boot bundle")
     if args.gpt_sector_size is not None and args.gpt_slot is None:
         parser.error("sector size is only configurable for a GPT slot image")
+    if args.boot_trial is not None and args.gpt_slot is None:
+        parser.error("a boot trial requires a stable GPT slot")
     if (args.backup_policy is None) != (args.backup_ca is None) or (
         args.backup_policy is not None and args.guest_boot is None
     ):

@@ -42,11 +42,13 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
     devices = []
     bundle = getattr(args, "direct_boot", None)
     nested = getattr(args, "nested_guest", None)
+    persistent = getattr(args, "persistent_boot", False)
+    state_access = "" if persistent else "snapshot=on,"
     if bundle is None:
         loader = [
             "-global", "driver=cfi.pflash01,property=secure,value=on",
             "-drive", f"if=pflash,format=raw,readonly=on,file={image(firmware)}",
-            "-drive", f"if=pflash,format=raw,snapshot=on,file={image(args.variables)}",
+            "-drive", f"if=pflash,format=raw,{state_access}file={image(args.variables)}",
         ]
     else:
         machine = "pc-q35-11.1"
@@ -65,14 +67,14 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
     media_access = "snapshot=on" if nvme else "readonly=on"
     command = [
         "qemu-system-x86_64", *devices, "-machine", machine, "-accel", "kvm", "-cpu", cpu,
-        "-m", "4096" if nested is not None else "2048", "-smp", "2", *loader,
+        "-m", "4096" if nested is not None else "2048", "-smp", str(getattr(args, "cpus", 2)), *loader,
         "-drive", f"if=none,id=fvca-boot,format=raw,{media_access},file={image(args.disk)}",
-        "-device", f"{boot_device}{geometry},bootindex=1",
+        "-device", f"{boot_device}{geometry}" + ("" if persistent else ",bootindex=1"),
     ]
     for index, member in enumerate(members):
         drive = f"fvca-member-{index}"
         command += [
-            "-drive", f"if=none,id={drive},format=raw,snapshot=on,file={image(member)}",
+            "-drive", f"if=none,id={drive},format=raw,{state_access}file={image(member)}",
             "-device", f"virtio-blk-pci,drive={drive},serial={drive}",
         ]
     command += [

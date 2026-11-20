@@ -184,7 +184,32 @@ python3 tests/check-hypervisor-gpt-slots.py \
   --lab build/host-storage-lab --output build/gpt-slot-checks
 ```
 
-The test attaches the boot images as virtual NVMe devices with the selected logical sector size. Compose its inputs with a recovery UKI or provide a seeded Guest and the matching Host storage profile. The test selects each slot with both disks attached and rejects duplicate locators or a tuple split across the two disks. Installing these immutable partitions alongside the data partitions on the physical NVMes, physical degraded boot, and automatic trial boot remain separate qualification steps.
+The test attaches the boot images as virtual NVMe devices with the selected logical sector size. Compose its inputs with a recovery UKI or provide a seeded Guest and the matching Host storage profile. The test selects each slot with both disks attached and rejects duplicate locators or a tuple split across the two disks. Installing these immutable partitions alongside the data partitions on the physical NVMes and physical degraded boot remain separate qualification steps.
+
+### Exercise a one-shot Hypervisor trial
+
+Compose the candidate slot first. Obtain its ESP partition UUID, starting LBA and length with `sfdisk --json --sector-size 4096 build/slot-b.raw`. Hash exactly the byte range occupied by the ESP and record its full length in bytes. Compose the stable lab slot with `--boot-trial FILE` to embed the authorization in its signed UKI. Use a fresh transaction UUID and the actual values for each field below. The stable ESP UUID is derived from the stable slot UUID and the name `esp` with UUIDv5.
+
+```text
+FVCA-HYPERVISOR-TRIAL-1
+transaction=TRANSACTION_UUID
+stable=000a,STABLE_ESP_UUID
+candidate=000b,CANDIDATE_ESP_UUID
+candidate_esp_sha256=CANDIDATE_ESP_SHA256
+candidate_esp_bytes=CANDIDATE_ESP_LENGTH_IN_BYTES
+```
+
+Enroll two active UEFI boot entries with short-form GPT device paths to `\EFI\BOOT\BOOTX64.EFI` and put the stable entry first in `BootOrder`. The Hypervisor checks `BootCurrent`, both boot entries and the candidate ESP after opening the encrypted Btrfs mirror. After flushing the transaction record, it invokes a confined writer that exclusively creates `BootNext` at a fixed path, then verifies the value by reading it back. Firmware consumes `BootNext` before starting the candidate. The original boot order remains in effect on subsequent resets. [UEFI Boot Manager](https://uefi.org/specs/UEFI/2.10/03_Boot_Manager.html)
+
+The Fedora KVM lab test uses `python3-virt-firmware` to seed the entries in a private OVMF variable store. It copies both Btrfs members before making persistent changes. The two input slots must use the same signed storage profile.
+
+```sh
+python3 tests/check-hypervisor-trial.py \
+  --stable build/slot-a.raw --candidate build/slot-b.raw --variables build/fvca-vars.fd \
+  --lab build/host-storage-lab --transaction TRANSACTION_UUID --output build/gpt-trial-checks
+```
+
+The test checks that changing a candidate ESP byte leaves the stable slot bootable, that the approved candidate boots once, and that the next reset returns to the stable slot without arming the same transaction again. Health-based promotion, an automatic reset after a stalled trial, and protected epoch advancement are separate release requirements.
 
 ## Development Hypervisor storage
 

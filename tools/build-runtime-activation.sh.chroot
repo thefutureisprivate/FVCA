@@ -8,7 +8,7 @@ export CARGO_TARGET_DIR="$build_dir/target"
 export RUSTFLAGS="-Dwarnings"
 
 target=x86_64-unknown-linux-gnu
-binaries=(fvca-activate-runtime)
+binaries=(fvca-activate-runtime fvca-set-boot-next)
 if [[ -n "${FVCA_GUEST_DATA_SELECTION:-}" ]]; then
     binaries=(fvca-activate-guest-data)
     install -Dm644 "$SRCDIR/$FVCA_GUEST_DATA_SELECTION" "$DESTDIR/usr/lib/fvca/guest-data"
@@ -24,4 +24,5 @@ for binary in "${binaries[@]}"; do
 done
 if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-slot-support-v1"
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-trial-support-v1"
 fi

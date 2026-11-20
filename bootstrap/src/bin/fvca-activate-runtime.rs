@@ -6,7 +6,7 @@ use std::io;
 use std::os::unix::fs::FileTypeExt;
 use std::process::ExitCode;
 
-use fvca_initrd_bootstrap::{backup_job, backup_policy, guest_boot, hypervisor_slot::Slot, invalid, recovery, retention_policy};
+use fvca_initrd_bootstrap::{backup_job, backup_policy, guest_boot, hypervisor_slot::Slot, hypervisor_trial, invalid, recovery, retention_policy};
 use fvca_initrd_bootstrap::runtime::{self, Runtime, hash};
 
 #[path = "fvca-activate-runtime/storage.rs"]
@@ -33,6 +33,9 @@ fn activate() -> io::Result<()> {
     let recovering = recovery::activate_if_selected()?;
     backup_job::activate_if_selected(recovering)?;
     guest_boot::activate_if_selected(!recovering, slot.as_ref().map(|slot| &slot.guest))?;
+    if let Err(error) = hypervisor_trial::arm_if_authorized(slot.as_ref().map(|slot| slot.esp.as_str())) {
+        eprintln!("FVCA_TRIAL_REFUSED {error}");
+    }
 
     println!("FVCA_VM_RUNTIME_ACTIVE {runtime_hash}");
     Ok(())

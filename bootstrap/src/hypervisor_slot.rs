@@ -22,6 +22,7 @@ const FIELDS: [&str; 7] = [
 const UUID: &[usize] = &[8, 4, 4, 4, 12];
 
 pub struct Slot {
+    pub esp: String,
     pub runtime: (PathBuf, PathBuf),
     pub guest: (PathBuf, PathBuf),
 }
@@ -116,6 +117,7 @@ impl Slot {
         let [_, _, _, runtime, runtime_verity, guest, guest_verity] = paths;
         println!("FVCA_HYPERVISOR_SLOT_VERIFIED {}", uuids[0]);
         Ok(Some(Self {
+            esp: uuids[0].to_owned(),
             runtime: (runtime, runtime_verity),
             guest: (guest, guest_verity),
         }))
