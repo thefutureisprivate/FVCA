@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fvca_initrd_bootstrap::{backup_job, backup_policy};
+use fvca_initrd_bootstrap::backup_policy;
+use fvca_trial_authorization::backup_job::{self, Observation, RecoveryPoint};
 
 use super::{Consistency, backup, btrfs, directory, invalid, lease, live, optional_record,
             private_directory, publish, read_record, recorded_capture, replace_record, restore, run, uuid};
@@ -95,7 +96,8 @@ fn capture_path(id: &str) -> PathBuf {
 impl<'a> Job<'a> {
     fn open(text: &'a str, destination: &'a str, create: bool) -> io::Result<Self> {
         let destination = backup_policy::parse(destination)?;
-        let policy = backup_job::parse(text, destination.repository)?;
+        let policy = backup_job::Policy::parse(text)?;
+        policy.require_repository(destination.repository)?;
         let fsid = btrfs::filesystem_uuid(&verify_pool()?)?;
         let mut dir = PathBuf::from(POOL);
         for part in ["captures", "scheduled", policy.repository] {
@@ -225,6 +227,19 @@ impl<'a> Job<'a> {
         };
         let clock = now()?;
         let age = last.as_ref().map(|complete| elapsed(clock, complete.captured)).transpose()?;
+        let observation = Observation {
+            filesystem: &self.fsid,
+            repository: self.policy.repository,
+            observed_at: clock,
+            last_upload: last.as_ref().map(|complete| RecoveryPoint {
+                capture: &complete.capture,
+                snapshot: &complete.snapshot,
+                captured_at: complete.captured,
+            }),
+            pending,
+            attempt_failed: state.failed,
+        };
+        let observation = replace_record(Path::new("/run/fvca"), backup_job::OBSERVATION, &observation.to_string());
         let capture = last.as_ref().map_or("none", |complete| complete.capture.as_str());
         let snapshot = last.as_ref().map_or("none", |complete| complete.snapshot.as_str());
         let pending = pending.unwrap_or("none");
@@ -241,6 +256,7 @@ impl<'a> Job<'a> {
         if state.failed {
             eprintln!("FVCA_BACKUP_JOB_ALERT partial capture={pending}");
         }
+        observation?;
         if missed || state.failed {
             return Err(invalid("the scheduled backup requires attention"));
         }
@@ -249,7 +265,7 @@ impl<'a> Job<'a> {
 }
 
 pub(crate) fn operate(execute: bool) -> io::Result<()> {
-    let text = fs::read_to_string(backup_job::JOB)?;
+    let text = fs::read_to_string(backup_job::POLICY)?;
     let destination = fs::read_to_string(backup_policy::POLICY)?;
     if execute {
         let _backup = lease(Path::new(backup::BACKUP_LOCK))?;

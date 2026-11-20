@@ -1,16 +1,19 @@
 //! Read bounded kernel observations from the authenticated Host pool.
 
+use std::fs::File;
 use std::io::{self, Read};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use fvca_btrfs_boundary::SpaceUsage;
+use fvca_trial_authorization::backup_job;
 use rustix::fs::{StatVfsMountFlags, fstatvfs};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 use tokio::task::spawn_blocking;
 
-use super::protocol::Refusal;
+use super::protocol::{Refusal, current_time};
 use crate::{Result, handoff, invalid, state, valid_uuid};
 
 static ACTIVE: Semaphore = Semaphore::const_new(1);
@@ -110,10 +113,11 @@ fn report() -> Result<Value> {
     }))
 }
 
-pub(super) async fn read() -> std::result::Result<Value, Refusal> {
-    let permit = ACTIVE
-        .try_acquire()
-        .map_err(|_| Refusal::HostStorageHealthUnavailable)?;
+async fn observe<T: Send + 'static>(
+    report: fn() -> Result<T>,
+    refusal: Refusal,
+) -> std::result::Result<T, Refusal> {
+    let permit = ACTIVE.try_acquire().map_err(|_| refusal)?;
     // Hold the permit in the worker if the network request times out while
     // waiting for the filesystem. Storage I/O cannot block the broker loop.
     spawn_blocking(move || {
@@ -121,6 +125,84 @@ pub(super) async fn read() -> std::result::Result<Value, Refusal> {
         report()
     })
     .await
-    .map_err(|_| Refusal::HostStorageHealthUnavailable)?
-    .map_err(|_| Refusal::HostStorageHealthUnavailable)
+    .map_err(|_| refusal)?
+    .map_err(|_| refusal)
+}
+
+pub(super) async fn read() -> std::result::Result<Value, Refusal> {
+    observe(report, Refusal::HostStorageHealthUnavailable).await
+}
+
+#[derive(Serialize)]
+struct VerifiedUpload {
+    capture: String,
+    repository_snapshot: String,
+    captured_at: u64,
+    age_seconds: u64,
+}
+
+#[derive(Serialize)]
+pub(super) struct ScheduledBackup {
+    repository: String,
+    observed_at: u64,
+    last_verified_upload: Option<VerifiedUpload>,
+    pending_capture: Option<String>,
+    attempt_failed: bool,
+    max_data_loss_seconds: u64,
+    data_loss_window_missed: bool,
+    restore_objective_seconds: u64,
+}
+
+fn backup_text(file: File) -> Result<String> {
+    let mut text = String::new();
+    file.take((backup_job::BYTES + 1) as u64)
+        .read_to_string(&mut text)?;
+    if text.len() > backup_job::BYTES {
+        return Err(invalid("backup record exceeds its size bound").into());
+    }
+    Ok(text)
+}
+
+fn backup_report() -> Result<Option<ScheduledBackup>> {
+    let enrollment = match state::open_regular(Path::new(backup_job::POLICY)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let meta = enrollment.metadata()?;
+    if meta.uid() != 0 || meta.gid() != 0 || meta.nlink() != 1 || meta.mode() & 0o7022 != 0 {
+        return Err(invalid("invalid scheduled backup enrollment file").into());
+    }
+    let enrollment = backup_text(enrollment)?;
+    let policy = backup_job::Policy::parse(&enrollment)?;
+    let file = state::open_regular(&Path::new("/run/fvca").join(backup_job::OBSERVATION))?;
+    handoff::private_file(&file)?;
+    let text = backup_text(file)?;
+    let observation = backup_job::Observation::parse(&text)?;
+    let (pool, _) = handoff::host_data()?;
+    let filesystem = fvca_btrfs_boundary::filesystem_uuid(&pool)?;
+    let now = current_time()?;
+    observation.require_current(&policy, &filesystem, now)?;
+    let point = observation.last_upload.map(|point| VerifiedUpload {
+        capture: point.capture.to_owned(),
+        repository_snapshot: point.snapshot.to_owned(),
+        captured_at: point.captured_at,
+        age_seconds: now - point.captured_at,
+    });
+    Ok(Some(ScheduledBackup {
+        repository: policy.repository.to_owned(),
+        observed_at: observation.observed_at,
+        data_loss_window_missed: point
+            .as_ref()
+            .is_none_or(|point| point.age_seconds > policy.max_data_loss),
+        last_verified_upload: point,
+        pending_capture: observation.pending.map(str::to_owned),
+        attempt_failed: observation.attempt_failed,
+        max_data_loss_seconds: policy.max_data_loss,
+        restore_objective_seconds: policy.restore_objective,
+    }))
+}
+
+pub(super) async fn backup() -> std::result::Result<Option<ScheduledBackup>, Refusal> {
+    observe(backup_report, Refusal::HostBackupStatusUnavailable).await
 }

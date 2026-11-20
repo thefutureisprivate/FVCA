@@ -236,6 +236,9 @@ enum Outcome {
     HostStorageHealth {
         pool: serde_json::Value,
     },
+    HostBackupStatus {
+        scheduled: Option<storage_health::ScheduledBackup>,
+    },
     Refused {
         code: Refusal,
     },
@@ -266,6 +269,10 @@ async fn dispatch(
         Operation::HostStorageHealth {} => {
             let pool = storage_health::read().await?;
             Ok(Outcome::HostStorageHealth { pool })
+        }
+        Operation::HostBackupStatus {} => {
+            let scheduled = storage_health::backup().await?;
+            Ok(Outcome::HostBackupStatus { scheduled })
         }
         Operation::ApplyConfiguration { plan } => {
             let receipt = intent::submit(enrollment, plan, packet)?;

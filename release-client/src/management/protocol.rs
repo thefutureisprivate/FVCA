@@ -83,6 +83,7 @@ pub(super) enum Operation {
     // Struct variants make Serde check extra fields even when there are no operands.
     Status {},
     HostStorageHealth {},
+    HostBackupStatus {},
     BootQuote {
         #[serde(deserialize_with = "boot_challenge")]
         challenge: [u8; 32],
@@ -169,6 +170,7 @@ pub(super) fn authorize(enrollment: &Enrollment, packet: &[u8], now: u64) -> Res
             .ok_or_else(|| invalid("the Host has no attestation operator"))?,
         Operation::Status {}
         | Operation::HostStorageHealth {}
+        | Operation::HostBackupStatus {}
         | Operation::Preflight { .. }
         | Operation::InspectConfiguration { .. } => &enrollment.operator_public_key,
     };
@@ -219,7 +221,7 @@ impl Settings {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum Refusal {
     TrialInProgress,
@@ -236,6 +238,7 @@ pub(super) enum Refusal {
     OutsideHostCapacity,
     BootQuoteUnavailable,
     HostStorageHealthUnavailable,
+    HostBackupStatusUnavailable,
 }
 
 #[derive(Serialize)]
@@ -452,6 +455,7 @@ mod tests {
         }});
         let read = json!({"type": "configuration-operation", "operation_id": "d".repeat(64)});
         let health = json!({"type": "host-storage-health"});
+        let backup = json!({"type": "host-backup-status"});
         let quote = json!({"type": "boot-quote", "challenge": "a4".repeat(32)});
         assert!(authorize(&enrollment, &request(mutation.clone(), &reader)?, 20).is_err());
         assert!(authorize(&enrollment, &request(mutation.clone(), &verifier)?, 20).is_err());
@@ -464,15 +468,22 @@ mod tests {
         assert!(authorize(&enrollment, &request(read.clone(), &verifier)?, 20).is_err());
         for other in [&submitter, &verifier] {
             assert!(authorize(&enrollment, &request(health.clone(), other)?, 20).is_err());
+            assert!(authorize(&enrollment, &request(backup.clone(), other)?, 20).is_err());
         }
         assert!(matches!(
             authorize(&enrollment, &request(health, &reader)?, 20)?.operation,
             Operation::HostStorageHealth {}
         ));
+        assert!(matches!(
+            authorize(&enrollment, &request(backup, &reader)?, 20)?.operation,
+            Operation::HostBackupStatus {}
+        ));
         for invalid in [
             json!({"type": "status", "path": "/etc/shadow"}),
             json!({"type": "host-storage-health", "reset": true}),
             json!({"type": "host-storage-health", "pool": "/run/fvca/guest-data"}),
+            json!({"type": "host-backup-status", "start": true}),
+            json!({"type": "host-backup-status", "repository": "arbitrary"}),
         ] {
             assert!(authorize(&enrollment, &request(invalid, &reader)?, 20).is_err());
         }
