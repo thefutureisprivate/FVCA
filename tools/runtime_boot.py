@@ -41,6 +41,15 @@ HOST_WORKLOAD_SUPPORT = Path("usr/lib/fvca/host-workload-network-v1")
 WORKLOAD_NETWORK_ARGUMENT = "fvca.workload_network"
 WORKLOAD_NETWORK_POLICY = "workload-network"
 WORKLOAD_NETWORK_SUPPORT = Path("usr/lib/fvca/workload-network-v1")
+SECURE_KERNEL_OPTIONS = ("module.sig_enforce=1", "lockdown=integrity")
+KERNEL_POLICY_SUPPORT = "usr/lib/fvca/kernel-policy-v1"
+
+
+def add_kernel_policy(cmdline, options):
+    reserved = {option.partition("=")[0] for option in options}
+    if any(option.partition("=")[0] in reserved for option in cmdline.split()):
+        raise ValueError("the shared core already supplies a role kernel policy option")
+    return " ".join((cmdline, *options))
 
 
 def run(*args, **kwargs):

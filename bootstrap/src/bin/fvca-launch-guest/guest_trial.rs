@@ -168,7 +168,6 @@ fn mount_image(trial: &Trial<'_>, target: &Path) -> io::Result<()> {
     {
         return Err(invalid("staged Guest image differs from the signed trial"));
     }
-    run(Command::new("/usr/bin/modprobe").args(["--ignore-install", "loop"]))?;
     let pinned = format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd());
     run(Command::new(DISSECT)
         .args([

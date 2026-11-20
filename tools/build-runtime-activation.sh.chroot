@@ -25,6 +25,7 @@ for binary in "${binaries[@]}"; do
     install -Dm755 "$CARGO_TARGET_DIR/$target/release/$binary" "$DESTDIR/usr/lib/fvca/${binary#fvca-}"
 done
 if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/kernel-policy-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-storage-support-v4"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-network-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-workload-network-v1"
@@ -44,4 +45,5 @@ if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
 fi
 if [[ "${FVCA_GUEST_OCI:-}" == yes ]]; then
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/workload-network-v1"
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/kernel-policy-v1"
 fi

@@ -26,7 +26,8 @@ from runtime_boot import (
     MANAGEMENT_ADDRESS_ARGUMENT, MANAGEMENT_ARGUMENT, MANAGEMENT_POLICY,
     MANAGEMENT_POLICY_SUPPORT, MANAGEMENT_SUPPORT, WORKLOAD_NETWORK_ARGUMENT, WORKLOAD_NETWORK_POLICY,
     WORKLOAD_NETWORK_SUPPORT, WORKLOAD_TRUST_FILES,
-    composition_archive, prepare_core, run, verify_initrd, write_disk,
+    KERNEL_POLICY_SUPPORT, SECURE_KERNEL_OPTIONS, add_kernel_policy, composition_archive, prepare_core, run,
+    verify_initrd, write_disk,
 )
 from runtime_image import verify as verify_runtime
 import vm_runtime
@@ -38,7 +39,11 @@ MANAGEMENT_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7",
 ))
 ROLE_BOOT_OPTIONS = ("kvm_intel.nested=0", *DISABLE_AUTOMATIC_EXTENSIONS)
+HOST_KERNEL_OPTIONS = (
+    *SECURE_KERNEL_OPTIONS, "nosmt=force", "intel_iommu=on", "intremap=on", "iommu.passthrough=0", "iommu.strict=1",
+)
 ACTIVATION_FILES = (
+    KERNEL_POLICY_SUPPORT,
     "etc/systemd/system/systemd-confext-initrd.service",
     "etc/systemd/system/systemd-confext-sysroot.service",
     "etc/systemd/system/systemd-sysext-initrd.service",
@@ -592,7 +597,7 @@ def assemble(args, work):
                                     WORKLOAD_NETWORK_ARGUMENT)
            for arg in cmdline.split()):
         raise ValueError("shared core already configures a Hypervisor epoch, trial, Guest configuration or management")
-    cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments,
+    cmdline = " ".join((add_kernel_policy(cmdline, HOST_KERNEL_OPTIONS), *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments,
                         *trial_key_arguments, *watchdog_arguments, *resource_arguments, *configuration_key_arguments,
                         *management_arguments, *network_arguments, *workload_arguments))
     immutable = None

@@ -19,9 +19,9 @@ from runtime_boot import (
     HOST_NETWORK_POLICY, HOST_NETWORK_SUPPORT,
     HOST_WORKLOAD_GUEST, HOST_WORKLOAD_POLICY, HOST_WORKLOAD_SUPPORT,
     MANAGEMENT_POLICY, MANAGEMENT_POLICY_SUPPORT, MANAGEMENT_SUPPORT, WORKLOAD_NETWORK_SUPPORT, WORKLOAD_TRUST_FILES,
-    composition_archive, prepare_core, run, verify_initrd, write_disk,
+    KERNEL_POLICY_SUPPORT, SECURE_KERNEL_OPTIONS, add_kernel_policy, composition_archive, prepare_core, run,
+    verify_initrd, write_disk,
 )
-DIRECT_BOOT_OPTIONS = ("module.sig_enforce=1", "lockdown=integrity")
 from runtime_image import verify as verify_runtime
 
 
@@ -31,6 +31,7 @@ ROLE_BOOT_OPTIONS = (
     *DISABLE_AUTOMATIC_EXTENSIONS,
 )
 ACTIVATION_FILES = (
+    KERNEL_POLICY_SUPPORT,
     "usr/bin/keyctl",
     "usr/bin/ip",
     "usr/bin/nft",
@@ -114,13 +115,12 @@ def assemble(args, work):
         run("cp", "--reflink=auto", "--sparse=always", "--", args.runtime, runtime_image)
     runtime_hash = verify_runtime(runtime_image, args.runtime_certificate, prepared, runtime_work, oci_runtime)
     network, network_arguments = workload_network.selection(args.workload_network, trust, cmdline)
-    cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *network_arguments))
+    cmdline = " ".join((add_kernel_policy(cmdline, SECURE_KERNEL_OPTIONS), *ROLE_BOOT_OPTIONS, *network_arguments))
     if args.direct_boot:
         parts = cmdline.split(" ")
         root_option = parts.index(f"systemd.verity_root_options={BASE_ROOT_OPTIONS}")
         parts[root_option] = f"systemd.verity_root_options={DIRECT_ROOT_OPTIONS}"
         cmdline = " ".join(parts)
-        cmdline = " ".join((cmdline, *DIRECT_BOOT_OPTIONS))
         certificate = run("openssl", "x509", "-in", args.boot_certificate, "-outform", "DER",
                           capture_output=True).stdout
         trust += (

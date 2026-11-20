@@ -27,6 +27,8 @@ Both images build hardened_malloc 14 from a digest-checked source archive, run i
 
 The builder compiles Fedora's pinned targeted SELinux policy offline with the FVCA initramfs module. It embeds the root labels in EROFS before dm-verity signing. The Rust bootstrap labels the unpacked CPIO with the contexts from the signed UKI before systemd loads the embedded policy. The policy denies unknown kernel permissions. A Rust check requires SELinux enforcing mode and the expected `init_t` domain for PID 1 before mounting the verified root and again before reporting readiness.
 
+The composed Hypervisor and Service Guest boot policies require integrity lockdown and enforced kernel module signatures. Their initramfs loads the drivers needed by each role, then permanently disables module loading and unloading, kexec, and unprivileged BPF for that boot. The Hypervisor boot policy forcibly disables SMT and requests VT-d with interrupt remapping, translated DMA domains, and strict invalidation. Verify remapping and device isolation on the enrolled hardware. [Linux kernel sysctls](https://docs.kernel.org/admin-guide/sysctl/kernel.html) · [Linux kernel parameters](https://docs.kernel.org/admin-guide/kernel-parameters.html)
+
 ## Boot in QEMU
 
 Install `qemu-system-x86-core`, `edk2-ovmf`, and `python3-virt-firmware`. Enroll the development certificate in a disposable OVMF variable store and start the image with disk snapshots and no network adapter. Use `-accel tcg -cpu max` if KVM is unavailable.

@@ -20,6 +20,7 @@ mod net_setup;
 pub mod host_update;
 pub mod hypervisor_slot;
 pub mod hypervisor_trial;
+pub mod kernel_policy;
 pub mod runtime;
 pub mod selinux;
 pub mod workload_network;

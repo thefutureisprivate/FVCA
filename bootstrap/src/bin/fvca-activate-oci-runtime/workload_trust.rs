@@ -36,7 +36,6 @@ pub fn enroll() -> io::Result<bool> {
         let sealed = run(Command::new("/usr/bin/keyctl").args(["restrict_keyring", RING]));
         added?;
         sealed?;
-        run(Command::new("/usr/bin/modprobe").args(["--ignore-install", "loop"]))?;
     }
 
     let destination = Path::new(DESTINATION);

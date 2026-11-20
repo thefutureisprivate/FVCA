@@ -16,6 +16,7 @@ import time
 
 READY = b"FVCA_DEV_BASE_READY"
 FAIL = b"FVCA_BOOT_FAILED"
+KERNEL_SEALED = b"FVCA_KERNEL_POLICY_SEALED"
 ACTIVE = b"FVCA_HOST_STORAGE_ACTIVE"
 HOST_PROFILES = b"FVCA_BTRFS_PROFILES raid1 raid1 raid1"
 HOST_AUTHENTICATED = b"FVCA_HOST_STORAGE_AUTHENTICATED"
@@ -212,6 +213,8 @@ def check_hypervisor(args):
                 or not all(mark in output for mark in (HOST_PROFILES, ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", READY))
                 or (authenticated and not 0 <= output.find(HOST_AUTHENTICATED) < output.find(HOST_PROFILES))):
             raise ValueError(f"{name} did not boot with the encrypted mirror")
+        if not 0 <= output.find(KERNEL_SEALED) < output.find(READY):
+            raise ValueError(f"{name} reached readiness without sealing the Hypervisor kernel policy")
         print(f"{name} passed")
 
     wrong = (b"1" if password.startswith(b"0") else b"0") + password[1:]
@@ -279,6 +282,8 @@ def check_nested_guest(args):
     if (prompts != 2 or len(guests) != expected_launches or probe is None
             or FAIL in log or any(marker not in log for marker in required)):
         raise ValueError("the Hypervisor did not reach readiness with its authorized nested Guest")
+    if not 0 <= log.find(KERNEL_SEALED) < log.find(guest_ready):
+        raise ValueError("the Hypervisor launched the nested Guest before sealing its kernel policy")
     print("nested-guest passed")
     if args.nested_guest_shutdown:
         print("nested-guest-shutdown passed")
@@ -346,6 +351,8 @@ def check_guest(args):
         b"--rootfs /run/fvca/oci-probe-root",
     )):
         raise ValueError("the signed Guest did not execute its OCI runtime or render the approved Quadlet fixture")
+    if args.oci_runtime is not None and not 0 <= output.find(KERNEL_SEALED) < output.find(READY):
+        raise ValueError("the Service Guest reached readiness without sealing its kernel policy")
     if args.direct_boot is not None:
         check_direct_boot(args, output, data)
     print("guest passed")

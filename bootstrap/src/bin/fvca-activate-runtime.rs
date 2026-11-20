@@ -12,8 +12,8 @@ use std::process::{Command, ExitCode, Stdio};
 use fvca_initrd_bootstrap::runtime::{self, Runtime, hash};
 use fvca_initrd_bootstrap::{
     HYPERVISOR_EPOCH_ARGUMENT, backup_job, backup_policy, guest_boot, host_network, host_update,
-    host_workload, hypervisor_slot::Slot, hypervisor_trial, invalid, recovery, retention_policy,
-    run,
+    host_workload, hypervisor_slot::Slot, hypervisor_trial, invalid, kernel_policy, recovery,
+    retention_policy, run,
 };
 
 #[path = "fvca-activate-runtime/storage.rs"]
@@ -71,6 +71,13 @@ fn activate() -> io::Result<()> {
     fvca_allocator_binding::require_allocator()?;
     let cmdline = fs::read_to_string("/proc/cmdline")?;
     hypervisor_trial::arm_candidate_watchdog(&cmdline)?;
+    kernel_policy::require_signed_modules()?;
+    let smt = fs::read_to_string("/sys/devices/system/cpu/smt/control")?;
+    if !matches!(smt.as_str(), "forceoff\n" | "notsupported\n")
+        || fs::read_to_string("/sys/devices/system/cpu/smt/active")? != "0\n"
+    {
+        return Err(invalid("the Hypervisor requires SMT to be disabled"));
+    }
     if fs::read_to_string("/sys/module/kvm_intel/parameters/nested")?.trim_end() != "N"
         || !fs::metadata("/dev/kvm")?.file_type().is_char_device()
     {
@@ -78,6 +85,8 @@ fn activate() -> io::Result<()> {
             "Intel KVM must be available with nested virtualization disabled",
         ));
     }
+    // Guest trials and UEFI update/recovery transactions use these after switch-root.
+    kernel_policy::load_modules(&["loop", "vfat", "nls_cp437", "nls_iso8859-1"])?;
     let slot = Slot::load()?;
     let protected_epoch = Path::new("/usr/lib/fvca/hypervisor-epoch").try_exists()?;
     hypervisor_trial::verify_standing_key(&cmdline)?;
@@ -127,6 +136,7 @@ fn activate() -> io::Result<()> {
         hypervisor_trial::stop_candidate_watchdog_for_firmware(&cmdline)?;
         println!("FVCA_HOST_FIRMWARE_RECOVERY_REQUIRED");
         if !enroll_firmware(true)? {
+            kernel_policy::seal()?;
             println!("FVCA_VM_RUNTIME_ACTIVE {}", verified_runtime.extension);
             return Ok(());
         }
@@ -164,6 +174,7 @@ fn activate() -> io::Result<()> {
             &cmdline,
         ) {
             Ok(hypervisor_trial::ArmOutcome::RebootIntoTrial) => {
+                kernel_policy::seal()?;
                 return hypervisor_trial::reboot_into_trial();
             }
             Ok(hypervisor_trial::ArmOutcome::ContinueBoot) => (),
@@ -186,6 +197,7 @@ fn activate() -> io::Result<()> {
         }
     }
 
+    kernel_policy::seal()?;
     println!("FVCA_VM_RUNTIME_ACTIVE {}", verified_runtime.extension);
     Ok(())
 }
