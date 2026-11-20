@@ -7,7 +7,8 @@ use rustix::fs::{self, Mode, OFlags, ResolveFlags};
 use serde::Serialize;
 
 use super::{
-    Esrt, HEAD_SCHEMA, Head, OFFER, Offer, Version, activation::Activation, boot_id, live, uuid,
+    Esrt, HEAD_SCHEMA, Head, OFFER, Offer, Version, activation::Activation, boot, boot_id, live,
+    uuid,
 };
 use crate::{MANIFEST_BYTES, Result, Role, channel::digest, handoff, invalid};
 
@@ -24,6 +25,7 @@ pub(super) enum Evidence {
     Observed {
         boot_id: String,
         assessment: Assessment,
+        boot_evidence: boot::Evidence,
         #[serde(flatten)]
         observed: Observed,
     },
@@ -61,6 +63,7 @@ pub(super) fn inspect(directory: &File, activation: &Activation) -> Evidence {
     let observed = collect(directory, activation);
     match observed {
         Ok((assessment, observed)) => Evidence::Observed {
+            boot_evidence: boot::inspect(directory, &boot),
             boot_id: boot,
             assessment,
             observed,

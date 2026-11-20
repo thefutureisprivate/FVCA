@@ -1,6 +1,7 @@
 //! Authenticate an exact Host firmware offer and stage its cabinet for qualification.
 
 mod activation;
+mod boot;
 mod bus;
 mod capsule;
 mod live;

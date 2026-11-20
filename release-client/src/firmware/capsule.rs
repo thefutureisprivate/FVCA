@@ -77,17 +77,7 @@ pub(super) fn inspect(esrt: Esrt, target: u32, payload_bytes: u64) -> Delivery {
 fn live_route(esrt: &Esrt, target: u32, payload_bytes: u64) -> Result<(String, Route)> {
     let _lease = handoff::lock_install()?;
     handoff::require_idle()?;
-    let path = Path::new(efi::FIRMWARE_ESP_BINDING);
-    let file = state::open_regular(path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("verified firmware ESP binding: {error}"),
-        )
-    })?;
-    handoff::private_file(&file)?;
-    let mut binding = Vec::new();
-    file.take((ESP_PATH_LIMIT + size_of::<u64>() + 1) as u64)
-        .read_to_end(&mut binding)?;
+    let binding = read_binding()?;
     let (device_id, expected) = esp_binding(&binding)?;
     let efivars = File::from(fs::openat(CWD, EFIVARS, DIRECTORY, Mode::empty())?);
     let efivar_available = efivar_space(&fs::fstatfs(&efivars)?)?;
@@ -114,12 +104,41 @@ fn live_route(esrt: &Esrt, target: u32, payload_bytes: u64) -> Result<(String, R
     ))
 }
 
-fn efivar_space(space: &StatFs) -> io::Result<u64> {
+fn read_binding() -> io::Result<Vec<u8>> {
+    let path = Path::new(efi::FIRMWARE_ESP_BINDING);
+    let file = state::open_regular(path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("verified firmware ESP binding: {error}"),
+        )
+    })?;
+    handoff::private_file(&file)?;
+    let mut binding = Vec::new();
+    file.take((ESP_PATH_LIMIT + size_of::<u64>() + 1) as u64)
+        .read_to_end(&mut binding)?;
+    Ok(binding)
+}
+
+pub(super) fn verify_ordinary_boot() -> Result<u16> {
+    let binding = read_binding()?;
+    let (_, expected) = esp_binding(&binding)?;
+    let variables = File::from(fs::openat(CWD, EFIVARS, DIRECTORY, Mode::empty())?);
+    require_efivarfs(&fs::fstatfs(&variables)?)?;
+    require_secure_boot(&variables)?;
+    ordinary_boot(&variables, expected)
+}
+
+fn require_efivarfs(space: &StatFs) -> io::Result<()> {
     if space.f_type as u64 != EFIVARFS_MAGIC {
         return Err(invalid(
             "capsule routing requires the kernel efivarfs mount",
         ));
     }
+    Ok(())
+}
+
+fn efivar_space(space: &StatFs) -> io::Result<u64> {
+    require_efivarfs(space)?;
     // Linux reports QueryVariableInfo for nonvolatile runtime variables in
     // one-byte blocks, or a zero store size when it cannot query firmware.
     if space.f_bsize != 1
@@ -248,6 +267,14 @@ fn route(variables: &File, expected: &[u8], esrt: &Esrt, target: u32) -> Result<
     if esrt.last_attempt_version == target {
         return Err(invalid("ESRT already records an attempt at this capsule target").into());
     }
+    require_secure_boot(variables)?;
+    if mask(&read(variables, "OsIndicationsSupported")?, BOOT_RUNTIME)? & FILE_CAPSULE == 0 {
+        return Err(invalid("firmware does not advertise capsule-on-disk delivery").into());
+    }
+    ordinary_boot(variables, expected)
+}
+
+fn require_secure_boot(variables: &File) -> Result<()> {
     if efi::variable_data(&read(variables, "SecureBoot")?, BOOT_RUNTIME)? != [1]
         || efi::variable_data(&read(variables, "SetupMode")?, BOOT_RUNTIME)? != [0]
     {
@@ -255,9 +282,10 @@ fn route(variables: &File, expected: &[u8], esrt: &Esrt, target: u32) -> Result<
             invalid("capsule routing requires enabled Secure Boot outside Setup Mode").into(),
         );
     }
-    if mask(&read(variables, "OsIndicationsSupported")?, BOOT_RUNTIME)? & FILE_CAPSULE == 0 {
-        return Err(invalid("firmware does not advertise capsule-on-disk delivery").into());
-    }
+    Ok(())
+}
+
+fn ordinary_boot(variables: &File, expected: &[u8]) -> Result<u16> {
     match read(variables, "OsIndications") {
         Ok(raw) if mask(&raw, NON_VOLATILE)? == 0 => (),
         Ok(_) => return Err(invalid("another EFI indication is pending").into()),

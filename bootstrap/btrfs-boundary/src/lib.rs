@@ -269,7 +269,20 @@ pub fn headroom(pool: &File) -> io::Result<Headroom> {
     if devices != 2 || info.num_devices != devices {
         return Err(io::Error::other("the capture pool requires two Btrfs mirror members"));
     }
-    let mut spaces = Spaces { slots: 8, count: 0, entries: [Space::default(); 8] };
+    let [data, metadata, system] = raid1_free_space(pool)?;
+    Ok(Headroom { data, metadata, system, unallocated })
+}
+
+pub fn require_raid1_profiles(pool: &File) -> io::Result<()> {
+    raid1_free_space(pool).map(|_| ())
+}
+
+fn raid1_free_space(pool: &File) -> io::Result<[u64; 3]> {
+    let mut spaces = Spaces {
+        slots: 8,
+        count: 0,
+        entries: [Space::default(); 8],
+    };
     // SPACE_INFO takes a 16-byte header followed by slots records. The advertised
     // slot count is exactly the capacity of the inline array.
     if unsafe { ioctl(pool.as_raw_fd(), SPACE_INFO, &mut spaces as *mut Spaces) } < 0 {
@@ -288,16 +301,22 @@ pub fn headroom(pool: &File) -> io::Result<Headroom> {
             1 => 0, // DATA
             4 => 1, // METADATA
             2 => 2, // SYSTEM
-            _ => return Err(io::Error::other("unexpected Btrfs allocation profile during capture")),
+            _ => {
+                return Err(io::Error::other(
+                    "expected only Btrfs RAID1 allocation profiles",
+                ));
+            }
         };
         if entry.used > entry.total || free[index].replace(entry.total - entry.used).is_some() {
-            return Err(io::Error::other("invalid or duplicate Btrfs allocation profile during capture"));
+            return Err(io::Error::other(
+                "invalid or duplicate Btrfs RAID1 allocation profile",
+            ));
         }
     }
-    let [Some(data_free), Some(metadata_free), Some(system_free)] = free else {
-        return Err(io::Error::other("incomplete Btrfs space accounting during capture"));
+    let [Some(data), Some(metadata), Some(system)] = free else {
+        return Err(io::Error::other("incomplete Btrfs RAID1 space accounting"));
     };
-    Ok(Headroom { data: data_free, metadata: metadata_free, system: system_free, unallocated })
+    Ok([data, metadata, system])
 }
 
 pub fn require_capture_space(pool: &File, data: u64) -> io::Result<()> {

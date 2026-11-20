@@ -304,6 +304,28 @@ pub(crate) fn publish_firmware_esp(esp: &str) -> io::Result<()> {
     publish(Path::new(efi::FIRMWARE_ESP_BINDING), &binding)
 }
 
+pub(crate) fn publish_firmware_boot(
+    esp: &str,
+    epoch: &str,
+    active: &runtime::Activation,
+    filesystem: &str,
+    storage_policy_sha256: &str,
+) -> io::Result<()> {
+    use fvca_trial_authorization::firmware::{VERIFIED_BOOT, VerifiedBoot};
+
+    let epoch = epoch
+        .strip_prefix(crate::HYPERVISOR_EPOCH_ARGUMENT)
+        .and_then(|value| value.strip_prefix('='))
+        .ok_or_else(|| invalid("missing accepted firmware boot epoch"))?;
+    let boot = boot_id()?;
+    let contents = format!(
+        "FVCA-FIRMWARE-BOOT-1\nboot_id={boot}\nesp={esp}\ncore={}\nruntime={}\nepoch={epoch}\nfilesystem={filesystem}\nstorage_policy_sha256={storage_policy_sha256}\n",
+        active.core, active.extension,
+    );
+    VerifiedBoot::parse(&contents)?;
+    publish(Path::new(VERIFIED_BOOT), contents.as_bytes())
+}
+
 fn record_directory() -> io::Result<PathBuf> {
     let root = Path::new(HOST_DATA);
     let path = root.join("boot-trials");

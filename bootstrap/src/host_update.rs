@@ -176,7 +176,13 @@ pub fn activate_guest_if_selected() -> io::Result<()> {
     Ok(())
 }
 
-pub fn activate_firmware_if_selected(esp: &str) -> io::Result<()> {
+pub fn activate_firmware_if_selected(
+    esp: &str,
+    epoch: &str,
+    runtime: &crate::runtime::Activation,
+    filesystem: &str,
+    storage_policy_sha256: &str,
+) -> io::Result<()> {
     let Some(owner) = owner_for(FIRMWARE_STATE)? else {
         return Ok(());
     };
@@ -186,6 +192,15 @@ pub fn activate_firmware_if_selected(esp: &str) -> io::Result<()> {
     }
     if let Err(error) = crate::hypervisor_trial::publish_firmware_esp(esp) {
         eprintln!("FVCA_HOST_FIRMWARE_ESP_BLOCKED {error}");
+    }
+    if let Err(error) = crate::hypervisor_trial::publish_firmware_boot(
+        esp,
+        epoch,
+        runtime,
+        filesystem,
+        storage_policy_sha256,
+    ) {
+        eprintln!("FVCA_HOST_FIRMWARE_BOOT_EVIDENCE_BLOCKED {error}");
     }
     publish_depot(FIRMWARE_STATE, "fvca-firmware-update", &owner)?;
     enable_timer("fvca-firmware-update")?;

@@ -24,16 +24,18 @@ fn output(command: &mut Command) -> io::Result<Vec<u8>> {
     Ok(result.stdout)
 }
 
-fn token_digest(token: &[u8]) -> io::Result<Vec<u8>> {
+pub(super) fn sha256(input: &[u8]) -> io::Result<String> {
     let mut digest = Command::new("/usr/bin/sha256sum").env_clear()
         .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
-    let written = digest.stdin.take().expect("SHA-256 input is piped").write_all(token);
+    let written = digest.stdin.take().expect("SHA-256 input is piped").write_all(input);
     let result = digest.wait_with_output()?;
     written?;
     if !result.status.success() {
-        return Err(io::Error::other("could not hash the LUKS2 token"));
+        return Err(io::Error::other("could not hash the verified storage input"));
     }
-    Ok(result.stdout)
+    let text = std::str::from_utf8(&result.stdout).map_err(io::Error::other)?;
+    let digest = text.strip_suffix("  -\n").ok_or_else(|| invalid("invalid SHA-256 output"))?;
+    super::hash(digest).map(str::to_owned)
 }
 
 fn verify_header(uuid: &str, token: &str, expected: &str) -> io::Result<()> {
@@ -42,8 +44,7 @@ fn verify_header(uuid: &str, token: &str, expected: &str) -> io::Result<()> {
         return Err(invalid("copied LUKS2 header UUID does not match the signed selection"));
     }
     let json = output(Command::new(CRYPTSETUP).args(["token", "export", "--token-id", token, HEADER]))?;
-    let actual = token_digest(&json)?;
-    if actual.strip_suffix(b"  -\n") != Some(expected.as_bytes()) {
+    if sha256(&json)? != expected {
         return Err(invalid("LUKS2 TPM token does not match the signed selection"));
     }
     Ok(())

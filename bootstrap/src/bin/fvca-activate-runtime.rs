@@ -54,14 +54,24 @@ fn activate() -> io::Result<()> {
     }
     let verified_runtime = runtime::activate(Runtime::Vm, slot.as_ref().map(|slot| &slot.runtime))?;
     runtime::install_development_probe("fvca-vm-runtime-probe.service", PROBE)?;
-    storage::activate_if_selected(protected_epoch)?;
+    let storage = storage::activate_if_selected(protected_epoch)?;
     let esp = slot.as_ref().map(|slot| slot.esp.as_str());
+    let enroll_firmware = || {
+        if let (Some(esp), Some(epoch), Some(storage)) = (esp, epoch, &storage) {
+            host_update::activate_firmware_if_selected(
+                esp,
+                epoch,
+                &verified_runtime,
+                &storage.filesystem,
+                &storage.policy_sha256,
+            )?;
+        }
+        Ok::<(), io::Error>(())
+    };
     if fvca_trial_authorization::firmware::activation_pending()? {
         hypervisor_trial::stop_candidate_watchdog_for_firmware(&cmdline)?;
         println!("FVCA_HOST_FIRMWARE_RECOVERY_REQUIRED");
-        if protected_epoch && let Some(esp) = esp {
-            host_update::activate_firmware_if_selected(esp)?;
-        }
+        enroll_firmware()?;
         println!("FVCA_VM_RUNTIME_ACTIVE {}", verified_runtime.extension);
         return Ok(());
     }
@@ -94,9 +104,7 @@ fn activate() -> io::Result<()> {
         if guest.is_some() {
             host_update::activate_guest_if_selected()?;
         }
-        if protected_epoch && let Some(esp) = esp {
-            host_update::activate_firmware_if_selected(esp)?;
-        }
+        enroll_firmware()?;
     }
 
     println!("FVCA_VM_RUNTIME_ACTIVE {}", verified_runtime.extension);
