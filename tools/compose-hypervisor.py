@@ -20,7 +20,7 @@ import hypervisor_gpt
 from runtime_boot import (
     DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_CHANGE_SUPPORT,
     GUEST_CONFIG_KEY, GUEST_CONFIG_KEY_ARGUMENT, GUEST_LAUNCH_FILES, GUEST_VM_SETTINGS,
-    GUEST_VM_SUPPORT, WORKLOAD_TRUST_FILES,
+    GUEST_VM_SUPPORT, MANAGEMENT_ARGUMENT, MANAGEMENT_POLICY, MANAGEMENT_SUPPORT, WORKLOAD_TRUST_FILES,
     composition_archive, prepare_core, run, verify_initrd, write_disk,
 )
 from runtime_image import verify as verify_runtime
@@ -29,6 +29,9 @@ from workload_oci import parse_json, read_bytes
 
 
 PCR_POLICY_REFS = {"tpm2-auto": "fvca-host-storage-auto-v1", "tpm2-pin": "fvca-host-storage"}
+MANAGEMENT_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7",
+))
 ROLE_BOOT_OPTIONS = ("kvm_intel.nested=0", *DISABLE_AUTOMATIC_EXTENSIONS)
 ACTIVATION_FILES = (
     "etc/systemd/system/systemd-confext-initrd.service",
@@ -299,6 +302,50 @@ def guest_vm_settings(path):
     return ((GUEST_VM_SETTINGS, record),), (identity,)
 
 
+def management_selection(args, authorities):
+    if args.management_enrollment is None:
+        return (), (), ()
+    raw = read_bytes(args.management_enrollment, 4096)
+    policy = parse_json(raw)
+    if (not isinstance(policy, dict) or policy.keys() != {
+        "schema", "host", "address", "gateway_uid", "gateway_gid",
+        "tls_certificate_sha256", "operator_public_key",
+    } or policy["schema"] != "fvca-hypervisor-management-v1"):
+        raise ValueError("invalid Hypervisor management enrollment schema")
+    host = policy["host"]
+    if type(host) is not str or str(UUID(host)) != host or UUID(host).int == 0 or host == guest_boot_bundle.SERVICE_GUEST_ID:
+        raise ValueError("management enrollment requires a distinct Hypervisor identity")
+    address = policy["address"]
+    if type(address) is not str:
+        raise ValueError("management enrollment requires a literal IP and port")
+    literal, _, port = address.rpartition(":")
+    ip = ipaddress.ip_address(literal.removeprefix("[").removesuffix("]"))
+    if (not (ip.is_loopback or any(ip in network for network in MANAGEMENT_NETWORKS))
+            or not re.fullmatch(r"[0-9]{1,5}", port)
+            or not 1024 <= int(port) <= 65535 or address != (
+                f"[{ip}]:{int(port)}" if ip.version == 6 else f"{ip}:{int(port)}")
+            or "%" in address):
+        raise ValueError("management requires an explicit private IP and unprivileged port")
+    if any(type(policy[field]) is not int or not 1 <= policy[field] < 2**32 - 1
+           for field in ("gateway_uid", "gateway_gid")):
+        raise ValueError("invalid management gateway account")
+    for field in ("tls_certificate_sha256", "operator_public_key"):
+        value = policy[field]
+        if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None or int(value, 16) == 0:
+            raise ValueError("invalid management certificate or operator key pin")
+    operator = bytes.fromhex(policy["operator_public_key"])
+    certs = (args.boot_certificate, args.runtime_certificate, args.guest_release_certificate)
+    der = bytes.fromhex("302a300506032b6570032100") + operator
+    if operator in {key for _, key in authorities} or any(
+        run("openssl", "pkey", "-pubin", "-outform", "DER", input=guest_boot_bundle.public_key(certificate),
+            capture_output=True).stdout == der for certificate in certs
+    ):
+        raise ValueError("management requests require a distinct Ed25519 operator key")
+    return ((MANAGEMENT_POLICY, raw),), (f"{MANAGEMENT_ARGUMENT}={hashlib.sha256(raw).hexdigest()}",), (
+        (MANAGEMENT_POLICY, operator),
+    )
+
+
 def assemble(args, work):
     storage = host_storage.selection(args.storage) if args.storage is not None else None
     resources, resource_arguments = guest_vm_settings(args.guest_vm_settings)
@@ -346,7 +393,7 @@ def assemble(args, work):
         RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE, TRIAL_FILE,
         TRIAL_CANDIDATE_FILE, TRIAL_WATCHDOG_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY,
         GUEST_TRIAL_KEY, GUEST_BASE_EPOCH, EPOCH_FILE, *UPDATE_FILES, *GUEST_UPDATE_FILES,
-        *FIRMWARE_UPDATE_FILES, UPDATE_PEER, GUEST_VM_SETTINGS, GUEST_CONFIG_KEY,
+        *FIRMWARE_UPDATE_FILES, UPDATE_PEER, GUEST_VM_SETTINGS, GUEST_CONFIG_KEY, MANAGEMENT_POLICY,
     ))
     required = ACTIVATION_FILES
     if resources:
@@ -359,6 +406,11 @@ def assemble(args, work):
         marker = runtime_work / "tree" / GUEST_CONFIG_CHANGE_SUPPORT
         if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
             raise ValueError("the signed VM runtime lacks Guest configuration change support")
+    if args.management_enrollment is not None:
+        required += (str(MANAGEMENT_SUPPORT), "usr/bin/sha256sum")
+        marker = runtime_work / "tree" / MANAGEMENT_SUPPORT
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
+            raise ValueError("the signed VM runtime lacks management API support")
     if storage is not None:
         required += ("usr/lib/fvca/host-storage-support-v4", "usr/bin/dmsetup",
                      "usr/lib/udev/rules.d/12-fvca-host-storage.rules")
@@ -444,6 +496,7 @@ def assemble(args, work):
     candidate_trial, trial_arguments = trial_selection(args.boot_trial_candidate, ids, guest_hash,
                                                         candidate=True)
     authorities = approval_keys(args)
+    management, management_arguments, operators = management_selection(args, authorities)
     guest_epoch = ((GUEST_BASE_EPOCH, f"{args.guest_trial_epoch}\n".encode("ascii")),) if args.guest_trial_epoch else ()
     trial_key_arguments = tuple(f"{TRIAL_KEY_ARGUMENT}={key.hex()}" for name, key in authorities
                                 if name == STANDING_TRIAL_KEY)
@@ -451,18 +504,19 @@ def assemble(args, work):
                                         if name == GUEST_CONFIG_KEY)
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
-        extra=(*extra, *epoch, *guest, *resources, *backup, *backup_job_selection(args.backup_job, backup),
+        extra=(*extra, *epoch, *guest, *resources, *management, *backup, *backup_job_selection(args.backup_job, backup),
                *restore_selection(args.restore_authorization, backup),
                *retention_selection(args.retention_policy, backup),
                *stable_trial, *candidate_trial, *watchdog, *guest_epoch,
-               *authorities, *update_selection(args, authorities)),
+               *authorities, *update_selection(args, (*authorities, *operators))),
     )
     if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT, TRIAL_WATCHDOG_ARGUMENT,
-                                    GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_KEY_ARGUMENT)
+                                    GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_KEY_ARGUMENT, MANAGEMENT_ARGUMENT)
            for arg in cmdline.split()):
         raise ValueError("shared core already configures a Hypervisor epoch, trial or Guest configuration")
     cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments,
-                        *trial_key_arguments, *watchdog_arguments, *resource_arguments, *configuration_key_arguments))
+                        *trial_key_arguments, *watchdog_arguments, *resource_arguments, *configuration_key_arguments,
+                        *management_arguments))
     immutable = None
     if ids is None:
         disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)
@@ -496,6 +550,8 @@ def main():
     parser.add_argument("--guest-vm-settings", type=Path, help="typed Service Guest CPU and RAM settings for this Host UKI")
     parser.add_argument("--guest-configuration-public-key", type=Path,
                         help="pin the independent Ed25519 signer for Guest configuration changes")
+    parser.add_argument("--management-enrollment", type=Path,
+                        help="pin a Host management identity, listener, certificate and read-only operator")
     parser.add_argument("--guest-trial-public-key", type=Path, help="pin the independent Service Guest trial signer")
     parser.add_argument("--guest-trial-epoch", type=int, help="initial epoch of the enrolled Service Guest release")
     parser.add_argument("--gpt-slot", type=UUID, help="assign one unique UUID to a self-contained Hypervisor GPT slot image")
@@ -557,6 +613,8 @@ def main():
         parser.error("a GPT slot requires its authorized Guest boot bundle")
     if args.epoch_policy is not None and args.gpt_slot is None:
         parser.error("a protected Hypervisor epoch requires a GPT slot")
+    if args.management_enrollment is not None and (args.epoch_policy is None or args.restore_authorization is not None):
+        parser.error("management enrollment requires an ordinary epoch-protected Hypervisor")
     if args.gpt_sector_size is not None and args.gpt_slot is None:
         parser.error("sector size is only configurable for a GPT slot image")
     if args.host_data_disk is not None and (args.gpt_slot is None or args.storage is None):

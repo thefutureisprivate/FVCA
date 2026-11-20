@@ -1,16 +1,16 @@
 //! Enroll Host update services from the verified UKI.
 
 use std::fmt::Write as _;
-use std::fs;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Seek, Write};
 use std::net::IpAddr;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
 
 use fvca_trial_authorization::{
-    GUEST_CAPTURE_LOCK, GUEST_OPERATION_LOCK, PEER_ENROLLMENT, PROMOTION_ENROLLMENT,
-    peer_partitions,
+    GUEST_CAPTURE_LOCK, GUEST_OPERATION_LOCK, MANAGEMENT_POLICY, MANAGEMENT_POLICY_BYTES,
+    PEER_ENROLLMENT, PROMOTION_ENROLLMENT, management_binding, peer_partitions,
 };
 
 use crate::{invalid, run};
@@ -22,6 +22,36 @@ const HOST_DATA: &str = "/run/fvca/host-data";
 const RUN: &str = "/run/fvca";
 const SIGNED: &str = "/usr/lib/fvca";
 const UNITS: &str = "/run/systemd/system";
+
+pub fn publish_management_enrollment(cmdline: &str) -> io::Result<()> {
+    let selected = management_binding(cmdline)?;
+    let path = Path::new(SIGNED).join("management.json");
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && selected.is_none() => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let meta = file.metadata()?;
+    if !meta.is_file() || !(1..=MANAGEMENT_POLICY_BYTES as u64).contains(&meta.len()) {
+        return Err(invalid("invalid signed Hypervisor management enrollment"));
+    }
+    let actual = crate::recovery::sha256(file.try_clone()?)?;
+    if selected != Some(&actual) {
+        return Err(invalid("Hypervisor management enrollment differs from its signed UKI"));
+    }
+    let support = fs::symlink_metadata("/sysroot/usr/lib/fvca/management-api-v1")?;
+    if !support.is_file() || support.len() != 0 {
+        return Err(invalid("the verified Hypervisor runtime lacks management API support"));
+    }
+    file.rewind()?;
+    let mut enrollment = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(MANAGEMENT_POLICY)?;
+    io::copy(&mut file, &mut enrollment)?;
+    enrollment.flush()
+}
 
 fn private_directory(meta: &fs::Metadata, device: u64) -> bool {
     meta.is_dir()

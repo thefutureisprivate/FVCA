@@ -21,11 +21,13 @@ jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
 object = { version = "=0.41.0", default-features = false, features = ["pe", "read_core", "std"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 rustix = { version = "1", features = ["event", "fs", "mount", "process", "thread"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 tempfile = "3"
-tokio = { version = "1", features = ["fs", "io-util", "net", "rt", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "net", "rt", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tough = { version = "=0.24.0", default-features = false }
 url = { version = "2", features = ["serde"] }

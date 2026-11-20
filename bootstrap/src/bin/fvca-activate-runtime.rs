@@ -171,6 +171,9 @@ fn activate() -> io::Result<()> {
         hypervisor_trial::publish_running_context(esp, &verified_runtime, guest, epoch)?;
         host_update::activate_if_selected()?;
     }
+    if !recovering && !firmware_pending {
+        host_update::publish_management_enrollment(&cmdline)?;
+    }
     if !recovering && !Path::new("/run/fvca/boot-trial-started").try_exists()? {
         if guest.is_some() {
             host_update::activate_guest_if_selected()?;

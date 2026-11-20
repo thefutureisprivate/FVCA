@@ -26,6 +26,9 @@ GUEST_CONFIG_ARGUMENT = "fvca.guest_config"
 GUEST_CONFIG_KEY = "guest-configuration-key"
 GUEST_CONFIG_KEY_ARGUMENT = "fvca.guest_config_key"
 GUEST_CONFIG_CHANGE_SUPPORT = Path("usr/lib/fvca/guest-configuration-change-v1")
+MANAGEMENT_POLICY = "management.json"
+MANAGEMENT_ARGUMENT = "fvca.management"
+MANAGEMENT_SUPPORT = Path("usr/lib/fvca/management-api-v1")
 
 
 def run(*args, **kwargs):

@@ -787,6 +787,28 @@ cat change.sig change.txt > guest-configuration-change.bin
 
 Publish the approval as `hypervisor-EPOCH-MANIFEST_SHA256-guest-configuration-change.bin`. The independently qualified TUF channel release lists its exact `bytes` and `sha256` under `guest_configuration_change`, alongside `trial_approval` and `promotion_approval`. The scheduled updater checks the expected revision and exact signed UKIs before writing the peer slot. `accepted_guest_configuration_revision` reports acceptance into the trial inbox. The Host records the revision as committed only after the authorized trial passes local Guest health and the promoted boot verifies the same approval. A superseded slot cannot start the Guest with its old settings after commitment.
 
+#### Host management protocol development
+
+`compose-hypervisor.py --management-enrollment FILE` binds the exact enrollment JSON to the signed Hypervisor UKI. Supply the same file for both slots. Its schema is `fvca-hypervisor-management-v1` and its fields are `host` (enrolled Host UUID), `address` (literal private IP and port), `gateway_uid`, `gateway_gid`, `tls_certificate_sha256` (leaf certificate DER digest), and `operator_public_key` (hex-encoded Ed25519 public key dedicated to status and preflight). The initrd publishes the verified record at `/run/fvca/management.json`. Standing Host updates preserve its digest. Operator or certificate changes require explicit enrollment.
+
+The two development entry points are `release-client --serve-management-broker` and `release-client --serve-management`. The root broker uses `/run/fvca-management-broker/broker.sock` and accepts the enrolled gateway account. The gateway uses that unprivileged UID and GID and takes `tls.crt` and `tls.key` from its credentials directory. Service confinement and production enablement require separate qualification.
+
+Connect with TLS 1.3, verify the enrolled server certificate and negotiate ALPN `fvca-management/1`. Each connection carries one request and response. Each frame starts with a four-byte big-endian length. The request frame contains the 64-byte Ed25519 signature followed by the exact UTF-8 JSON signed by the read operator. The response frame contains JSON. Requests and responses are limited to 2,048 and 4,096 bytes, respectively.
+
+```json
+{
+  "schema": "fvca-management-request-v1",
+  "host": "367f5cbc-c46a-437d-af72-5d96d805d234",
+  "guest": "e629aa43-af11-47c6-aedc-a2dc47f1cc3a",
+  "nonce": "fef3d5c1b88198ab8fa6de0a55363735",
+  "issued_at": 1795190400,
+  "expires": 1795190430,
+  "operation": {"type": "preflight", "expected": null, "vcpus": 3, "memory_mib": 2560}
+}
+```
+
+Generate a fresh random nonce and use current Unix seconds with a validity window of at most 30 seconds. Use `{"type":"status"}` to read boot-selected settings, Host trial state and separate updater-owned release observations. For preflight, supply `expected: null` for the default profile or `expected: {"revision": 1, "sha256": "..."}` from status. The broker returns the candidate settings revision, its canonical digest and the required activation scope. A stale revision, a changed digest or a running Host trial produces a typed refusal. Check the `fvca-management-response-v1` schema, both identities and the echoed nonce on each response. Apply continues through the signed Host channel and trial described above.
+
 The Hypervisor verifies that the Guest agent answers a ping before reporting readiness. The agent runs in the Guest's SELinux policy on a fixed virtio-serial channel. Its verified configuration allows synchronization, ping, shutdown, freeze status, mount-list freeze, and thaw RPCs. SELinux confines freeze and thaw to the Btrfs mount at `/run/fvca/guest-data`. Shutdown requires a normal libvirt lifecycle event and confirmation that QEMU exited. The Hypervisor retains the disk attachment while the VM may still be using it. [QEMU Guest Agent configuration](https://www.qemu.org/docs/master/interop/qemu-ga.html) · [libvirt domain lifecycle events](https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainEventStoppedDetailType)
 
 `tests/storage-lab.sh` provisions that layout on disposable disks. On a KVM test machine that exposes Intel VMX to the outer Hypervisor VM, run the nested qualification with `--nested-guest`. The Host reports `FVCA_SERVICE_GUEST_READY` after the Guest reports its direct-boot policy, exact OCI runtime, and verified root readiness.

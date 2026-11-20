@@ -23,6 +23,12 @@ impl Resources {
         vcpus: 2,
         memory_mib: 2048,
     };
+
+    fn permits(vcpus: u64, memory_mib: u64) -> bool {
+        (1..=4).contains(&vcpus)
+            && (1024..=4096).contains(&memory_mib)
+            && memory_mib.is_multiple_of(256)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -32,6 +38,29 @@ pub struct Configuration {
 }
 
 impl Configuration {
+    pub fn from_resources(revision: u64, resources: Resources) -> io::Result<Self> {
+        if revision == 0 || !Resources::permits(resources.vcpus.into(), resources.memory_mib.into())
+        {
+            return Err(invalid(
+                "invalid Guest configuration revision or machine resources",
+            ));
+        }
+        Ok(Self {
+            revision,
+            resources,
+        })
+    }
+
+    pub fn record(&self) -> io::Result<String> {
+        Ok(format!(
+            "FVCA-SERVICE-GUEST-VM-2\nguest={}\nrevision={}\nvcpus={}\nmemory_mib={}\n",
+            SERVICE_GUEST_UUID.to_str().map_err(io::Error::other)?,
+            self.revision,
+            self.resources.vcpus,
+            self.resources.memory_mib,
+        ))
+    }
+
     pub fn parse(data: &str) -> io::Result<Self> {
         if data.len() > LIMIT {
             return Err(invalid(
@@ -56,9 +85,7 @@ impl Configuration {
         let memory_mib = field(fields.next(), "memory_mib=")?;
         if fields.next() != Some("")
             || fields.next().is_some()
-            || !(1..=4).contains(&vcpus)
-            || !(1024..=4096).contains(&memory_mib)
-            || !memory_mib.is_multiple_of(256)
+            || !Resources::permits(vcpus, memory_mib)
         {
             return Err(invalid(
                 "Service Guest resources exceed the approved machine profile",

@@ -126,6 +126,49 @@ struct Active {
     manifest_sha256: String,
 }
 
+#[derive(Serialize)]
+pub(super) struct ObservedRelease {
+    epoch: u64,
+    sequence: u64,
+    manifest_sha256: String,
+}
+
+pub(super) fn observed_host_release() -> Result<Option<ObservedRelease>> {
+    let directory = Path::new("/run/fvca/host-data/os-update");
+    let pinned = match handoff::require_pool_directory(directory) {
+        Ok(pinned) => pinned,
+        Err(error)
+            if error.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    use std::os::fd::AsRawFd;
+    let path = std::path::PathBuf::from(format!("/proc/self/fd/{}", pinned.as_raw_fd()))
+        .join("active-os-release.json");
+    let data = match state::read(&path, MANIFEST_BYTES) {
+        Ok(data) => data,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let active: Active = serde_json::from_slice(&data)?;
+    if active.role != Role::Hypervisor
+        || active.epoch == 0
+        || active.sequence == 0
+        || active.slot.is_none()
+        || active.guest_bundle.is_some()
+        || !valid_digest(&active.manifest_sha256)
+    {
+        return Err(invalid("invalid observed Host release record").into());
+    }
+    Ok(Some(ObservedRelease {
+        epoch: active.epoch,
+        sequence: active.sequence,
+        manifest_sha256: active.manifest_sha256,
+    }))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Head {

@@ -24,6 +24,22 @@ pub const PROMOTED_RELEASE: &str = "/run/fvca/promoted-os-release";
 pub const STANDING_TRIAL: &str = "FVCA-HYPERVISOR-STANDING-TRIAL-2";
 pub const STANDING_PROMOTION: &str = "FVCA-HYPERVISOR-STANDING-PROMOTION-2";
 pub const WATCHDOG_ARGUMENT: &str = "fvca.trial_watchdog_seconds";
+pub const MANAGEMENT_ARGUMENT: &str = "fvca.management";
+pub const MANAGEMENT_POLICY: &str = "/run/fvca/management.json";
+pub const MANAGEMENT_POLICY_BYTES: usize = 4096;
+
+pub fn management_binding(cmdline: &str) -> io::Result<Option<&str>> {
+    let mut markers = cmdline
+        .split_ascii_whitespace()
+        .filter(|arg| arg.split('=').next() == Some(MANAGEMENT_ARGUMENT));
+    let Some(marker) = markers.next() else {
+        return Ok(None);
+    };
+    if markers.next().is_some() {
+        return Err(invalid("duplicate management enrollment binding"));
+    }
+    Ok(Some(digest(marker, "fvca.management=")?))
+}
 
 pub struct Promotion<'a> {
     pub trial_body: &'a str,

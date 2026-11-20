@@ -160,10 +160,11 @@ struct ReleaseEpoch<'a> {
 struct VerifiedLoader {
     sha256: [u8; 32],
     guest_configuration: GuestPolicy,
+    management_enrollment: Option<String>,
 }
 
 impl VerifiedLoader {
-    fn require_guest_configuration(
+    fn require_host_configuration(
         &self,
         candidate: &Self,
         running: bool,
@@ -171,6 +172,9 @@ impl VerifiedLoader {
     ) -> Result<()> {
         let stable = &self.guest_configuration;
         let next = &candidate.guest_configuration;
+        if self.management_enrollment != candidate.management_enrollment {
+            return Err(invalid("Host updates must preserve the management enrollment").into());
+        }
         if stable.authority != next.authority {
             return Err(invalid(
                 "Host updates must preserve the enrolled Guest configuration authority",
@@ -194,11 +198,22 @@ impl VerifiedLoader {
             }
             None => (),
         }
-        if running && *stable != guest_configuration::running()?.0 {
-            return Err(invalid(
-                "the installed stable UKI differs from the running Guest configuration",
-            )
-            .into());
+        if running {
+            if *stable != guest_configuration::running()?.0 {
+                return Err(invalid(
+                    "the installed stable UKI differs from the running Guest configuration",
+                )
+                .into());
+            }
+            let args = state::read(Path::new("/proc/cmdline"), 32 * 1024)?;
+            if fvca_trial_authorization::management_binding(std::str::from_utf8(&args)?)?
+                != self.management_enrollment.as_deref()
+            {
+                return Err(invalid(
+                    "the installed stable UKI differs from the running management enrollment",
+                )
+                .into());
+            }
         }
         Ok(())
     }
@@ -284,7 +299,7 @@ fn tool(program: &str, args: &[&Path]) -> Result<()> {
     Ok(())
 }
 
-fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<GuestPolicy> {
+fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<(GuestPolicy, Option<String>)> {
     let uki::Policy { cmdline, pcrsig } = uki::read(efi)?;
     let mut epochs = cmdline
         .split_ascii_whitespace()
@@ -357,7 +372,10 @@ fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<GuestPolicy> 
             );
         }
     }
-    Ok(GuestPolicy::parse(&cmdline)?)
+    Ok((
+        GuestPolicy::parse(&cmdline)?,
+        fvca_trial_authorization::management_binding(&cmdline)?.map(str::to_owned),
+    ))
 }
 
 fn verify_auto_profile(pcrsig: Option<&str>, fingerprint: &str) -> Result<()> {
@@ -404,7 +422,7 @@ fn loader(
         &[Path::new("--cert"), &fd_path(cert), &efi],
     )?;
     let signed = state::open_regular(&efi)?;
-    let guest_configuration = verify_epoch(&signed, epoch)?;
+    let (guest_configuration, management_enrollment) = verify_epoch(&signed, epoch)?;
     let bytes = signed.metadata()?.len();
     let hash = digest(&signed, Extent { start: 0, bytes })?;
     if epoch.trial.is_some_and(|trial| {
@@ -418,6 +436,7 @@ fn loader(
     Ok(VerifiedLoader {
         sha256: hash,
         guest_configuration,
+        management_enrollment,
     })
 }
 
@@ -716,7 +735,7 @@ impl StandingSite {
                 trial_key: Some(trial_key),
             },
         )?;
-        stable_loader.require_guest_configuration(&candidate_loader, running, guest_change)?;
+        stable_loader.require_host_configuration(&candidate_loader, running, guest_change)?;
         self.require_floor(active.1, selected.epoch)
     }
 
@@ -893,7 +912,7 @@ fn install_reviewed(
         &next_epoch,
     )?;
     if standing.is_some() {
-        stable_loader.require_guest_configuration(
+        stable_loader.require_host_configuration(
             &candidate_loader,
             live.is_some(),
             live.and_then(|item| item.guest_change),
@@ -988,14 +1007,23 @@ mod tests {
                 binding: Some(binding(9, "a")),
                 authority: Some([3; 32]),
             },
+            management_enrollment: None,
         };
         let candidate = |binding, authority| VerifiedLoader {
             sha256: [2; 32],
             guest_configuration: GuestPolicy { binding, authority },
+            management_enrollment: None,
         };
         let enrolled = Some([3; 32]);
         let unchanged = candidate(Some(binding(9, "a")), enrolled);
-        stable.require_guest_configuration(&unchanged, false, None)?;
+        stable.require_host_configuration(&unchanged, false, None)?;
+        let mut changed_enrollment = candidate(Some(binding(9, "a")), enrolled);
+        changed_enrollment.management_enrollment = Some("e".repeat(64));
+        assert!(
+            stable
+                .require_host_configuration(&changed_enrollment, false, None)
+                .is_err()
+        );
         for change in [
             None,
             Some(binding(8, "a")),
@@ -1004,16 +1032,16 @@ mod tests {
         ] {
             assert!(
                 stable
-                    .require_guest_configuration(&candidate(change, enrolled), false, None)
+                    .require_host_configuration(&candidate(change, enrolled), false, None)
                     .is_err()
             );
         }
         let default = candidate(None, None);
-        default.require_guest_configuration(&candidate(None, None), false, None)?;
+        default.require_host_configuration(&candidate(None, None), false, None)?;
         for changed_key in [None, Some([4; 32])] {
             assert!(
                 stable
-                    .require_guest_configuration(
+                    .require_host_configuration(
                         &candidate(Some(binding(9, "a")), changed_key),
                         false,
                         None
@@ -1023,7 +1051,7 @@ mod tests {
         }
         assert!(
             default
-                .require_guest_configuration(&stable, false, None)
+                .require_host_configuration(&stable, false, None)
                 .is_err()
         );
         let mut grant = guest_configuration::Grant {
@@ -1036,15 +1064,15 @@ mod tests {
             packet: Vec::new(),
         };
         let changed = candidate(Some(binding(10, "b")), enrolled);
-        stable.require_guest_configuration(&changed, false, Some(&grant))?;
+        stable.require_host_configuration(&changed, false, Some(&grant))?;
         assert!(
             stable
-                .require_guest_configuration(&unchanged, false, Some(&grant))
+                .require_host_configuration(&unchanged, false, Some(&grant))
                 .is_err()
         );
         assert!(
             stable
-                .require_guest_configuration(
+                .require_host_configuration(
                     &candidate(Some(binding(10, "b")), None),
                     false,
                     Some(&grant)
@@ -1054,14 +1082,14 @@ mod tests {
         grant.change.previous = Some(binding(9, "b"));
         assert!(
             stable
-                .require_guest_configuration(&changed, false, Some(&grant))
+                .require_host_configuration(&changed, false, Some(&grant))
                 .is_err()
         );
         grant.change.previous = Some(binding(9, "a"));
         grant.authority = [4; 32];
         assert!(
             stable
-                .require_guest_configuration(&changed, false, Some(&grant))
+                .require_host_configuration(&changed, false, Some(&grant))
                 .is_err()
         );
         Ok(())

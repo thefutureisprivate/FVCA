@@ -5,6 +5,7 @@ mod gpt;
 mod guest_configuration;
 mod handoff;
 mod install;
+mod management;
 mod state;
 
 use std::collections::HashSet;
@@ -509,6 +510,8 @@ fn run() -> Result<()> {
             Some("--reconcile-firmware-update") => return firmware::reconcile_scheduled(),
             Some("--serve-firmware-writer") => return firmware::serve_writer(),
             Some("--guest-configuration-status") => return guest_configuration::report(),
+            Some("--serve-management-broker") => return runtime()?.block_on(management::broker()),
+            Some("--serve-management") => return runtime()?.block_on(management::gateway()),
             _ => (),
         }
     }
