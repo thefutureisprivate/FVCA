@@ -1,4 +1,5 @@
 mod depot;
+mod install;
 mod state;
 
 use std::collections::HashSet;
@@ -106,13 +107,13 @@ struct Manifest {
 }
 
 impl Manifest {
-    fn members(&self, selection: &Selection) -> io::Result<Vec<(&'static str, &Member)>> {
-        if self.schema != "fvca-os-release-v1" || self.epoch != selection.epoch {
+    fn members(&self, role: Role, epoch: u64) -> io::Result<Vec<(&'static str, &Member)>> {
+        if self.schema != "fvca-os-release-v1" || self.epoch == 0 || self.epoch != epoch {
             return Err(invalid(
                 "release schema or epoch differs from the authorized selection",
             ));
         }
-        let mut members = match (&self.composition, selection.role) {
+        let mut members = match (&self.composition, role) {
             (
                 Composition::Hypervisor {
                     boot,
@@ -133,6 +134,13 @@ impl Manifest {
             _ => return Err(invalid("release composition changes the authorized role")),
         };
         members.push((QUALIFICATION, &self.qualification));
+        if members.iter().any(|(_, member)| {
+            member.bytes == 0 || member.bytes == u64::MAX || !valid_digest(&member.sha256)
+        }) {
+            return Err(invalid(
+                "invalid member digest or length in release manifest",
+            ));
+        }
         Ok(members)
     }
 }
@@ -350,12 +358,9 @@ async fn stage(repo: &Repository, selection: &Selection, parent: &Path) -> Resul
         return Err(invalid("release manifest length differs from authorization").into());
     }
     let release: Manifest = serde_json::from_slice(&manifest)?;
-    let members = release.members(selection)?;
+    let members = release.members(selection.role, selection.epoch)?;
     let mut total = length;
     for (name, member) in &members {
-        if !valid_digest(&member.sha256) {
-            return Err(invalid("invalid digest in release manifest").into());
-        }
         let target_bytes =
             check_target(repo, &selection.name(name)?, member.bytes, &member.sha256)?;
         if target_bytes != member.bytes {
@@ -399,7 +404,13 @@ async fn stage(repo: &Repository, selection: &Selection, parent: &Path) -> Resul
     Ok(destination)
 }
 
-async fn intake(root: &Path, depot: &Path, state_dir: &Path, selection_path: &Path) -> Result<()> {
+async fn intake(
+    root: &Path,
+    depot: &Path,
+    state_dir: &Path,
+    selection_path: &Path,
+    operation: Option<install::Operation<'_>>,
+) -> Result<()> {
     let selection: Selection =
         serde_json::from_slice(&state::read(selection_path, MANIFEST_BYTES)?)?;
     selection.validate()?;
@@ -412,6 +423,9 @@ async fn intake(root: &Path, depot: &Path, state_dir: &Path, selection_path: &Pa
     let depot = Depot::open(depot, selection.max_release_bytes)?;
     let repo = load_repository(depot, state_dir, root, scratch.path()).await?;
     let location = stage(&repo, &selection, &staging).await?;
+    if let Some(operation) = operation {
+        return install::execute(operation, &selection, state_dir);
+    }
     println!(
         "FVCA_RELEASE_STAGED {} {} {}",
         selection.role.prefix(),
@@ -426,17 +440,30 @@ fn run() -> Result<()> {
         .skip(1)
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    let [root, depot, state, selection] = operands.as_slice() else {
-        return Err(invalid(
-            "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON",
-        )
-        .into());
+    let [root, depot, state, selection, options @ ..] = operands.as_slice() else {
+        return Err(usage().into());
+    };
+    let operation = match options {
+        [] => None,
+        [option, slots] if option.as_os_str() == "--initialize-slots" => {
+            Some(install::Operation::Initialize(slots))
+        }
+        [option, slots, active] if option.as_os_str() == "--prepare-inactive" => {
+            Some(install::Operation::Prepare { slots, active })
+        }
+        _ => return Err(usage().into()),
     };
     tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()?
-        .block_on(intake(root, depot, state, selection))
+        .block_on(intake(root, depot, state, selection, operation))
+}
+
+fn usage() -> io::Error {
+    invalid(
+        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD]",
+    )
 }
 
 fn main() {

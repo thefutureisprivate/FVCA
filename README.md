@@ -113,6 +113,23 @@ Run `tests/check-release-intake.py` with Python TUF 7.0.1 and securesystemslib 1
 
 Use the same Python environment for `tests/check-release-https.py --client FILE --fixture INTAKE_TEST_OUTPUT --output NEW_DIRECTORY`. It serves the signed fixtures over loopback TLS and checks CA and server-name validation, proxy and redirect handling, size and time bounds, recovery from an interrupted transfer, and persisted rollback checks.
 
+### Prepare a file-backed A/B slot
+
+Use a private `0700` Btrfs slot store per role. To provision the initial boot tuple, append `--initialize-slots SLOT_STORE` to the intake command. This creates `slot-a` in an empty store and verifies the same slot on retry. Use the existing role boot verifier when booting the installed images.
+
+For an update, obtain the active slot record from the trusted boot controller and hold its boot-selection lease during preparation. The record identifies the booted slot and its exact release manifest. For example, an active slot A uses `{"slot":"a","epoch":17,"manifest_sha256":"ACTIVE_MANIFEST_SHA256"}` with its actual digest. Keep the active release eligible under the independently authorized epoch floor until the new release has passed trial boot.
+
+```sh
+release-client/target/release/fvca-release-client trusted-root.json depot.json inbox next-release.json \
+  --prepare-inactive /srv/fvca/hypervisor-slots active-slot.json
+```
+
+The coordinator verifies the active tuple, then invokes systemd-sysupdate 262.1 with a private alternate root and an exact source digest from the TUF intake. It verifies the installed manifest and every member again, flushes the tuple, and publishes the inactive slot with an atomic directory rename. An identical retry verifies the existing inactive tuple. The active slot remains the recovery path throughout preparation. A forced stop before publication may leave a private `.prepare-*` directory, which can be removed after the installer exits.
+
+This file-backed preparation works with the current Hypervisor and Service Guest bundles in the lab. The physical EFI/GPT slot installer, automated boot selection and health commit, and independently protected epoch remain separate release gates. [systemd-sysupdate transfer definitions](https://www.freedesktop.org/software/systemd/man/latest/sysupdate.d.html)
+
+`tests/check-release-slots.py` uses the same Python TUF environment. Supply two matched `--active-boot`/`--active-guest` and `--next-boot`/`--next-guest` pairs, their `--vm-runtime`, the `--client`, and a new Btrfs `--output` directory on the images' filesystem. The fixture verifies both complete slots after a transfer interruption and after retrying and replacing the inactive tuple.
+
 ## Hypervisor runtime candidate
 
 The separate mkosi recipe builds `vm-runtime.raw`, a signed EROFS system extension. It contains QEMU, the modular libvirt QEMU, log and lock daemons, the selected OVMF firmware and restic. The VMM is built offline from the pinned upstream QEMU release and the build checks that KVM is its only accelerator. The development appliance uses private UNIX sockets for libvirt and requires SELinux confinement for QEMU processes. The build strips Fedora's automatic service hooks and management commands before signing, records the exact core root hash in the extension and checks the shared package versions. [QEMU release archive and signing key](https://www.qemu.org/download/)
