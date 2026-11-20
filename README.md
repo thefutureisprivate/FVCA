@@ -1,6 +1,6 @@
 # Fedora Verified Compute Appliance
 
-The FVCA design v0.4.5 defines a VM-only Hypervisor and an OCI Service Guest. Both development roles use a shared x86-64 boot image. The Fedora 45 mkosi build produces a disk with a signed Unified Kernel Image (UKI), a read-only EROFS root, a dm-verity hash tree, and a detached root hash signature in its own GPT partition. The UKI embeds the expected root hash and execution policy. A Rust initramfs entrypoint loads dm-verity with signature enforcement before systemd attaches the global BPF execution policy. The kernel verifies the detached signature during root activation. Systemd closes the initramfs trust window after switch-root. [systemd execution policy](https://www.freedesktop.org/software/systemd/man/262/systemd-system.conf.html#RestrictFileSystemAccess=)
+The FVCA design v0.4.5 defines a VM-only Hypervisor and an OCI Service Guest. Both development roles share an x86-64 image recipe. The Fedora 45 mkosi build produces a disk with a signed Unified Kernel Image (UKI), a read-only EROFS root, a dm-verity hash tree, and a detached root hash signature in its own GPT partition. The UKI embeds the expected root hash and execution policy. A Rust initramfs entrypoint loads dm-verity with signature enforcement before systemd attaches the global BPF execution policy. The kernel verifies the detached signature during root activation. Systemd closes the initramfs trust window after switch-root. [systemd execution policy](https://www.freedesktop.org/software/systemd/man/262/systemd-system.conf.html#RestrictFileSystemAccess=)
 
 The image uses a boot-status target and volatile `/var`. It disables automatic extension and additional GPT partition discovery. Build workers run Fedora's package scripts before removing shells, login tools and maintenance hooks from the base and initramfs. Both trees must pass an audit for prohibited commands, executable scripts, setuid/setgid files and file capabilities. Emergency and rescue targets report `FVCA_BOOT_FAILED` on the console. Both roles use Btrfs for mutable data. Physical TPM qualification, attestation and production release approval remain pending.
 
@@ -294,6 +294,18 @@ On the enrolled Host, pass `--live` in place of `observation.json` to read DMI, 
 An accepted cabinet reports `staged`. Activation requires the Host-only fwupd execution boundary, live device revalidation, independent verification of the cabinet's embedded payload and vendor authentication, and qualified power, TPM and recovery checks. fwupd metadata trust and on-device signature enforcement provide separate evidence. [fwupd distribution trust](https://fwupd.github.io/libfwupdplugin/only-trusted.html)
 
 Read-only inventory of the future Proxmox host on 2026-11-20 observed ThinkStation P3 Ultra board 1066, BIOS S0JKT2AA (fwupd 1.42), EC 1.13 and two Toshiba KXG50PNV1T02 drives at AFDA4103. The two drives reported the same model GUIDs. Local fwupd metadata listed BIOS 1.51. This inventory establishes the device matching inputs. Hardware transition qualification remains open.
+
+### Build the Host core with firmware discovery
+
+```sh
+./tools/fetch-fwupd.sh
+mkosi --profile=hypervisor-core --output-dir=build/hypervisor-core build
+python3 tools/verify-base.py build/hypervisor-core/fvca-dev-host-core.raw mkosi.crt
+```
+
+Use `fvca-dev-host-core.raw` for Hypervisor runtime extraction and composition. The profile builds pinned fwupd source offline with only the `nvme` and `uefi_capsule` plugins and disables external plugin loading. It includes the LVFS trust roots and declares both native daemons’ hardened allocator dependency. The Host initramfs loads the firmware SELinux policy before switch-root. The Service Guest profile omits this component, and Guest composition rejects a core carrying it. [fwupd 2.1.10 release](https://github.com/fwupd/fwupd/releases/tag/2.1.10)
+
+Start `fvca-fwupd.service` on the enrolled Host before running the live staging command. The service registers on the root-only `/run/fvca/firmware-bus` socket. The bus permits property reads, plugin and device inventory, and exact-device upgrade lookup. The daemon also checks the method itself. The service uses cached fwupd metadata, with network access and firmware writes unavailable. Provisioning the authenticated metadata and qualifying physical device access remain part of deployment. [D-Bus policy documentation](https://dbus.freedesktop.org/doc/dbus-daemon.1.html#configuration_file)
 
 ## Hypervisor runtime candidate
 

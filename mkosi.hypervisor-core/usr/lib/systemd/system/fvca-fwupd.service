@@ -1,0 +1,39 @@
+[Unit]
+Description=FVCA Host firmware inventory
+BindsTo=fvca-firmware-bus.service
+After=fvca-firmware-bus.service
+ConditionVirtualization=!container
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/libexec/fwupd/fwupd
+Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/fvca/firmware-bus
+TimeoutStartSec=60s
+CacheDirectory=fwupd
+CacheDirectoryMode=0700
+StateDirectory=fwupd
+StateDirectoryMode=0700
+CapabilityBoundingSet=
+DevicePolicy=closed
+DeviceAllow=char-nvme r
+InaccessiblePaths=-/run/dbus -/run/systemd/private
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoExecPaths=/run /tmp /var
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native

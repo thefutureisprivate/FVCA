@@ -1,0 +1,22 @@
+[Unit]
+Description=FVCA private firmware inventory bus
+Requires=fvca-firmware-bus.socket
+After=fvca-firmware-bus.socket
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/dbus-daemon --config-file=/usr/lib/fvca/firmware-bus.conf --nofork --nopidfile
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+# libselinux listens for AVC updates over NETLINK_SELINUX.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native

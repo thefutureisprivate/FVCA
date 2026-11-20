@@ -1,0 +1,10 @@
+; Reuse Fedora's system bus socket and configuration labels for the private bus.
+(filecon "/run/fvca/firmware-bus" socket (system_u object_r system_dbusd_var_run_t ((s0) (s0))))
+(filecon "/usr/lib/fvca/firmware-bus\.conf" file (system_u object_r dbusd_etc_t ((s0) (s0))))
+
+; Permit the existing Fedora transitions with NoNewPrivileges set by PID 1.
+(allow init_t system_dbusd_t (process2 (nnp_transition)))
+(allow init_t fwupd_t (process2 (nnp_transition)))
+
+; Permit PID 1 to mask its private control socket in the fwupd mount namespace.
+(allow init_t init_var_run_t (sock_file (mounton)))

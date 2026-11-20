@@ -1,0 +1,36 @@
+--- a/plugins/meson.build
++++ b/plugins/meson.build
+@@ -168 +168 @@
+-foreach plugin, enabled : plugins
++foreach plugin : ['uefi-capsule', 'nvme']
+--- a/src/fu-dbus-daemon.c
++++ b/src/fu-dbus-daemon.c
+@@ -16,0 +17,3 @@
++#ifdef HAVE_SYSTEMD
++#include <systemd/sd-daemon.h>
++#endif
+@@ -2778,0 +2782,11 @@
++	/* FVCA currently permits discovery only, including on a directly connected bus. */
++	if (g_strcmp0(method_name, "GetDevices") != 0 &&
++	    g_strcmp0(method_name, "GetPlugins") != 0 &&
++	    g_strcmp0(method_name, "GetUpgrades") != 0) {
++		g_dbus_method_invocation_return_error_literal(invocation,
++							      G_DBUS_ERROR,
++							      G_DBUS_ERROR_ACCESS_DENIED,
++							      "FVCA permits firmware discovery only");
++		return;
++	}
++
+@@ -3052,0 +3067 @@
++		g_clear_object(&self->connection);
+@@ -3061,0 +3077 @@
++	FuDbusDaemon *self = FU_DBUS_DAEMON(user_data);
+@@ -3062,0 +3079,5 @@
++	/* PID 1 considers the private service ready only after registration. */
++#ifdef HAVE_SYSTEMD
++	if (self->connection != NULL)
++		sd_notify(0, "READY=1");
++#endif
+@@ -3157 +3178 @@
+-				FU_ENGINE_LOAD_FLAG_REMOTES | FU_ENGINE_LOAD_FLAG_EXTERNAL_PLUGINS |
++				FU_ENGINE_LOAD_FLAG_REMOTES |

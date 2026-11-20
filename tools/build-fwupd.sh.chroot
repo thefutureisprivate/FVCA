@@ -1,0 +1,58 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+source "$SRCDIR/tools/fwupd-source.env"
+source "$SRCDIR/tools/allocator-source.env"
+archive="$SRCDIR/build/fwupd-source/fwupd-$fwupd_version.tar.xz"
+printf '%s  %s\n' "$fwupd_sha256" "$archive" | sha256sum --check --strict
+
+work=$(mktemp -d)
+trap 'rm -r -- "$work"' EXIT
+mkdir "$work/source"
+tar -xJf "$archive" --strip-components=1 -C "$work/source"
+patch --directory="$work/source" --strip=1 --fuzz=0 < "$SRCDIR/tools/fwupd-inventory.patch"
+
+meson setup "$work/build" "$work/source" \
+    --wrap-mode=nodownload --prefix=/usr --libdir=lib64 --sysconfdir=/etc --localstatedir=/var \
+    --buildtype=release --werror --auto-features=disabled -Db_lto=true \
+    -Dvendor_ids_dir=/usr/share/hwdata -Dsystemd=enabled -Dblkid=enabled \
+    -Dgnutls=enabled -Dopenssl=enabled -Dtests=false -Dman=false -Dmetainfo=false \
+    -Dbash_completion=false -Dfish_completion=false -Dfirmware-packager=false \
+    -Dplugin_uefi_capsule_splash=false -Dlvfs=true -Dp2p_policy=none -Dudev_hotplug=false
+meson compile -C "$work/build" -j "$(nproc)"
+DESTDIR="$work/staged" meson install -C "$work/build" --no-rebuild
+
+libdir="usr/lib64/fwupd-$fwupd_version"
+# Copy exactly the discovery daemon closure. Upstream CLIs, activation files,
+# mutable plugins, shell scripts and the EFI updater stay in the build tree.
+for file in usr/libexec/fwupd/fwupd usr/lib64/libfwupd.so.3.0.0 \
+    "$libdir/libfwupdengine.so" "$libdir/libfwupdplugin.so"; do
+    install -Dm755 "$work/staged/$file" "$DESTDIR/$file"
+done
+ln -s libfwupd.so.3.0.0 "$DESTDIR/usr/lib64/libfwupd.so.3"
+install -Dm755 /usr/bin/dbus-daemon "$DESTDIR/usr/bin/dbus-daemon"
+for daemon in usr/bin/dbus-daemon usr/libexec/fwupd/fwupd; do
+    patchelf --add-needed "$allocator_library" "$DESTDIR/$daemon"
+    dependencies=$(patchelf --print-needed "$DESTDIR/$daemon")
+    test "${dependencies%%$'\n'*}" = "$allocator_library"
+done
+for file in etc/fwupd/remotes.d/lvfs.conf usr/share/fwupd/quirks.d/builtin.quirk.gz \
+    etc/pki/fwupd/{LVFS-CA,LVFS-CA-2025PQ}.pem \
+    etc/pki/fwupd-metadata/{LVFS-CA,LVFS-CA-2025PQ}.pem; do
+    install -Dm644 "$work/staged/$file" "$DESTDIR/$file"
+done
+for file in etc/fwupd/fwupd.conf usr/lib/fvca/firmware-bus.conf \
+    usr/lib/systemd/system/{fvca-firmware-bus.socket,fvca-firmware-bus.service,fvca-fwupd.service}; do
+    install -Dm644 "$SRCDIR/mkosi.hypervisor-core/$file" "$DESTDIR/$file"
+done
+install -Dm644 "$work/source/COPYING" "$DESTDIR/usr/share/licenses/fvca-fwupd/COPYING"
+install -Dm644 /usr/share/licenses/dbus-daemon/COPYING "$DESTDIR/usr/share/licenses/dbus-daemon/COPYING"
+
+{
+    printf 'fwupd=%s\nsource_sha256=%s\nsource_signer=%s\n' "$fwupd_version" "$fwupd_sha256" "$fwupd_signer"
+    printf '%s\n' 'builtin_plugins=nvme,uefi_capsule' 'external_plugins=disabled'
+    rpm -q dbus-daemon dbus-libs gcc glib2 libxmlb meson
+    sha256sum "$SRCDIR/tools/fwupd-inventory.patch" | cut -d ' ' -f1 | sed 's/^/patch_sha256=/'
+    (cd "$DESTDIR" && sha256sum usr/libexec/fwupd/fwupd usr/bin/dbus-daemon)
+} > "$work/provenance"
+install -Dm644 "$work/provenance" "$DESTDIR/usr/share/fvca/firmware-build.txt"

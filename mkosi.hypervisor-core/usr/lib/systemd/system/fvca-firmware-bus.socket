@@ -1,0 +1,7 @@
+[Unit]
+Description=FVCA private firmware inventory socket
+
+[Socket]
+ListenStream=/run/fvca/firmware-bus
+SocketMode=0600
+RemoveOnStop=yes

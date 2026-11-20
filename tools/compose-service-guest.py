@@ -2,6 +2,7 @@
 """Assemble a signed Service Guest with its authorized OCI runtime."""
 
 import argparse
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -87,6 +88,12 @@ def assemble(args, work):
                                             args.workload_certificate, boot_key, runtime_key)
 
     prepared, core_hash, offset, cmdline, uname = prepare_core(args, work)
+    root = prepared / "root"
+    if any(os.path.lexists(root / path) for path in (
+        "usr/libexec/fwupd", "usr/lib64/libfwupd.so.3", "usr/bin/fwupdmgr", "usr/bin/fwupdtool",
+        "usr/lib/fvca/firmware-bus.conf", "usr/share/fvca/firmware-build.txt",
+    )):
+        raise ValueError("Service Guest core carries the Host firmware facility")
     verify_initrd(args.initrd, uname, ACTIVATION_FILES, FORBIDDEN, "Service Guest")
     runtime_work = work / "runtime"
     runtime_work.mkdir()
