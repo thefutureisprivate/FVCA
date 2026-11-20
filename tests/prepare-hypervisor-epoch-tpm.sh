@@ -1,11 +1,15 @@
 #!/usr/bin/bash
 set -euo pipefail
 umask 077
-if [[ $# != 2 ]]; then
-  echo "Usage: $0 ENROLLED_SOFTWARE_TPM_STATE NEW_OUTPUT_DIRECTORY" >&2
+if [[ $# != 2 && $# != 3 ]]; then
+  echo "Usage: $0 ENROLLED_SOFTWARE_TPM_STATE NEW_OUTPUT_DIRECTORY [DISPOSABLE_AUTHORITY_KEY]" >&2
   exit 2
 fi
 base=$(realpath -e -- "$1")
+fixture_key=
+if [[ $# == 3 ]]; then
+  fixture_key=$(realpath -e -- "$3")
+fi
 if [[ ! -f "$base/tpm2-00.permall" || -S "$base/socket" ]]; then
   echo 'Expected a stopped software TPM state' >&2
   exit 2
@@ -37,7 +41,7 @@ start() {
 load_key() {
   # The stopped fixture restarts with an empty transient object table. Keep this exact key loaded.
   tpm2_loadexternal -C o -G ecc -u "$lab/authority.pem" -c authority.ctx -n authority.name >/dev/null
-  tpm2_readpublic -c "$authority" -n loaded.name >/dev/null
+  tpm2_readpublic -c "$authority" -n loaded.name -f tss -o "$lab/authority.tpm2b" >/dev/null
   cmp authority.name loaded.name
 }
 session() {
@@ -56,7 +60,11 @@ increment() {
 }
 
 openssl rand -out owner.secret 32
-openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 -out authority.key
+if [[ -n "$fixture_key" ]]; then
+  openssl pkey -in "$fixture_key" -out authority.key
+else
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 -out authority.key
+fi
 openssl pkey -in authority.key -pubout -out "$lab/authority.pem"
 printf 'FVCA-HYPERVISOR-FLOOR-1\0' > "$lab/policy-reference.bin"
 openssl rand 16 >> "$lab/policy-reference.bin"

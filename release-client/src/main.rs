@@ -479,7 +479,28 @@ fn run() -> Result<()> {
     if let [option, state, approval, signature, authority, certificate] = operands.as_slice()
         && option.as_os_str() == "--verify-hypervisor-floor-approval"
     {
-        return gpt::verify_floor(state, approval, signature, authority, certificate);
+        return gpt::verify_floor(state, approval, signature, authority, certificate, None);
+    }
+    if let [
+        option,
+        state,
+        approval,
+        signature,
+        authority,
+        certificate,
+        increment_key,
+        reference,
+    ] = operands.as_slice()
+        && option.as_os_str() == "--advance-hypervisor-floor"
+    {
+        return gpt::verify_floor(
+            state,
+            approval,
+            signature,
+            authority,
+            certificate,
+            Some((increment_key, reference)),
+        );
     }
     let [root, depot, state, selection, options @ ..] = operands.as_slice() else {
         return Err(usage().into());
@@ -509,7 +530,7 @@ fn run() -> Result<()> {
 
 fn usage() -> io::Error {
     invalid(
-        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE\n       fvca-release-client --verify-hypervisor-floor-approval PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE",
+        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE\n       fvca-release-client --verify-hypervisor-floor-approval PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE\n       fvca-release-client --advance-hypervisor-floor PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE INCREMENT_TPM_PUBLIC POLICY_REFERENCE",
     )
 }
 

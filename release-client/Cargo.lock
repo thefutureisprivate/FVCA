@@ -371,9 +371,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
+ "cc",
  "futures-util",
  "hex",
  "jiff",
+ "pkg-config",
  "reqwest",
  "rustix",
  "serde",

@@ -99,6 +99,7 @@ Prepare a private state directory owned by the intake account with mode `0700`. 
 
 ```sh
 umask 077
+# Install the Fedora C toolchain, pkgconf-pkg-config, and tpm2-tss-devel on the build system.
 cargo vendor --locked --versioned-dirs --manifest-path release-client/Cargo.toml \
   "$PWD/build/release-client-vendor" > build/release-client-cargo.toml
 # Run the build below in a Fedora Rust 1.100 environment with networking disabled.
@@ -126,7 +127,7 @@ release-client/target/release/fvca-release-client trusted-root.json depot.json i
 
 The coordinator verifies the active tuple, then invokes systemd-sysupdate 262.1 with a private alternate root and an exact source digest from the TUF intake. It verifies the installed manifest and every member again, flushes the tuple, and publishes the inactive slot with an atomic directory rename. An identical retry verifies the existing inactive tuple. The active slot remains the recovery path throughout preparation. A forced stop before publication may leave a private `.prepare-*` directory, which can be removed after the installer exits.
 
-This file-backed preparation works with the current Hypervisor and Service Guest bundles in the lab. The offline GPT installer below handles an already provisioned Hypervisor disk. Protected epoch advancement remains a release gate. [systemd-sysupdate transfer definitions](https://www.freedesktop.org/software/systemd/man/latest/sysupdate.d.html)
+This file-backed preparation works with the current Hypervisor and Service Guest bundles in the lab. The offline GPT installer below handles an already provisioned Hypervisor disk. Physical qualification of TPM floor advancement remains a release gate. [systemd-sysupdate transfer definitions](https://www.freedesktop.org/software/systemd/man/latest/sysupdate.d.html)
 
 `tests/check-release-slots.py` uses the same Python TUF environment. Supply distinct matched `--active-boot`/`--active-guest` and `--next-boot`/`--next-guest` pairs, their `--vm-runtime`, the `--client`, and a new Btrfs `--output` directory on the images' filesystem. The fixture checks same-epoch Hypervisor preparation, rejects a lower epoch, and verifies both complete slots after a transfer interruption and after retrying and replacing the inactive tuple.
 
@@ -383,7 +384,20 @@ fvca-release-client --verify-hypervisor-floor-approval intake-state approval.jso
 
 The command independently verifies the approval signature and checks both installed disks against the staged releases. It holds both disk leases, verifies each Secure Boot loader and its signed epoch against the approved enrollment, and reads back all immutable payloads before printing the approval digest. The approving authority retains and verifies the boot evidence referenced by the signed digests. Run `tests/check-hypervisor-floor-approval.py` against the installer output and paired boot logs to qualify the workflow with disposable keys.
 
-Protected advancement requires a live TPM transaction holding both disk leases through the increment. The read-only approval verifier and the disposable one-use TPM session tests qualify those parts separately.
+### Commit the approved TPM floor
+
+Use the maintenance system on the enrolled Hypervisor with both reviewed NVMe namespaces unused and the two approved releases staged. The release client uses Fedora's `tpm2-tss` through `/dev/tpmrm0`. Provide the enrollment's P-256 `TPM2B_PUBLIC` blob and 40-byte policy reference. The enrollment reference is `FVCA-HYPERVISOR-FLOOR-1` followed by a NUL byte and a per-appliance random 16-byte value. The enrolled policy combines `PolicySigned` for that key and reference with `PolicyCommandCode(NV_Increment)`. Export the loaded key with `tpm2_readpublic --format=tss --output increment.tpm2b`. Keep the P-256 private key with the independent increment authority. [Fedora TPM stack](https://packages.fedoraproject.org/pkgs/tpm2-tss/tpm2-tss/) · [TPM 2.0 PolicySigned](https://medias.cdn.trustedcomputinggroup.org/production/Trusted_Platform_Module_2_0_Library_Part_3_Version_184_pub_2337d80b91.pdf)
+
+```sh
+fvca-release-client --advance-hypervisor-floor intake-state approval.json approval.sig authority.pub \
+  secure-boot.pem increment.tpm2b policy-reference.bin
+```
+
+After readback of both disks and verification of the live TPM counter, the command prints `FVCA_HYPERVISOR_FLOOR_CHALLENGE` followed by JSON. The increment authority checks the approval digest, the proposed floor step, and its outstanding authorization for that enrollment. The decoded `message` contains the 32-byte nonce, a four-byte positive big-endian expiration in seconds, the SHA-256 command hash for `NV_Increment` on the enrolled index, and the enrollment reference. Check these fields and sign the decoded bytes with P-256 ECDSA and SHA-256. Issue one live nonce authorization per enrollment. After interruption, confirm the old authorization expired and read back the floor before replacing an outstanding authorization. Enter the 128 hexadecimal characters of the raw `r || s` signature followed by a newline while the command is waiting. Each scalar uses 32 big-endian bytes. The TPM authorization expires within five minutes.
+
+The client holds both disk leases and the staging lock through authorization, a durable intent, the single increment, and its readback. It writes the outcome under `intake-state/floor-transactions/` and prints `FVCA_HYPERVISOR_FLOOR_COMMITTED` with the observed floor and approval digest. After an interruption, the same signed approval reconciles a matching intent and a TPM already at the target floor without issuing another increment. If the TPM still reads the previous floor, it requires a fresh signature in a new session while the approval is valid.
+
+Build a separate qualification binary with `--features swtpm-test` for `tests/check-hypervisor-floor-advance.py`. The test uses disposable disk copies, approval keys, and software TPM state. The default release binary requires two reviewed NVMe namespaces and the local hardware TPM device. Physical TPM qualification remains pending.
 
 ## Development Service Guest storage
 
