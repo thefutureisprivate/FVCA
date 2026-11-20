@@ -3,7 +3,7 @@
 set -euo pipefail
 umask 077
 if [[ $# -lt 2 || $# -gt 3 ]]; then
-    echo 'Run tests/nested-guest-shutdown-initrd.sh HYPERVISOR_INITRAMFS NEW_INITRAMFS [shutdown|capture|live|restore]' >&2
+    echo 'Run tests/nested-guest-shutdown-initrd.sh HYPERVISOR_INITRAMFS NEW_INITRAMFS [shutdown|capture|live|restore|online-trial]' >&2
     exit 2
 fi
 tests=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -18,6 +18,7 @@ case "${3:-shutdown}" in
     capture) unit=fvca-qualify-stopped-capture.service ;;
     live) unit=fvca-qualify-live-capture.service ;;
     restore) unit=fvca-qualify-guest-restore.service ;;
+    online-trial) unit=fvca-qualify-online-trial.service ;;
     *) echo 'Unknown nested Guest qualification mode' >&2; exit 2 ;;
 esac
 mkdir -p "$tree/$conf" "$tree/$fvca"

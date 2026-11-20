@@ -174,7 +174,7 @@ EPOCH_ARGUMENT = "fvca.hypervisor_epoch"
 PROMOTION_KEY = "hypervisor-promotion-key"
 PROMOTION_SUPPORT = "hypervisor-promotion-support-v2"
 STANDING_TRIAL_KEY = "hypervisor-trial-key"
-STANDING_TRIAL_SUPPORT = "hypervisor-standing-trial-support-v3"
+STANDING_TRIAL_SUPPORT = "hypervisor-standing-trial-support-v4"
 TRIAL_KEY_ARGUMENT = "fvca.trial_key"
 
 

@@ -23,6 +23,7 @@ const CANDIDATE_ARGUMENT: &str = "fvca.hypervisor_trial";
 const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 const STARTED: &str = "/run/fvca/boot-trial-started";
 const REBOOT_PENDING: &str = "/run/fvca/trial-reboot-pending";
+const RUNNING_TRIAL_CONTEXT: &str = "/run/fvca/running-trial-context";
 const HOST_DATA: &str = "/run/fvca/host-data";
 const EFI: &str = "/sys/firmware/efi/efivars";
 const EFI_GLOBAL: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
@@ -60,6 +61,10 @@ pub fn reboot_into_trial() -> io::Result<()> {
     // The switch-root unit checks this marker while systemd processes the shutdown transaction.
     publish(Path::new(REBOOT_PENDING), b"")?;
     println!("FVCA_TRIAL_REBOOT_REQUESTED");
+    queue_host_reboot()
+}
+
+pub fn queue_host_reboot() -> io::Result<()> {
     crate::run(Command::new("/usr/bin/systemctl").args([
         "--no-block",
         "--job-mode=replace-irreversibly",
@@ -67,6 +72,33 @@ pub fn reboot_into_trial() -> io::Result<()> {
         "reboot.target",
     ]))
 }
+
+pub fn publish_running_context(
+    esp: &str,
+    active: &runtime::Activation,
+    guest: &str,
+    epoch: &str,
+) -> io::Result<()> {
+    let mut key = match read(Path::new(TRIAL_KEY), 32) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        result => result?,
+    };
+    if key.len() != 32 {
+        return Err(invalid("invalid verified trial authority"));
+    }
+    key.extend_from_slice(
+        format!(
+            "{esp}\n{}\n{}\n{guest}\n{epoch}\n",
+            active.core, active.extension
+        )
+        .as_bytes(),
+    );
+    // This private /run record carries the verified UKI composition across switch-root.
+    publish(Path::new(RUNNING_TRIAL_CONTEXT), &key)
+}
+
+#[cfg(feature = "promotion")]
+pub mod online;
 
 pub fn verify_standing_key(cmdline: &str) -> io::Result<()> {
     use fvca_trial_authorization::{KEY_ARGUMENT, key_marker};

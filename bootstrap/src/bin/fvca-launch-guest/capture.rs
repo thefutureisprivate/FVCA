@@ -100,15 +100,30 @@ fn lock_file(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-pub(super) fn lease(path: &Path) -> io::Result<File> {
+fn exclusive_lease(path: &Path) -> io::Result<File> {
     let file = lock_file(path)?;
     file.try_lock().map_err(io::Error::from)?;
     Ok(file)
 }
 
+pub(super) fn lease(path: &Path) -> io::Result<File> {
+    let file = exclusive_lease(path)?;
+    if path == Path::new(CAPTURE_LOCK) {
+        super::update::require_idle()?;
+    }
+    Ok(file)
+}
+
+pub(super) fn lease_for_activation_recovery() -> io::Result<File> {
+    exclusive_lease(Path::new(CAPTURE_LOCK))
+}
+
 pub(super) fn wait_for_lease(path: &Path) -> io::Result<File> {
     let file = lock_file(path)?;
     file.lock()?;
+    if path == Path::new(CAPTURE_LOCK) {
+        super::update::require_idle()?;
+    }
     Ok(file)
 }
 

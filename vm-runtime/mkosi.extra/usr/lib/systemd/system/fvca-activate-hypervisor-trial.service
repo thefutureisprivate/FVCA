@@ -1,0 +1,17 @@
+[Unit]
+Description=Drain the Service Guest and reboot for an authorized Hypervisor trial
+After=fvca-base-ready.service fvca-virtqemud.service
+AssertPathExists=/run/fvca/running-trial-context
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+OnFailure=fvca-recover-hypervisor-activation.service
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/libexec/fvca/launch-guest --activate-hypervisor-trial
+TimeoutStartSec=60s
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+StandardOutput=journal+console
+StandardError=journal+console

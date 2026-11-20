@@ -33,8 +33,14 @@ done
 mount -t btrfs -o device=/dev/mapper/fvca-trial-b /dev/mapper/fvca-trial-a /mnt
 [[ -d /sys/fs/btrfs/$filesystem_uuid ]]
 mkdir -m 0700 /mnt/boot-trials
-cp /envelope /mnt/boot-trials/pending-trial
-chmod 0600 /mnt/boot-trials/pending-trial
+if [[ -f /invalid-envelope ]]; then
+    cp /envelope /mnt/boot-trials/test-trial
+    cp /invalid-envelope /mnt/boot-trials/test-invalid-trial
+    chmod 0600 /mnt/boot-trials/test-{trial,invalid-trial}
+else
+    cp /envelope /mnt/boot-trials/pending-trial
+    chmod 0600 /mnt/boot-trials/pending-trial
+fi
 if [[ -b /dev/vdc ]]; then
     [[ $(</sys/block/vdc/serial) == fvca-trial-seed ]]
     test -f /mnt/vms/service-guest/data.raw
@@ -61,6 +67,8 @@ def install(args, output, members, envelope, seed=None):
         init.write_bytes(INSTALL)
         init.chmod(0o755)
         (archive / "envelope").write_bytes(envelope)
+        if args.online_handoff and seed is not None:
+            (archive / "invalid-envelope").write_bytes(bytes([envelope[0] ^ 1]) + envelope[1:])
         listing = b"".join(os.fsencode(path.relative_to(archive)) + b"\0" for path in sorted(archive.rglob("*")))
         payload = subprocess.run(["cpio", "--quiet", "-o", "-0", "-H", "newc", "--owner=0:0"],
                                  cwd=archive, input=listing, stdout=subprocess.PIPE, check=True).stdout
@@ -81,6 +89,14 @@ def install(args, output, members, envelope, seed=None):
         with output.open("wb") as log:
             subprocess.run(argv, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=60)
         assert b"FVCA_TRIAL_FIXTURE_INSTALLED" in output.read_bytes(), output
+
+
+def require_sequence(log, markers, output):
+    position = 0
+    for marker in markers:
+        offset = log.find(marker, position)
+        assert offset >= 0, (output, marker)
+        position = offset + len(marker)
 
 
 def qualify(args):
@@ -146,7 +162,8 @@ def qualify(args):
                     with storage["software_tpm"](args.tpm_state) as socket:
                         prompts, log = storage["boot"](options, f"{phase}-{retry}", None, *members,
                                                         firmware=args.firmware, tpm_socket=socket,
-                                                        firmware_timeout=35, timeout=115, ready_marker=marker,
+                                                        firmware_timeout=35, timeout=260 if args.online_handoff else 115,
+                                                        ready_marker=marker,
                                                         allow_reboot=allow_reboot)
                     if b"Kernel command line:" in log or override() != before:
                         break
@@ -166,6 +183,16 @@ def qualify(args):
             else:
                 healthy = f"FVCA_TRIAL_HEALTH_RECORDED {tx}".encode()
                 log = boot("automatic-trial", healthy, allow_reboot=True)
+                if args.online_handoff:
+                    live_log, live_reset, log = log.partition(b"reboot: Restarting system")
+                    assert live_reset and armed not in live_log and reboot_requested not in live_log, output
+                    drained = f"FVCA_HYPERVISOR_TRIAL_DRAINED {tx}".encode()
+                    markers = (b"FVCA_SERVICE_GUEST_READY", b"FVCA_ONLINE_TRIAL_INVALID_REFUSED",
+                               b"FVCA_ONLINE_TRIAL_CAPTURE_DEFERRED", b"FVCA_SERVICE_GUEST_STOPPED",
+                               drained, b"FVCA_SERVICE_GUEST_READY",
+                               b"FVCA_HYPERVISOR_ACTIVATION_RECOVERED", b"FVCA_SERVICE_GUEST_STOPPED",
+                               drained)
+                    require_sequence(live_log, markers, output)
                 stable_log, reset, candidate_log = log.partition(b"reboot: Restarting system")
                 assert reset and reset not in candidate_log, output
                 for boot_log, markers in (
@@ -177,11 +204,7 @@ def qualify(args):
                     assert all(marker in boot_log for marker in (b"secureboot: Secure boot enabled",
                                                                  b"FVCA_SELINUX_ENFORCING",
                                                                  b"FVCA_HOST_STORAGE_UNLOCK_PROFILE tpm2-auto"))
-                    position = 0
-                    for marker in markers:
-                        offset = boot_log.find(marker, position)
-                        assert offset >= 0, (output, marker)
-                        position = offset + len(marker)
+                    require_sequence(boot_log, markers, output)
                 assert all(marker not in stable_log for marker in (b"FVCA_VM_RUNTIME_ACTIVE", b"FVCA_DEV_BASE_READY",
                                                                    b"FVCA_SERVICE_GUEST_READY"))
                 assert override() is None
@@ -200,5 +223,7 @@ if __name__ == "__main__":
     parser.add_argument("--transaction", type=UUID, required=True)
     parser.add_argument("--delivered-envelope", type=lambda path: Path(path).absolute(),
                         help="use the delivered packet for the approved boot case")
+    parser.add_argument("--online-handoff", action="store_true",
+                        help="start with a running Guest using a stable UKI with the online-trial lab unit")
     os.umask(0o077)
     qualify(parser.parse_args())

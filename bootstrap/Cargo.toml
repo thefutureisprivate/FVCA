@@ -27,7 +27,7 @@ required-features = ["libvirt"]
 
 [[bin]]
 name = "fvca-launch-guest"
-required-features = ["libvirt"]
+required-features = ["libvirt", "promotion"]
 
 [[bin]]
 name = "fvca-trial-health"

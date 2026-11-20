@@ -76,6 +76,9 @@ fn activate() -> io::Result<()> {
         Ok(hypervisor_trial::ArmOutcome::ContinueBoot) => (),
         Err(error) => eprintln!("FVCA_TRIAL_REFUSED {error}"),
     }
+    if !recovering && let (Some(esp), Some(guest), Some(epoch)) = (esp, guest.as_deref(), epoch) {
+        hypervisor_trial::publish_running_context(esp, &verified_runtime, guest, epoch)?;
+    }
 
     println!("FVCA_VM_RUNTIME_ACTIVE {}", verified_runtime.extension);
     Ok(())

@@ -35,6 +35,8 @@ REQUIRED_FILES = {
     Path("usr/libexec/fvca/launch-guest"),
     Path("usr/libexec/fvca/backup-worker"),
     Path("usr/lib/systemd/system/fvca-service-guest.service"),
+    Path("usr/lib/systemd/system/fvca-activate-hypervisor-trial.service"),
+    Path("usr/lib/systemd/system/fvca-recover-hypervisor-activation.service"),
     Path("usr/lib/systemd/system/fvca-guest-failure.service"),
     Path("usr/lib/systemd/system/fvca-capture-stopped@.service"),
     Path("usr/lib/systemd/system/fvca-capture-live@.service"),

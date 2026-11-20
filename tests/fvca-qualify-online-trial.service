@@ -1,0 +1,27 @@
+[Unit]
+Description=Qualify live activation of an authenticated Hypervisor trial
+After=fvca-base-ready.service
+ConditionPathExists=/run/fvca/host-data/boot-trials/test-trial
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/bin/mv -T /run/fvca/host-data/boot-trials/test-invalid-trial /run/fvca/host-data/boot-trials/pending-trial
+ExecStart=-/usr/bin/systemctl start fvca-activate-hypervisor-trial.service
+ExecStart=/usr/bin/systemctl --quiet is-failed fvca-activate-hypervisor-trial.service
+ExecStart=/usr/bin/echo FVCA_ONLINE_TRIAL_INVALID_REFUSED
+ExecStart=/usr/bin/mv -T /run/fvca/host-data/boot-trials/test-trial /run/fvca/host-data/boot-trials/pending-trial
+ExecStart=-/usr/bin/flock -x /run/fvca/guest-capture.lock /usr/bin/systemctl start fvca-activate-hypervisor-trial.service
+ExecStart=/usr/bin/systemctl --quiet is-failed fvca-activate-hypervisor-trial.service
+ExecStart=/usr/bin/echo FVCA_ONLINE_TRIAL_CAPTURE_DEFERRED
+ExecStart=/usr/bin/sync -f /run/fvca/host-data/boot-trials/pending-trial
+ExecStart=/usr/bin/systemctl --runtime mask reboot.target
+ExecStart=-/usr/bin/systemctl start fvca-activate-hypervisor-trial.service
+ExecStart=/usr/bin/systemctl --quiet is-failed fvca-activate-hypervisor-trial.service
+ExecStart=/usr/bin/systemctl start fvca-recover-hypervisor-activation.service
+ExecStart=/usr/bin/systemctl --runtime unmask reboot.target
+ExecStart=/usr/bin/systemctl reset-failed fvca-activate-hypervisor-trial.service
+ExecStart=/usr/bin/systemctl --no-block start fvca-activate-hypervisor-trial.service
+TimeoutStartSec=240s
+StandardOutput=journal+console
+StandardError=journal+console

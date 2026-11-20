@@ -29,6 +29,9 @@ const OPERATION_LOCK: &str = "/run/fvca/guest-operation.lock";
 const CAPTURE_LOCK: &str = "/run/fvca/guest-capture.lock";
 const ATTACHMENT: &str = "data-attachment";
 
+#[path = "fvca-launch-guest/update.rs"]
+mod update;
+
 fn verify_boot_files(directory: &Path, selection: &guest_boot::Selection<'_>) -> io::Result<()> {
     let mut checksum = Command::new("/usr/bin/sha256sum").env_clear()
         .current_dir(directory)
@@ -307,6 +310,8 @@ fn activate() -> io::Result<()> {
             capture::live::require_idle()?;
             shutdown()
         }
+        [option] if option == "--activate-hypervisor-trial" => update::activate(),
+        [option] if option == "--recover-hypervisor-activation" => update::recover(),
         [option] if option == "--release" => {
             let _lease = capture::lease(Path::new(OPERATION_LOCK))?;
             capture::live::require_idle()?;

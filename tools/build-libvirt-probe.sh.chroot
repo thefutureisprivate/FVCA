@@ -10,7 +10,7 @@ export RUSTFLAGS="-Dwarnings"
 target=x86_64-unknown-linux-gnu
 cargo build --frozen --release --target "$target" --bin fvca-qualify-libvirt --bin fvca-launch-guest --bin fvca-backup-worker \
     --bin fvca-trial-health \
-    --features libvirt,backup \
+    --features libvirt,backup,promotion \
     --manifest-path "$SRCDIR/bootstrap/Cargo.toml"
 for program in qualify-libvirt launch-guest backup-worker trial-health; do
     install -Dm755 "$CARGO_TARGET_DIR/$target/release/fvca-$program" "$DESTDIR/usr/libexec/fvca/$program"

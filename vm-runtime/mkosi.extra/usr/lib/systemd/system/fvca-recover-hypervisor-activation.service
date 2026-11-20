@@ -1,0 +1,16 @@
+[Unit]
+Description=Reconcile a failed Hypervisor update handoff
+After=fvca-activate-hypervisor-trial.service fvca-virtqemud.service
+ConditionPathExists=/run/fvca/hypervisor-activation
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/libexec/fvca/launch-guest --recover-hypervisor-activation
+TimeoutStartSec=145s
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+StandardOutput=journal+console
+StandardError=journal+console
