@@ -9,8 +9,8 @@ use std::process::{Command, ExitCode};
 
 use fvca_initrd_bootstrap::runtime::{self, Runtime, hash};
 use fvca_initrd_bootstrap::{
-    HYPERVISOR_EPOCH_ARGUMENT, backup_job, backup_policy, guest_boot, hypervisor_slot::Slot,
-    hypervisor_trial, invalid, recovery, retention_policy, run,
+    HYPERVISOR_EPOCH_ARGUMENT, backup_job, backup_policy, guest_boot, host_update,
+    hypervisor_slot::Slot, hypervisor_trial, invalid, recovery, retention_policy, run,
 };
 
 #[path = "fvca-activate-runtime/storage.rs"]
@@ -78,6 +78,7 @@ fn activate() -> io::Result<()> {
     }
     if !recovering && let (Some(esp), Some(guest), Some(epoch)) = (esp, guest.as_deref(), epoch) {
         hypervisor_trial::publish_running_context(esp, &verified_runtime, guest, epoch)?;
+        host_update::activate_if_selected()?;
     }
 
     println!("FVCA_VM_RUNTIME_ACTIVE {}", verified_runtime.extension);

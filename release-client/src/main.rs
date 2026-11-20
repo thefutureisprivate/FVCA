@@ -484,6 +484,11 @@ fn run() -> Result<()> {
         .skip(1)
         .map(PathBuf::from)
         .collect::<Vec<_>>();
+    if let [option] = operands.as_slice()
+        && option.as_os_str() == "--run-host-update"
+    {
+        return runtime()?.block_on(run_host_update());
+    }
     if let [option, disk, sector] = operands.as_slice()
         && option.as_os_str() == "--inspect-hypervisor-gpt"
     {
@@ -507,10 +512,10 @@ fn run() -> Result<()> {
                 channel::Operation::PrepareGpt
             }
             [flag] if flag.as_os_str() == "--deliver-prepared-trial" => {
-                channel::Operation::DeliverTrial { activate: false }
+                channel::Operation::DeliverTrial(channel::Delivery::Inbox)
             }
             [flag] if flag.as_os_str() == "--activate-prepared-trial" => {
-                channel::Operation::DeliverTrial { activate: true }
+                channel::Operation::DeliverTrial(channel::Delivery::Activate)
             }
             _ => return Err(usage().into()),
         };
@@ -564,6 +569,36 @@ fn run() -> Result<()> {
         _ => return Err(usage().into()),
     };
     runtime()?.block_on(intake(root, depot, state, selection, operation))
+}
+
+async fn run_host_update() -> Result<()> {
+    let boot = Path::new("/run/fvca");
+    if boot.join("boot-trial-started").try_exists()? {
+        return Err(invalid("Host update scheduling requires a stable boot").into());
+    }
+    state::read(&boot.join("running-trial-context"), 2048)?;
+    handoff::require_update_state()?;
+    let owner = boot.join("os-update-owner");
+    let scope = state::read(&boot.join("os-update-depot"), 64)?;
+    let scope = std::str::from_utf8(&scope)?
+        .strip_suffix('\n')
+        .ok_or_else(|| invalid("invalid signed Host update depot selector"))?;
+    let depot = if scope == "local" {
+        depot::HostDepot::Local
+    } else {
+        depot::HostDepot::Https(scope.parse()?)
+    };
+    let directory = boot.join("host-data/os-update");
+    channel::discover(
+        &directory.join("trusted-root.json"),
+        &directory.join("depot.json"),
+        &directory,
+        &directory.join("policy.json"),
+        &directory.join("policy.sig"),
+        &owner,
+        channel::Operation::DeliverTrial(channel::Delivery::Scheduled(depot)),
+    )
+    .await
 }
 
 fn runtime() -> io::Result<tokio::runtime::Runtime> {

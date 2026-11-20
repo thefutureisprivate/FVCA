@@ -249,7 +249,15 @@ For an eligible release already installed in the inactive slot, use `--activate-
 
 The service checks the signed approval against the verified boot identity saved by the initramfs, the live UEFI selection, and the installed candidate ESP. It defers while a capture or restore owns the Guest lifecycle lease. It retains that lease while verifying an orderly Guest agent shutdown and detaching the writable Btrfs-backed disk. It then rechecks the pending approval and queues an orderly reboot. The stable initramfs performs the one-shot candidate handoff before it would start another Guest.
 
-If the reboot request fails after the Guest stopped, systemd starts `fvca-recover-hypervisor-activation.service` to reconcile the attachment and restart the stable Guest. Inspect both services for a failed or uncertain shutdown. Scheduled activation, deadline-authorized forced stop, and watchdog-backed trial retries remain release gates.
+If the reboot request fails after the Guest stopped, systemd starts `fvca-recover-hypervisor-activation.service` to reconcile the attachment and restart the stable Guest. Inspect both services for a failed or uncertain shutdown. Deadline-authorized forced stop and watchdog-backed trial retries remain release gates.
+
+### Enroll scheduled Hypervisor release checks
+
+Compose each enrolled PIN-less GPT slot with `--os-update-owner owner.public`. The file contains the raw 32-byte Ed25519 public key for the owner-signed channel policy and must use a distinct key from the boot trial and promotion authorities. The UKI binds the owner key and depot scope. For a local depot, use `{"transport":"local","path":"/run/fvca/host-data/os-update/depot"}` and place its TUF `metadata` and `targets` under that path. For HTTPS, pass `--os-update-address IP --os-update-ca CA.pem` at composition and configure the depot URL with the same literal IP and `/run/fvca/os-update-ca.pem` as its CA path. The scheduled service can reach only the enrolled address.
+
+On the authenticated Btrfs Host data volume, provision `/run/fvca/host-data/os-update` as a root-owned directory with mode `0700`. Populate it with `trusted-root.json`, `depot.json`, `policy.json`, `policy.sig`, and `active-os-release.json`. The active record includes the currently promoted slot. Keep these inputs current when promoting a release.
+
+A verified stable boot enrolls `fvca-host-update.timer`. It checks after boot and hourly with up to 90 seconds of jitter. A failed service can retry after five minutes, capped at three starts in 30 minutes. Every run evaluates the signed policy and current channel, including holds and maintenance windows, before requesting activation. This path activates an already prepared slot. Use the offline GPT preparation procedure above to install the candidate. The client emits results on the console and records the latest completed check in `/run/fvca/host-data/os-update/os-update-status.json`. [systemd timer semantics](https://www.freedesktop.org/software/systemd/man/262/systemd.timer.html)
 
 ## Hypervisor runtime candidate
 

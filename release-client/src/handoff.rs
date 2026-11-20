@@ -33,13 +33,13 @@ fn private_directory(file: &File) -> io::Result<()> {
     if metadata.uid() != 0 || metadata.gid() != 0 || metadata.permissions().mode() & 0o7777 != 0o700
     {
         return Err(invalid(
-            "Host trial inbox must be a private root-owned directory",
+            "Host data paths require private root-owned directories",
         ));
     }
     Ok(())
 }
 
-pub fn publish(envelope: &[u8], authorize: &dyn Fn() -> Result<()>) -> Result<()> {
+fn host_data() -> Result<(File, u64)> {
     let host = File::from(fs::open(HOST_DATA, DIRECTORY, Mode::empty())?);
     let parent = fs::statx(
         CWD,
@@ -52,9 +52,24 @@ pub fn publish(envelope: &[u8], authorize: &dyn Fn() -> Result<()>) -> Result<()
         || id == parent.stx_mnt_id
         || fs::fstatfs(&host)?.f_type as u64 != BTRFS_SUPER_MAGIC
     {
-        return Err(invalid("trial handoff requires the mounted Btrfs Host data pool").into());
+        return Err(invalid("this operation requires the mounted Btrfs Host data pool").into());
     }
     private_directory(&host)?;
+    Ok((host, id))
+}
+
+pub fn require_update_state() -> Result<()> {
+    let (host, id) = host_data()?;
+    let state = File::from(fs::openat(&host, "os-update", DIRECTORY, Mode::empty())?);
+    private_directory(&state)?;
+    if mount_id(&state)? != id {
+        return Err(invalid("Host update state is outside the mounted Btrfs pool").into());
+    }
+    Ok(())
+}
+
+pub fn publish(envelope: &[u8], authorize: &dyn Fn() -> Result<()>) -> Result<()> {
+    let (host, id) = host_data()?;
     match fs::mkdirat(&host, "boot-trials", Mode::RUSR | Mode::WUSR | Mode::XUSR) {
         Ok(()) => host.sync_all()?,
         Err(Errno::EXIST) => (),

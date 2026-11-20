@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use tough::schema::key::Key;
 use tough::{IntoVec, Repository, TargetName};
 
-use crate::depot::{CONFIG_BYTES, Depot, METADATA_BYTES};
+use crate::depot::{CONFIG_BYTES, Depot, HostDepot, METADATA_BYTES};
 use crate::{
     MANIFEST_BYTES, Member, Result, Role, Selection, check_target, gpt, handoff, install::Slot,
     invalid, load_repository, stage, state, valid_digest,
@@ -24,7 +24,13 @@ use crate::{
 pub enum Operation {
     Discover,
     PrepareGpt,
-    DeliverTrial { activate: bool },
+    DeliverTrial(Delivery),
+}
+
+pub enum Delivery {
+    Inbox,
+    Activate,
+    Scheduled(HostDepot),
 }
 
 #[derive(Deserialize)]
@@ -454,13 +460,13 @@ pub async fn discover(
     }
     let installation = match operation {
         Operation::Discover => None,
-        Operation::PrepareGpt | Operation::DeliverTrial { .. } => Some(
+        Operation::PrepareGpt | Operation::DeliverTrial(_) => Some(
             policy.hypervisor_gpt.as_ref().zip(active.slot).ok_or_else(|| {
                 invalid("this operation requires a signed Hypervisor disk policy and the active slot")
             })?,
         ),
     };
-    if matches!(operation, Operation::DeliverTrial { .. }) && trial_key.is_none() {
+    if matches!(operation, Operation::DeliverTrial(_)) && trial_key.is_none() {
         return Err(invalid("trial delivery requires a pinned standing trial authority").into());
     }
     checkpoint(
@@ -492,7 +498,11 @@ pub async fn discover(
     let scratch = tempfile::Builder::new()
         .prefix(".tuf-")
         .tempdir_in(directory)?;
-    let depot = Depot::from_config(&config, policy.max_release_bytes.max(MANIFEST_BYTES))?;
+    let scope = match &operation {
+        Operation::DeliverTrial(Delivery::Scheduled(depot)) => Some(depot),
+        _ => None,
+    };
+    let depot = Depot::with_scope(&config, policy.max_release_bytes.max(MANIFEST_BYTES), scope)?;
     let repo = load_repository(depot, directory, initial_root, scratch.path()).await?;
     if repo.root().signed.keys.values().any(|key| {
         matches!(key, Key::Ed25519 { keyval, .. } if keyval.public.as_ref() == qualification
@@ -584,8 +594,8 @@ pub async fn discover(
                     Ok(())
                 };
                 let active = (slot, active.epoch, active.manifest_sha256.as_str());
-                match operation {
-                    Operation::DeliverTrial { activate } => {
+                match &operation {
+                    Operation::DeliverTrial(delivery) => {
                         let member = candidate.trial_approval.as_ref().ok_or_else(|| {
                             invalid("qualified channel does not authorize a trial envelope")
                         })?;
@@ -620,7 +630,7 @@ pub async fn discover(
                         handoff::publish(&envelope, &authorize)?;
                         status.delivered_trial =
                             Some(approval.authorization.trial.transaction.into());
-                        if activate {
+                        if !matches!(delivery, Delivery::Inbox) {
                             request_result =
                                 authorize().and_then(|()| handoff::request_activation());
                             if request_result.is_ok() {

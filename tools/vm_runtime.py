@@ -42,6 +42,8 @@ REQUIRED_FILES = {
     Path("usr/share/fvca/mtools.conf"),
     Path("usr/lib/systemd/system/fvca-service-guest.service"),
     Path("usr/lib/systemd/system/fvca-activate-hypervisor-trial.service"),
+    Path("usr/lib/systemd/system/fvca-host-update.service"),
+    Path("usr/lib/systemd/system/fvca-host-update.timer"),
     Path("usr/lib/systemd/system/fvca-recover-hypervisor-activation.service"),
     Path("usr/lib/systemd/system/fvca-guest-failure.service"),
     Path("usr/lib/systemd/system/fvca-capture-stopped@.service"),
