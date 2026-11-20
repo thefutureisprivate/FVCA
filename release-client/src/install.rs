@@ -8,8 +8,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    MANIFEST, MANIFEST_BYTES, Manifest, Result, Role, Selection, invalid, state, valid_digest,
-    verify_staged,
+    MANIFEST, MANIFEST_BYTES, Manifest, Result, Role, Selection, invalid, state, verify_staged,
 };
 
 // The installer can see only verified local sources and its private transaction root.
@@ -110,12 +109,7 @@ fn select_slot(operation: Operation<'_>, store: &Path, selected: &Selection) -> 
         }
         Operation::Prepare { active, .. } => {
             let active: Active = serde_json::from_slice(&state::read(active, MANIFEST_BYTES)?)?;
-            if !valid_digest(&active.manifest_sha256) || active.epoch < selected.minimum_epoch {
-                return Err(invalid("active slot is outside the approved recovery epoch").into());
-            }
-            if selected.epoch <= active.epoch {
-                return Err(invalid("inactive release must advance the active epoch").into());
-            }
+            selected.require_update_from(active.epoch, &active.manifest_sha256)?;
             verify(
                 &store.join(active.slot.name()),
                 selected.role,

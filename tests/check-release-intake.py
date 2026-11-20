@@ -19,8 +19,12 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def encode_json(obj):
+    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+
 def write_json(path, obj):
-    data = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    data = encode_json(obj)
     path.write_bytes(data)
     return hashlib.sha256(data).hexdigest()
 
@@ -66,19 +70,25 @@ def publish(path, versions, keys, now, targets, previous=None, expired=False):
     (metadata / "timestamp.json").write_bytes(sign(timestamp, keys["timestamp"]))
 
 
+def target_prefix(selection):
+    return f"{selection['role']}-{selection['epoch']}-{selection['manifest_sha256']}"
+
+
 def make_release(path, payloads, epoch, role, wrong_role=False):
-    stem = f"{role}-{epoch}"
     composition = {"role": "hypervisor" if wrong_role else role}
     members = {name: {"bytes": source.stat().st_size, "sha256": sha256(source)} for name, source in payloads.items()}
     composition.update((name, members[name.replace("_", "-") + ".raw"])
                        for name in (("boot", "vm_runtime", "guest_boot") if composition["role"] == "hypervisor"
                                     else ("guest_boot",)))
-    manifest = path / f"{stem}-release.json"
-    manifest_digest = write_json(manifest, {"schema": "fvca-os-release-v1", "epoch": epoch,
-                                            "composition": composition, "qualification": members["qualification.json"]})
-    budget = sum(member["bytes"] for member in members.values()) + manifest.stat().st_size
+    data = encode_json({"schema": "fvca-os-release-v1", "epoch": epoch, "composition": composition,
+                        "qualification": members["qualification.json"]})
+    manifest_digest = hashlib.sha256(data).hexdigest()
+    budget = sum(member["bytes"] for member in members.values()) + len(data)
     selection = {"role": role, "epoch": epoch, "minimum_epoch": epoch,
                  "manifest_sha256": manifest_digest, "max_release_bytes": budget}
+    stem = target_prefix(selection)
+    manifest = path / f"{stem}-release.json"
+    manifest.write_bytes(data)
     return selection, {f"{stem}-{name}": source for name, source in {**payloads, "release.json": manifest}.items()}
 
 
@@ -105,11 +115,11 @@ def fixture(client, output, hypervisor, vm_runtime, guest):
     publish(original, (1, 1), old, now, targets)
     pinned = original / "metadata/1.root.json"
 
-    def new_depot(name, *, keys=old, versions=(1, 2), previous=None, expired=False):
+    def new_depot(name, *, keys=old, versions=(1, 2), previous=None, expired=False, index=targets):
         depot = output / name
         depot.mkdir()
         shutil.copytree(files, depot / "targets", copy_function=os.link)
-        publish(depot, versions, keys, now, targets, previous=previous, expired=expired)
+        publish(depot, versions, keys, now, index, previous=previous, expired=expired)
         return depot
 
     def apply(name, depot, selection, persistent=None, failure=None):
@@ -129,7 +139,7 @@ def fixture(client, output, hypervisor, vm_runtime, guest):
             require(result.returncode == 0 and result.stdout.startswith("FVCA_RELEASE_STAGED "),
                     f"{name} failed: {result}")
             staged = state / "staged" / selection["manifest_sha256"]
-            stem = f"{selection['role']}-{selection['epoch']}"
+            stem = target_prefix(selection)
             expected = {target.removeprefix(stem + "-"): reference.hashes["sha256"]
                         for target, reference in targets.items() if target.startswith(stem + "-")}
             require({entry.name: sha256(entry) for entry in staged.iterdir()} == expected, f"{name} staged incorrect bytes")
@@ -144,14 +154,21 @@ def fixture(client, output, hypervisor, vm_runtime, guest):
     apply("metadata-rollback", original, hypervisor, persistent="stage-hypervisor", failure="previously fetched version")
     apply("wrong-role", original, wrong_role, failure="changes the authorized role")
     apply("wrong-epoch", original, hypervisor | {"minimum_epoch": 18}, failure="below the authorized minimum")
-    apply("wrong-manifest", original, hypervisor | {"manifest_sha256": "0" * 64}, failure="digest or length")
+    wrong_manifest = hypervisor | {"manifest_sha256": "0" * 64}
+    apply("wrong-manifest", original, wrong_manifest, failure="approved TUF target is missing")
+    alias = f"{target_prefix(wrong_manifest)}-release.json"
+    real_manifest = sources[f"{target_prefix(hypervisor)}-release.json"]
+    reference = TargetFile.from_file(alias, str(real_manifest), ["sha256"])
+    misaddressed = new_depot("misaddressed", index=targets | {alias: reference})
+    os.link(real_manifest, misaddressed / "targets" / f"{reference.hashes['sha256']}.{alias}")
+    apply("misaddressed-manifest", misaddressed, wrong_manifest, failure="digest or length")
     apply("short-budget", original, hypervisor | {"max_release_bytes": hypervisor["max_release_bytes"] - 1},
           failure="staging budget")
     expired = new_depot("expired", expired=True)
     apply("expired-timestamp", expired, hypervisor, failure="expired")
 
     broken = new_depot("broken")
-    target = "hypervisor-17-vm-runtime.raw"
+    target = f"{target_prefix(hypervisor)}-vm-runtime.raw"
     damaged = broken / "targets" / f"{targets[target].hashes['sha256']}.{target}"
     damaged.unlink()
     shutil.copyfile(sources[target], damaged)

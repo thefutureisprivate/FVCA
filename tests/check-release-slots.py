@@ -19,6 +19,7 @@ def fixture(args):
     publish = publish_tools["publish"]
     new_keys = publish_tools["new_keys"]
     make_release = publish_tools["make_release"]
+    target_prefix = publish_tools["target_prefix"]
     require = publish_tools["require"]
     write_json = publish_tools["write_json"]
     sha256 = publish_tools["sha256"]
@@ -37,7 +38,8 @@ def fixture(args):
                   "guest-boot.raw": args.next_guest}
     releases = {
         "host-a": (active_vm, 17, "hypervisor"),
-        "host-b": (updated_vm, 18, "hypervisor"),
+        "host-b": (updated_vm, 17, "hypervisor"),
+        "host-raised": (updated_vm, 18, "hypervisor"),
         "host-new": (updated_vm, 19, "hypervisor"),
         "guest-a": ({**member, "guest-boot.raw": args.active_guest}, 23, "service-guest"),
         "guest-b": ({**member, "guest-boot.raw": args.next_guest}, 24, "service-guest"),
@@ -94,7 +96,7 @@ def fixture(args):
         installed = store / f"slot-{slot}"
         manifest = json.loads((installed / "release.json").read_text())
         require(manifest["epoch"] == selections[name]["epoch"], "incorrect installed epoch")
-        prefix = f"{selections[name]['role']}-{manifest['epoch']}-"
+        prefix = target_prefix(selections[name]) + "-"
         expected = {logical.removeprefix(prefix): reference.hashes["sha256"]
                     for logical, reference in index.items() if logical.startswith(prefix)}
         require(contents(installed) == expected, "installed slot differs from its signed tuple")
@@ -113,10 +115,11 @@ def fixture(args):
            failure="does not match the approved slot identity")
     require(not (host / "slot-b").exists(), "wrong boot authorization wrote to the inactive slot")
     intake("double-seed", selections["host-b"], "--initialize-slots", host, failure="empty A/B slot store")
-    intake("same-epoch", selections["host-a"], "--prepare-inactive", host, host_active, failure="advance the active epoch")
+    intake("same-release", selections["host-a"], "--prepare-inactive", host, host_active,
+           failure="must differ from the approved active release")
     intake("wrong-role", selections["guest-b"] | {"minimum_epoch": 17}, "--prepare-inactive", host, host_active,
            failure="changes the authorized role")
-    intake("raise-floor", selections["host-b"] | {"minimum_epoch": 18}, "--prepare-inactive", host, host_active,
+    intake("raise-floor", selections["host-raised"] | {"minimum_epoch": 18}, "--prepare-inactive", host, host_active,
            failure="outside the approved recovery epoch")
 
     (host / "slot-b").symlink_to(host / "slot-a", target_is_directory=True)
@@ -129,7 +132,8 @@ def fixture(args):
     require((host / "slot-b").stat().st_ino == inode, "retry replaced a matching inactive slot")
 
     # The intake rejects a damaged repository artifact before starting the installer.
-    partial = targets / next(path.name for path in targets.glob("*.hypervisor-19-vm-runtime.raw"))
+    logical = f"{target_prefix(selections['host-new'])}-vm-runtime.raw"
+    partial = targets / f"{index[logical].hashes['sha256']}.{logical}"
     partial.unlink()
     partial.write_bytes(b"incomplete repository transfer")
     intake("damaged-download", selections["host-new"], "--prepare-inactive", host, host_active, failure="hash mismatch")
@@ -170,6 +174,10 @@ def fixture(args):
     verify_slot(host, "b", "host-new")
     require((host / "slot-b").stat().st_ino != inode, "replacement reused the old inactive directory")
     require(contents(host / "slot-a") == old, "inactive preparation changed the active slot")
+    promoted = active_record("host-promoted", selections["host-new"], slot="b")
+    intake("below-active-epoch", selections["host-a"], "--prepare-inactive", host, promoted,
+           failure="below the active epoch")
+    verify_slot(host, "a", "host-a")
     print("Active Hypervisor slot preserved across failures, retries and replacement", flush=True)
 
     intake("seed-guest", selections["guest-a"], "--initialize-slots", guest)

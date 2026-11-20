@@ -6,6 +6,7 @@ from contextlib import nullcontext
 import importlib.util
 from pathlib import Path
 import re
+import runpy
 
 
 spec = importlib.util.spec_from_file_location("check_storage", Path(__file__).with_name("check-storage.py"))
@@ -18,6 +19,7 @@ UNLOCKED = b"FVCA_HOST_STORAGE_TPM_UNLOCKED"
 
 
 def qualify(args):
+    gpt = runpy.run_path(Path(__file__).with_name("check-hypervisor-gpt-slots.py"))
     pin = args.pin_file.read_bytes().strip()
     if re.fullmatch(b"[0-9a-f]{24}", pin) is None:
         raise ValueError("expected a randomly generated 24-hex-character lab PIN")
@@ -28,33 +30,40 @@ def qualify(args):
     members = [args.lab / f"member-{label}.raw" for label in ("a", "b")]
     args.output.mkdir(mode=0o700)
     args.guest = False
-    args.runtime = None
     args.nvme_boot = True
     args.no_default_devices = True
     args.boot_sector_size = 4096
     args.memory_mib = 4096
-    cases = (
-        ("initially-eligible", args.older, args.states / "counter-one", first, first, None),
-        ("replayed-slot", args.older, args.states / "counter-two", first, second, b"below the TPM floor"),
-        ("eligible-recovery", args.eligible, args.states / "counter-two", second, second, None),
-        ("wrong-policy", args.wrong_policy, args.states / "counter-two", second, second, b"policy differ"),
-        ("uninitialized-counter", args.eligible, args.states / "uninitialized", second, 0, b"policy differ"),
-        ("missing-counter", args.eligible, args.original_tpm, second, 0, b"TPM refused the enrolled release counter"),
-        ("missing-tpm", args.eligible, None, second, 0, b"TPM resource manager device is required"),
-    )
-    for name, disk, state, epoch, floor, reason in cases:
+    cases = [
+        ("initially-eligible", args.older, None, args.states / "counter-one", first, first, None),
+        ("replayed-slot", args.older, None, args.states / "counter-two", first, second, b"below the TPM floor"),
+        ("eligible-recovery", args.eligible, None, args.states / "counter-two", second, second, None),
+        ("wrong-policy", args.wrong_policy, None, args.states / "counter-two", second, second, b"policy differ"),
+        ("uninitialized-counter", args.eligible, None, args.states / "uninitialized", second, 0, b"policy differ"),
+        ("missing-counter", args.eligible, None, args.original_tpm, second, 0, b"TPM refused the enrolled release counter"),
+        ("missing-tpm", args.eligible, None, None, second, 0, b"TPM resource manager device is required"),
+    ]
+    if args.paired_slots is not None:
+        a, b = args.paired_slots
+        for phase, floor, state in (("initial-floor", first, "counter-one"), ("raised-floor", second, "counter-two")):
+            cases.extend((f"paired-slot-{name}-{phase}", disk, peer, args.states / state, second, floor, None)
+                         for name, disk, peer in (("a", a, b), ("b", b, a)))
+    for name, disk, peer, state, epoch, floor, reason in cases:
         args.disk = disk
+        args.runtime = peer
+        _, parts = gpt["layout"](disk, args.boot_sector_size)
+        esp = f"FVCA_HYPERVISOR_SLOT_VERIFIED {parts['fvca-esp'][1]}".encode("ascii")
         for attempt in range(1, 4):
             emulator = nullcontext(None) if state is None else storage.software_tpm(state)
             with emulator as socket:
                 prompts, output = storage.boot(
-                    args, f"{name}-{attempt}", pin if reason is None else None, *members,
+                    args, f"{name}-{attempt}", pin if reason is None else None, *(members if peer is None else ()),
                     firmware=args.firmware, tpm_socket=socket, firmware_timeout=30, timeout=105,
                     ready_marker=UNLOCKED if reason is None else storage.FAIL,
                 )
             if b"Kernel command line:" in output:
                 break
-        if (b"FVCA_SELINUX_ENFORCING" not in output or b"FVCA_HYPERVISOR_SLOT_VERIFIED" not in output
+        if (b"secureboot: Secure boot enabled" not in output or b"FVCA_SELINUX_ENFORCING" not in output or esp not in output
                 or b"passphrase for disk" in output):
             raise ValueError(f"{name} did not reach the gate through the verified slot")
         prompt = storage.PROMPT.search(output)
@@ -79,4 +88,6 @@ if __name__ == "__main__":
     for name in ("older", "eligible", "wrong-policy", "lab", "states", "original-tpm", "pin-file",
                  "variables", "firmware", "output"):
         parser.add_argument(f"--{name}", type=Path, required=True)
+    parser.add_argument("--paired-slots", nargs=2, type=Path, metavar=("A", "B"),
+                        help="also boot both provisioned slots at each floor using their integrated Host members")
     qualify(parser.parse_args())

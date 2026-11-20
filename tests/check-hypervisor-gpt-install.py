@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import runpy
 import selectors
+import shutil
 import subprocess
 import time
 
@@ -99,16 +100,17 @@ def qualify(args):
     tuf["write_json"](qualification, {"profile": "disposable offline GPT installation"})
     signed = {}
     choices = {}
+    following = args.next_epoch
     releases = (
-        ("active", args.active_boot, args.active_runtime),
-        ("next", args.next_boot, args.next_runtime),
-        ("mixed", args.next_boot, args.wrong_runtime),
-        ("wrong-candidate-epoch", args.next_boot, args.next_runtime),
-        ("wrong-recovery-epoch", args.active_boot, args.active_runtime),
-        ("wrong-policy", args.wrong_policy_boot, args.next_runtime),
-        ("missing-epoch", args.missing_epoch_boot, args.next_runtime),
+        ("active", args.active_epoch, args.active_boot, args.active_runtime),
+        ("next", following, args.next_boot, args.next_runtime),
+        ("mixed", following, args.next_boot, args.wrong_runtime),
+        ("wrong-candidate-epoch", following + 2, args.next_boot, args.next_runtime),
+        ("wrong-recovery-epoch", following + 1, args.active_boot, args.active_runtime),
+        ("wrong-policy", following + 4, args.wrong_policy_boot, args.next_runtime),
+        ("missing-epoch", following, args.missing_epoch_boot, args.next_runtime),
     )
-    for epoch, (label, slot, runtime) in enumerate(releases, start=args.active_epoch):
+    for label, epoch, slot, runtime in releases:
         selection, sources = tuf["make_release"](root, {
             "boot.raw": slot, "vm-runtime.raw": runtime, "guest-boot.raw": args.guest,
             "qualification.json": qualification,
@@ -137,6 +139,8 @@ def qualify(args):
         (root / f"{name}.log").write_bytes(result.stdout)
         if refusal is not None:
             assert result.returncode and refusal in result.stdout and INVALIDATED not in result.stdout, result.stdout
+            if choice not in ("active", "next"):
+                shutil.rmtree(cache / "staged" / choices[choice]["manifest_sha256"])
         else:
             expected = b"FVCA_RELEASE_STAGED " if plan is None else INSTALLED
             assert result.returncode == 0 and expected in result.stdout, result.stdout
@@ -153,6 +157,7 @@ def qualify(args):
               "active_manifest_sha256": choices["active"]["manifest_sha256"],
               "active": inspect(active), "inactive": inspect(inactive)}
     initial_candidate = sparse_fingerprint(inactive)
+    run("same-release", "active", review, refusal=b"must differ from the approved active release")
 
     altered = clone(inactive, root / "relabeled.raw")
     subprocess.run(["sfdisk", "--sector-size", str(SECTOR), "--part-label", altered, "8", "rejected-data"],
@@ -168,6 +173,7 @@ def qualify(args):
     run("wrong-recovery-epoch", "wrong-policy", review | {
         "active_epoch": wrong_recovery["epoch"], "active_manifest_sha256": wrong_recovery["manifest_sha256"],
     }, refusal=epoch_error)
+    shutil.rmtree(cache / "staged" / wrong_recovery["manifest_sha256"])
     other_policy = ("a" if args.epoch_policy_sha256.startswith("b") else "b") * 64
     run("wrong-enrolled-policy", "next", review | {"epoch_policy_sha256": other_policy}, refusal=policy_error)
     run("wrong-policy", "wrong-policy", review, refusal=policy_error)
@@ -233,6 +239,7 @@ def main():
                  "wrong-runtime", "wrong-policy-boot", "missing-epoch-boot", "guest", "boot-certificate", "output"):
         parser.add_argument(f"--{name}", type=lambda path: Path(path).absolute(), required=True)
     parser.add_argument("--active-epoch", type=int, required=True)
+    parser.add_argument("--next-epoch", type=int, required=True)
     parser.add_argument("--epoch-policy-sha256", required=True)
     os.umask(0o077)
     qualify(parser.parse_args())

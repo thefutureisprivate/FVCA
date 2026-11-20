@@ -76,10 +76,28 @@ impl Selection {
 
     fn name(&self, file: &str) -> Result<TargetName> {
         Ok(TargetName::new(format!(
-            "{}-{}-{file}",
+            "{}-{}-{}-{file}",
             self.role.prefix(),
-            self.epoch
+            self.epoch,
+            self.manifest_sha256,
         ))?)
+    }
+
+    fn require_update_from(&self, active_epoch: u64, active_digest: &str) -> io::Result<()> {
+        if !valid_digest(active_digest) || active_epoch < self.minimum_epoch {
+            return Err(invalid(
+                "active slot is outside the approved recovery epoch",
+            ));
+        }
+        if self.epoch < active_epoch {
+            return Err(invalid("inactive release is below the active epoch"));
+        }
+        if self.manifest_sha256 == active_digest {
+            return Err(invalid(
+                "inactive release must differ from the approved active release",
+            ));
+        }
+        Ok(())
     }
 }
 

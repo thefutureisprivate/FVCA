@@ -211,7 +211,8 @@ def fixture(client, source, output):
                 run(f"metadata-{mode}", trusted, guest, failure="exceeds its size bound")
 
         depot.depot = source / "same-root"
-        runtime = next((depot.depot / "targets").glob("*.hypervisor-17-vm-runtime.raw"))
+        runtime_name = f"hypervisor-{host['epoch']}-{host['manifest_sha256']}-vm-runtime.raw"
+        runtime = next((depot.depot / "targets").glob(f"*.{runtime_name}"))
         depot.failures = {f"targets/{runtime.name}": "truncate"}
         state = run("truncated-artifact", trusted, host, failure="decoding response body")
         require(not list((state / "staged").iterdir()), "interrupted transfer published a release")

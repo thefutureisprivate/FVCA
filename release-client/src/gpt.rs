@@ -321,15 +321,13 @@ pub fn install(plan: &Path, selected: &Selection, incoming: &Path, state_dir: &P
         || !plan.boot_certificate.is_absolute()
         || !valid_digest(&plan.epoch_policy_sha256)
         || plan.epoch_policy_sha256.bytes().all(|byte| byte == b'0')
-        || !valid_digest(&plan.active_manifest_sha256)
         || !valid_digest(&plan.active.gpt_sha256)
         || !valid_digest(&plan.inactive.gpt_sha256)
         || plan.active.gpt_sha256 == plan.inactive.gpt_sha256
-        || plan.active_epoch == 0
-        || !(selected.minimum_epoch..selected.epoch).contains(&plan.active_epoch)
     {
         return Err(invalid("GPT installation requires distinct disks and an eligible reviewed Hypervisor recovery release").into());
     }
+    selected.require_update_from(plan.active_epoch, &plan.active_manifest_sha256)?;
     let sector = plan.sector_size;
     let recovery = state_dir.join("staged").join(&plan.active_manifest_sha256);
     install::verify(
