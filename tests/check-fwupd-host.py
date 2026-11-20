@@ -86,16 +86,14 @@ def check_catalog(call, owner, metadata, signature):
 def check_cabinet(call, owner, cabinet, unsigned):
     assert sha256(cabinet).hexdigest() == P3_ARCHIVE
 
-    def verify(fd, expected=None, *, archive=P3_ARCHIVE, payload=P3_PAYLOAD, guid=P3_GUID,
-               protocol="org.uefi.capsule", version="1.51", version_format="pair", raw=65587):
-        result = call("call", owner, "/", FWUPD, "VerifyFvcaCabinet", "ssssssuh",
-                      archive, payload, guid, protocol, version, version_format, str(raw), str(fd),
+    def verify(fd, expected, *, device="0" * 40, archive=P3_ARCHIVE, payload=P3_PAYLOAD,
+               guid=P3_GUID, protocol="org.uefi.capsule", before="1.42", after="1.51",
+               version_format="pair", raw_before=65578, raw_after=65587):
+        result = call("call", owner, "/", FWUPD, "VerifyFvcaCabinet", "ssssssssuuh",
+                      device, archive, payload, guid, protocol, before, after, version_format,
+                      str(raw_before), str(raw_after), str(fd),
                       pass_fds=(fd,), check=False)
-        if expected is None:
-            assert result.returncode == 0, result.stderr
-            assert json.loads(result.stdout) == {"type": "t", "data": [16_908_288]}
-        else:
-            assert result.returncode != 0 and expected in result.stderr, result.stderr
+        assert result.returncode != 0 and expected in result.stderr, result.stderr
 
     with firmware_descriptor(cabinet, sealed=False) as descriptor:
         verify(descriptor, "sealed, non-executable")
@@ -103,14 +101,17 @@ def check_cabinet(call, owner, cabinet, unsigned):
         verify(descriptor, "cabinet SHA-256 differs", archive="0" * 64)
         verify(descriptor, "payload SHA-256 differs", payload="0" * 64)
         verify(descriptor, "approved device GUID and target version", guid="9" * 36)
-        verify(descriptor, "approved device GUID and target version", version="1.52", raw=65588)
-        verify(descriptor, "Access denied", version="1.52")
+        verify(descriptor, "approved device GUID and target version", after="1.52", raw_after=65588)
+        verify(descriptor, "Access denied", before="1.41")
+        verify(descriptor, "Access denied", after="1.52")
+        verify(descriptor, "Access denied", device="*")
         verify(descriptor, "cabinet release protocol differs",
-               protocol="org.nvmexpress", version="65587", version_format="plain", raw=0)
-        verify(descriptor)
+               protocol="org.nvmexpress", before="65578", after="65587", version_format="plain",
+               raw_before=0, raw_after=0)
+        verify(descriptor, "approved live firmware device is unavailable")
     with firmware_descriptor(unsigned) as descriptor:
         verify(descriptor, "lacks a trusted distribution signature", archive=sha256(unsigned).hexdigest())
-    print("fwupd verifies the exact P3 Ultra cabinet and payload and rejects an unsigned repack")
+    print("fwupd verifies the exact P3 Ultra cabinet bytes and rejects a missing live device")
 
 
 def check(directory, metadata, signature, cabinet, unsigned):

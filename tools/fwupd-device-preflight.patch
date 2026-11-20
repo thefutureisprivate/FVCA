@@ -1,0 +1,155 @@
+--- a/src/fu-dbus-daemon.c
++++ b/src/fu-dbus-daemon.c
+@@ -2040,0 +2041,73 @@
++typedef struct {
++	const gchar *device_id;
++	const gchar *archive_sha256;
++	const gchar *payload_sha256;
++	const gchar *guid;
++	const gchar *protocol;
++	const gchar *from;
++	const gchar *to;
++	const gchar *format;
++	guint32 from_raw;
++	guint32 to_raw;
++} FuFvcaCabinet;
++
++static gboolean
++fu_dbus_daemon_check_fvca_device(FuEngine *engine,
++				FuCabinet *cabinet,
++				XbNode *component,
++				XbNode *selected,
++				const FuFvcaCabinet *identity,
++				gboolean *capsule_on_disk,
++				GError **error)
++{
++	const gboolean capsule = g_strcmp0(identity->protocol, "org.uefi.capsule") == 0;
++	const FwupdDeviceFlags excluded =
++	    FWUPD_DEVICE_FLAG_EMULATED | FWUPD_DEVICE_FLAG_HISTORICAL |
++	    FWUPD_DEVICE_FLAG_UNREACHABLE | FWUPD_DEVICE_FLAG_LOCKED |
++	    FWUPD_DEVICE_FLAG_UPDATABLE_HIDDEN | FWUPD_DEVICE_FLAG_NEEDS_ACTIVATION |
++	    FWUPD_DEVICE_FLAG_NEEDS_SHUTDOWN | FWUPD_DEVICE_FLAG_NEEDS_BOOTLOADER |
++	    FWUPD_DEVICE_FLAG_IS_BOOTLOADER | FWUPD_DEVICE_FLAG_WAIT_FOR_REPLUG |
++	    FWUPD_DEVICE_FLAG_ANOTHER_WRITE_REQUIRED | FWUPD_DEVICE_FLAG_WILL_DISAPPEAR |
++	    FWUPD_DEVICE_FLAG_INSTALL_ALL_RELEASES | FWUPD_DEVICE_FLAG_WILDCARD_INSTALL |
++	    FWUPD_DEVICE_FLAG_INSTALL_SKIP_VERSION_CHECK;
++	g_autoptr(FuDevice) device = fu_engine_get_device(engine, identity->device_id, error);
++	g_autoptr(FuEngineRequest) request = fu_engine_request_new(NULL);
++	g_autoptr(FuRelease) release = fu_release_new();
++
++	if (device == NULL) {
++		g_prefix_error_literal(error, "approved live firmware device is unavailable: ");
++		return FALSE;
++	}
++	if (g_strcmp0(fu_device_get_id(device), identity->device_id) != 0 ||
++	    g_strcmp0(fu_device_get_plugin(device), capsule ? "uefi_capsule" : "nvme") != 0 ||
++	    !fu_device_has_guid(device, identity->guid) ||
++	    !fu_device_has_protocol(device, identity->protocol) ||
++	    g_strcmp0(fu_device_get_version(device), identity->from) != 0 ||
++	    fu_device_get_version_raw(device) != identity->from_raw ||
++	    fu_device_get_version_format(device) != fwupd_version_format_from_string(identity->format) ||
++	    !fu_device_has_flag(device, FWUPD_DEVICE_FLAG_INTERNAL) ||
++	    !fu_device_has_flag(device, FWUPD_DEVICE_FLAG_UPDATABLE) ||
++	    (fwupd_device_get_flags(FWUPD_DEVICE(device)) & excluded) != 0 ||
++	    fwupd_device_get_problems(FWUPD_DEVICE(device)) != 0) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_NOT_SUPPORTED,
++				    "live device differs from the approved firmware baseline or is inhibited");
++		return FALSE;
++	}
++
++	/* Run the native release and engine checks with a fresh request and no override flags. */
++	fu_release_set_device(release, device);
++	fu_release_set_request(release, request);
++	if (!fu_release_load(release, cabinet, component, selected, FWUPD_INSTALL_FLAG_NONE, error) ||
++	    !fu_engine_requirements_check(engine, release, FWUPD_INSTALL_FLAG_NONE, error) ||
++	    !fu_engine_check_trust(engine, release, error))
++		return FALSE;
++	if (g_strcmp0(fu_release_get_version(release), identity->to) != 0) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++				    "native release version differs from the approved firmware target");
++		return FALSE;
++	}
++	*capsule_on_disk = capsule &&
++	    g_strcmp0(G_OBJECT_TYPE_NAME(device), "FuUefiCodDevice") == 0;
++	return TRUE;
++}
++
+@@ -2044,5 +2117 @@
+-			    const gchar *guid,
+-			    const gchar *protocol,
+-			    const gchar *version,
+-			    guint32 version_raw,
+-			    const gchar *payload_sha256,
++			    const FuFvcaCabinet *identity,
+@@ -2049,0 +2119 @@
++			    gboolean *capsule_on_disk,
+@@ -2083 +2153 @@
+-			if (g_strcmp0(xb_node_get_text(g_ptr_array_index(provides, j)), guid) == 0)
++			if (g_strcmp0(xb_node_get_text(g_ptr_array_index(provides, j)), identity->guid) == 0)
+@@ -2094 +2164 @@
+-			if (!fu_dbus_daemon_cabinet_version_matches(node, version, version_raw))
++			if (!fu_dbus_daemon_cabinet_version_matches(node, identity->to, identity->to_raw))
+@@ -2113 +2183 @@
+-	if (g_strcmp0(fu_release_get_protocol(release), protocol) != 0) {
++	if (g_strcmp0(fu_release_get_protocol(release), identity->protocol) != 0) {
+@@ -2140 +2210 @@
+-	if (g_strcmp0(digest, payload_sha256) != 0) {
++	if (g_strcmp0(digest, identity->payload_sha256) != 0) {
+@@ -2145 +2215,7 @@
+-	return TRUE;
++	return fu_dbus_daemon_check_fvca_device(engine,
++					       cabinet,
++					       selected_component,
++					       selected,
++					       identity,
++					       capsule_on_disk,
++					       error);
+@@ -2159,2 +2235 @@
+-	const gchar *archive_sha256, *payload_sha256, *guid, *protocol, *version, *format;
+-	guint32 version_raw;
++	FuFvcaCabinet identity = {0};
+@@ -2166,0 +2242 @@
++	gboolean capsule_on_disk = FALSE;
+@@ -2169,2 +2245,4 @@
+-	g_variant_get(parameters, "(&s&s&s&s&s&suh)", &archive_sha256, &payload_sha256, &guid,
+-		      &protocol, &version, &format, &version_raw, &handle);
++	g_variant_get(parameters, "(&s&s&s&s&s&s&s&suuh)",
++		      &identity.device_id, &identity.archive_sha256, &identity.payload_sha256,
++		      &identity.guid, &identity.protocol, &identity.from, &identity.to,
++		      &identity.format, &identity.from_raw, &identity.to_raw, &handle);
+@@ -2172,0 +2251 @@
++	    fu_context_get_config_bool(fu_engine_get_context(engine), "IgnoreRequirements") ||
+@@ -2175,2 +2254,5 @@
+-	    strlen(archive_sha256) != 64 || strlen(payload_sha256) != 64 || strlen(guid) != 36 ||
+-	    !fu_dbus_daemon_approved_version(protocol, version, format, version_raw)) {
++	    strlen(identity.device_id) != 40 || strspn(identity.device_id, "0123456789abcdef") != 40 ||
++	    strlen(identity.archive_sha256) != 64 || strlen(identity.payload_sha256) != 64 ||
++	    strlen(identity.guid) != 36 ||
++	    !fu_dbus_daemon_approved_version(identity.protocol, identity.from, identity.format, identity.from_raw) ||
++	    !fu_dbus_daemon_approved_version(identity.protocol, identity.to, identity.format, identity.to_raw)) {
+@@ -2191 +2273 @@
+-	if (g_strcmp0(digest, archive_sha256) != 0) {
++	if (g_strcmp0(digest, identity.archive_sha256) != 0) {
+@@ -2197,2 +2279,2 @@
+-	verified = fu_dbus_daemon_verify_cabinet(engine, stream, guid, protocol, version, version_raw,
+-					      payload_sha256, &payload_size, &error);
++	verified = fu_dbus_daemon_verify_cabinet(engine, stream, &identity,
++					      &payload_size, &capsule_on_disk, &error);
+@@ -2202 +2284,2 @@
+-	g_dbus_method_invocation_return_value(invocation, g_variant_new("(t)", (guint64)payload_size));
++	g_dbus_method_invocation_return_value(invocation,
++					      g_variant_new("(tb)", (guint64)payload_size, capsule_on_disk));
+--- a/src/org.freedesktop.fwupd.xml
++++ b/src/org.freedesktop.fwupd.xml
+@@ -781,0 +782 @@
++      <arg type='s' name='device_id' direction='in'/>
+@@ -786 +787,2 @@
+-      <arg type='s' name='version' direction='in'/>
++      <arg type='s' name='version_from' direction='in'/>
++      <arg type='s' name='version_to' direction='in'/>
+@@ -788 +790,2 @@
+-      <arg type='u' name='version_raw' direction='in'/>
++      <arg type='u' name='version_from_raw' direction='in'/>
++      <arg type='u' name='version_to_raw' direction='in'/>
+@@ -790,0 +794 @@
++      <arg type='b' name='capsule_on_disk' direction='out'/>

@@ -52,11 +52,15 @@ def serve(address, mode):
                     digests.append(sha256(stream.read()).hexdigest())
             self.catalog = "1:" + ":".join(digests)
 
-        @dbus.service.method(interface, in_signature="ssssssuh", out_signature="t")
-        def VerifyFvcaCabinet(self, archive, payload, guid, protocol, version, version_format, raw, fd):
+        @dbus.service.method(interface, in_signature="ssssssssuuh", out_signature="tb")
+        def VerifyFvcaCabinet(self, selected, archive, payload, guid, protocol, before, after,
+                              version_format, raw_before, raw_after, fd):
+            assert selected == device_id
             assert payload == "7" * 64
             assert guid == "a1234567-d234-4031-a111-000000000000"
-            assert (protocol, version, version_format, raw) == ("org.uefi.capsule", "1.51", "pair", 65587)
+            assert (protocol, before, after, version_format, raw_before, raw_after) == (
+                "org.uefi.capsule", "1.42", "1.51", "pair", 65578, 65587,
+            )
             with os.fdopen(fd.take(), "rb") as stream:
                 seals = fcntl.fcntl(stream, fcntl.F_GET_SEALS)
                 required = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
@@ -64,7 +68,7 @@ def serve(address, mode):
                 assert not os.fstat(stream.fileno()).st_mode & 0o111
                 content = stream.read()
                 assert content == b"exact cabinet" and archive == sha256(content).hexdigest()
-            return dbus.UInt64(16_908_288)
+            return dbus.UInt64(16_908_288), dbus.Boolean(mode.read_text() != "other-capsule-backend")
 
         @dbus.service.method(interface, in_signature="", out_signature="aa{sv}")
         def GetDevices(self):

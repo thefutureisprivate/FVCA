@@ -361,6 +361,12 @@ pub(super) struct Session {
     catalog: String,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct VerifiedCabinet {
+    pub(super) bytes: u64,
+    pub(super) capsule_on_disk: bool,
+}
+
 impl Session {
     pub(super) fn open(policy: &Policy, offer: &Offer, payloads: &[Vec<u8>; 2]) -> Result<Self> {
         require_platform(policy)?;
@@ -408,28 +414,33 @@ impl Session {
         Ok(())
     }
 
-    pub(super) fn verify_cabinet(&self, file: File, offer: &Offer) -> Result<u64> {
+    pub(super) fn verify_cabinet(&self, file: File, offer: &Offer) -> Result<VerifiedCabinet> {
         let identity = [
+            CString::new(offer.device.device_id.as_str())?,
             CString::new(offer.archive.sha256.as_str())?,
             CString::new(offer.payload_sha256.as_str())?,
             CString::new(offer.device.guid.as_str())?,
             CString::new(offer.device.component.protocol())?,
+            CString::new(offer.from.text.as_str())?,
             CString::new(offer.to.text.as_str())?,
             CString::new(offer.device.version_format.as_str())?,
         ];
         self.require_catalog()?;
         let archive = sealed(c"fvca-firmware-cabinet", file, offer.archive.bytes)?;
-        let bytes = self.peer.bus.verify_cabinet(
+        let (bytes, capsule_on_disk) = self.peer.bus.verify_cabinet(
             &self.peer.owner,
             identity.each_ref().map(CString::as_c_str),
-            offer.to.raw.unwrap_or(0),
+            [offer.from.raw.unwrap_or(0), offer.to.raw.unwrap_or(0)],
             archive.as_fd(),
         )?;
         self.require_catalog()?;
         if !(1..=super::ARCHIVE_LIMIT).contains(&bytes) {
             return Err(invalid("invalid verified firmware payload size").into());
         }
-        Ok(bytes)
+        Ok(VerifiedCabinet {
+            bytes,
+            capsule_on_disk,
+        })
     }
 
     pub(super) fn read(&self, identity: &DeviceIdentity) -> Result<Observation> {
@@ -733,25 +744,32 @@ mod tests {
         let archive = CString::new(crate::channel::digest(cabinet))?;
         let payload = CString::new("7".repeat(64))?;
         let guid = CString::new(guid)?;
-        let fd = sealed(
+        let mut fd = sealed(
             c"firmware-cabinet-fixture",
             cabinet.as_slice(),
             cabinet.len() as u64,
         )?;
-        let bytes = session.peer.bus.verify_cabinet(
-            &session.peer.owner,
-            [
-                &archive,
-                &payload,
-                &guid,
-                c"org.uefi.capsule",
-                c"1.51",
-                c"pair",
-            ],
-            65587,
-            fd.as_fd(),
-        )?;
-        assert_eq!(bytes, 16_908_288);
+        let mut receipt = || {
+            fd.rewind()?;
+            session.peer.bus.verify_cabinet(
+                &session.peer.owner,
+                [
+                    c"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    &archive,
+                    &payload,
+                    &guid,
+                    c"org.uefi.capsule",
+                    c"1.42",
+                    c"1.51",
+                    c"pair",
+                ],
+                [65578, 65587],
+                fd.as_fd(),
+            )
+        };
+        assert_eq!(receipt()?, (16_908_288, true));
+        fs::write(&mode, "other-capsule-backend")?;
+        assert_eq!(receipt()?, (16_908_288, false));
         fs::write(&mode, "catalog-replaced")?;
         let error = session.require_catalog().err().unwrap();
         assert!(error.to_string().contains("catalog changed during intake"));

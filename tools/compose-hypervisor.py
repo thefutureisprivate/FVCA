@@ -370,6 +370,9 @@ def assemble(args, work):
         if (not re.search(r"^history_patch_sha256=[0-9a-f]{64}$", provenance, re.MULTILINE)
                 or "operation_history=v1" not in provenance.splitlines()):
             raise ValueError("scheduled Host firmware requires exact operation history from fwupd")
+        if (not re.search(r"^device_preflight_patch_sha256=[0-9a-f]{64}$", provenance, re.MULTILINE)
+                or "device_preflight=v1" not in provenance.splitlines()):
+            raise ValueError("scheduled Host firmware requires exact native device preflight")
     if args.boot_trial_candidate is not None:
         recorder = runtime_work / "tree" / vm_runtime.TRIAL_HEALTH
         if recorder.is_symlink() or not recorder.is_file() or recorder.stat().st_mode & 0o111 == 0:

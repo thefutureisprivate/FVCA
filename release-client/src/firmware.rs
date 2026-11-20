@@ -885,13 +885,13 @@ async fn refresh(
         }
     };
     drop(payloads);
-    let observe = |payload_bytes| match &snapshot {
+    let observe = |cabinet| match &snapshot {
         SnapshotSource::File(observed, sha256) => {
             offer.require_observation(&policy, observed, require_current()?)?;
             Ok(AdmittedObservation {
                 sha256: sha256.clone(),
                 esrt: None,
-                payload_bytes,
+                cabinet,
                 requires_ac: false,
             })
         }
@@ -902,7 +902,7 @@ async fn refresh(
             Ok(AdmittedObservation {
                 sha256: digest(&serde_json::to_vec(&observed)?),
                 esrt: esrt.cloned(),
-                payload_bytes,
+                cabinet,
                 requires_ac: has(&device.flags, "require-ac"),
             })
         }
@@ -911,14 +911,14 @@ async fn refresh(
     let check_cabinet = |path: &Path| {
         require_current()?;
         let file = state::open_regular(path)?;
-        let payload_bytes = match &snapshot {
+        let cabinet = match &snapshot {
             SnapshotSource::Live(live) => Some(live.verify_cabinet(file, offer)?),
             SnapshotSource::File(..) => {
                 verify_member(file, &offer.archive)?;
                 None
             }
         };
-        observe(payload_bytes)
+        observe(cabinet)
     };
     let mut records = vec![
         (OFFER, head_bytes.as_slice()),
@@ -943,8 +943,8 @@ async fn refresh(
         observed
             .esrt
             .zip(offer.to.raw)
-            .zip(observed.payload_bytes)
-            .map(|((esrt, to), bytes)| capsule::inspect(esrt, to, bytes))
+            .zip(observed.cabinet)
+            .map(|((esrt, to), cabinet)| capsule::inspect(esrt, to, cabinet))
     } else {
         None
     };
@@ -971,8 +971,8 @@ async fn refresh(
     Ok(Some(Staged {
         offer_sha256: approval_sha256,
         archive_sha256: offer.archive.sha256.clone(),
-        verified_payload_sha256: observed.payload_bytes.map(|_| offer.payload_sha256.clone()),
-        verified_payload_bytes: observed.payload_bytes,
+        verified_payload_sha256: observed.cabinet.map(|_| offer.payload_sha256.clone()),
+        verified_payload_bytes: observed.cabinet.map(|cabinet| cabinet.bytes),
         observation_sha256: observed.sha256,
         capsule_delivery,
         transition_evidence_sha256: offer.qualification.transition_evidence_sha256.clone(),
@@ -987,7 +987,7 @@ async fn refresh(
 struct AdmittedObservation {
     sha256: String,
     esrt: Option<Esrt>,
-    payload_bytes: Option<u64>,
+    cabinet: Option<live::VerifiedCabinet>,
     requires_ac: bool,
 }
 

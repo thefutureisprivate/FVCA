@@ -10,7 +10,7 @@ use rustix::fs::{self, CWD, Dir, Mode, OFlags, ResolveFlags, StatFs, StatVfsMoun
 use rustix::io::Errno;
 use serde::Serialize;
 
-use super::{Esrt, boot_id};
+use super::{Esrt, boot_id, live::VerifiedCabinet};
 use crate::{Result, channel::digest, handoff, invalid, state};
 
 const EFIVARS: &str = "/sys/firmware/efi/efivars";
@@ -63,8 +63,13 @@ enum Route {
     },
 }
 
-pub(super) fn inspect(esrt: Esrt, target: u32, payload_bytes: u64) -> Delivery {
-    let (boot_id, route) = match live_route(&esrt, target, payload_bytes) {
+pub(super) fn inspect(esrt: Esrt, target: u32, cabinet: VerifiedCabinet) -> Delivery {
+    let observation = if cabinet.capsule_on_disk {
+        live_route(&esrt, target, cabinet.bytes)
+    } else {
+        Err(invalid("fwupd selected a different capsule backend").into())
+    };
+    let (boot_id, route) = match observation {
         Ok((boot_id, route)) => (Some(boot_id), route),
         Err(error) => (
             None,
@@ -350,6 +355,23 @@ mod tests {
             last_attempt_version: 65578,
             last_attempt_status: 0,
         }
+    }
+
+    #[test]
+    fn rejects_capsule_delivery_when_fwupd_selected_another_backend() {
+        let result = inspect(
+            baseline(),
+            TARGET,
+            VerifiedCabinet {
+                bytes: 16_908_288,
+                capsule_on_disk: false,
+            },
+        );
+        assert!(!result.matched());
+        assert!(matches!(
+            result.route,
+            Route::Blocked { reason } if reason.contains("different capsule backend")
+        ));
     }
 
     fn variables(dir: &Path, expected: &[u8]) -> io::Result<()> {

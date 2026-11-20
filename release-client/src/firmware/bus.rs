@@ -141,20 +141,23 @@ impl Bus {
     pub(super) fn verify_cabinet(
         &self,
         owner: &CStr,
-        identity: [&CStr; 6],
-        version_raw: u32,
+        identity: [&CStr; 8],
+        versions_raw: [u32; 2],
         cabinet: BorrowedFd<'_>,
-    ) -> Result<u64> {
+    ) -> Result<(u64, bool)> {
         let call = self.prepare(owner, c"/", c"org.freedesktop.fwupd", c"VerifyFvcaCabinet")?;
         for value in identity {
             call.append(b's', value.as_ptr().cast())?;
         }
-        call.append(b'u', std::ptr::from_ref(&version_raw).cast())?;
+        for value in &versions_raw {
+            call.append(b'u', std::ptr::from_ref(value).cast())?;
+        }
         call.append_fd(cabinet)?;
         let mut reply = self.send(&call, CABINET_TIMEOUT)?;
         let bytes = reply.u64()?;
+        let capsule_on_disk = reply.boolean()?;
         reply.finish()?;
-        Ok(bytes)
+        Ok((bytes, capsule_on_disk))
     }
 
     fn prepare(
