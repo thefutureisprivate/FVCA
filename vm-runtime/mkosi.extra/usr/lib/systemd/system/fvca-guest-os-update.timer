@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule signed FVCA Service Guest release checks
+ConditionPathExists=/run/fvca/guest-os-update-owner
+ConditionPathExists=!/run/fvca/boot-trial-started
+
+[Timer]
+OnBootSec=2min
+OnCalendar=hourly
+RandomizedDelaySec=90s
+AccuracySec=1s
+DeferReactivation=yes

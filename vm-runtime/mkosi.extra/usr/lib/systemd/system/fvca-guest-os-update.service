@@ -1,0 +1,33 @@
+[Unit]
+Description=Discover and activate an eligible FVCA Service Guest release
+After=fvca-base-ready.service
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+AssertPathIsMountPoint=/run/fvca/host-data
+AssertPathExists=/run/fvca/guest-trial-enrollment
+ConditionPathExists=/run/fvca/guest-os-update-owner
+ConditionPathExists=!/run/fvca/boot-trial-started
+StartLimitIntervalSec=30min
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/libexec/fvca/release-client --run-guest-update
+TimeoutStartSec=50min
+Restart=on-failure
+RestartSec=5min
+UMask=0077
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+ProtectSystem=strict
+ReadWritePaths=/run/fvca/host-data
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+DevicePolicy=closed
+StandardOutput=journal+console
+StandardError=journal+console

@@ -7,7 +7,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use fvca_trial_authorization::{APPROVAL_LIMIT, GUEST_CAPTURE_LOCK, PENDING};
+use fvca_trial_authorization::{APPROVAL_LIMIT, GUEST_CAPTURE_LOCK, PENDING, guest};
 use rustix::fs::{self, AtFlags, CWD, Mode, OFlags, StatxFlags};
 use rustix::io::Errno;
 
@@ -60,14 +60,15 @@ fn host_data() -> Result<(File, u64)> {
     Ok((host, id))
 }
 
-pub fn require_update_state() -> Result<()> {
+pub fn require_pool_directory(path: &Path) -> Result<File> {
     let (host, id) = host_data()?;
-    let state = File::from(fs::openat(&host, "os-update", DIRECTORY, Mode::empty())?);
+    let relative = path.strip_prefix(HOST_DATA)?;
+    let state = File::from(fs::openat(&host, relative, DIRECTORY, Mode::empty())?);
     private_directory(&state)?;
     if mount_id(&state)? != id {
-        return Err(invalid("Host update state is outside the mounted Btrfs pool").into());
+        return Err(invalid("update state is outside the mounted Btrfs pool").into());
     }
-    Ok(())
+    Ok(state)
 }
 
 pub fn lock_install() -> Result<File> {
@@ -77,7 +78,7 @@ pub fn lock_install() -> Result<File> {
     Ok(lock)
 }
 
-fn private_file(file: &File) -> io::Result<()> {
+pub fn private_file(file: &File) -> io::Result<()> {
     let meta = file.metadata()?;
     if !meta.is_file()
         || meta.uid() != 0
@@ -130,15 +131,7 @@ fn matching_record(inbox: &File, name: &str, envelope: &[u8]) -> Result<Option<F
 }
 
 pub fn check_install(transaction: &str, envelope: &[u8]) -> Result<bool> {
-    for path in [ACTIVATION, BOOT_NEXT, "/run/fvca/boot-trial-started"] {
-        match std::fs::symlink_metadata(path) {
-            Ok(_) => {
-                return Err(invalid("a Host reboot or trial activation is already pending").into());
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error.into()),
-        }
-    }
+    require_idle()?;
     let (host, id) = host_data()?;
     let Some(inbox) = inbox(&host, id)? else {
         return Ok(false);
@@ -151,6 +144,26 @@ pub fn check_install(transaction: &str, envelope: &[u8]) -> Result<bool> {
         Err(error) => return Err(error.into()),
     }
     Ok(matching_record(&inbox, PENDING, envelope)?.is_some())
+}
+
+pub fn require_idle() -> Result<()> {
+    for path in [
+        PathBuf::from(ACTIVATION),
+        PathBuf::from(BOOT_NEXT),
+        PathBuf::from("/run/fvca/boot-trial-started"),
+        Path::new("/run/fvca").join(guest::FENCE),
+    ] {
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {
+                return Err(
+                    invalid("a reboot or release trial activation is already pending").into(),
+                );
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 pub fn publish(
@@ -184,7 +197,7 @@ pub fn publish(
     publish_record(&inbox, PENDING, envelope, authorize)
 }
 
-fn publish_record(
+pub fn publish_record(
     inbox: &File,
     name: &str,
     envelope: &[u8],
@@ -201,6 +214,10 @@ fn publish_record(
 }
 
 pub fn request_activation() -> Result<()> {
+    request_unit(ACTIVATE_TRIAL, "Hypervisor")
+}
+
+pub fn request_unit(unit: &str, release: &str) -> Result<()> {
     let status = Command::new("/usr/bin/systemctl")
         .env_clear()
         .stdin(Stdio::null())
@@ -210,12 +227,12 @@ pub fn request_activation() -> Result<()> {
             "--no-block",
             "--job-mode=fail",
             "start",
-            ACTIVATE_TRIAL,
+            unit,
         ])
         .status()?;
     if !status.success() {
         return Err(io::Error::other(format!(
-            "systemd declined the Hypervisor activation job ({status})"
+            "systemd declined the {release} activation job ({status})"
         ))
         .into());
     }

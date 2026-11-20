@@ -5,6 +5,8 @@
 use std::collections::BTreeSet;
 use std::io;
 
+pub mod guest;
+
 pub const APPROVAL_LIMIT: usize = 2048;
 pub const PENDING: &str = "pending-trial";
 pub const KEY_ARGUMENT: &str = "fvca.trial_key";

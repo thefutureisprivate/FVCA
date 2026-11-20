@@ -12,123 +12,30 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use fvca_initrd_bootstrap::{guest_boot, invalid, recovery, run, runtime};
 
 use fvca_libvirt_boundary::{Connection, RUNNING};
+use fvca_trial_authorization::guest::{
+    self, ATTEMPT_LIMIT as LIMIT, ENROLLMENT_LIMIT, ENVELOPE_LIMIT, FENCE, IMAGE_LIMIT, STORE,
+    Trial,
+};
 
 use super::{CAPTURE_LOCK, OPERATION_LOCK, UUID, capture};
 
-const STORE: &str = "/run/fvca/host-data/guest-updates";
 const MOUNT: &str = "/run/fvca/guest-trial-verify";
 const DISSECT: &str = "/usr/bin/systemd-dissect";
 const RUN: &str = "/run/fvca";
 const RELEASES: &str = "/run/fvca/guest-releases";
-const FENCE: &str = "guest-trial-inflight";
 const WORK: &str = "guest-trial-work";
 const WORKER: &str = "fvca-guest-trial-attempt.service";
 const WORKER_DROPIN: &str = "/run/systemd/system/fvca-guest-trial-attempt.service.d";
 const DEADLINE: &str = "50-fvca-deadline.conf";
-const LIMIT: u8 = 3;
-const MAX_IMAGE: u64 = 4 * 1024 * 1024 * 1024;
 const O_NOFOLLOW: i32 = 0o400000;
 const O_NONBLOCK: i32 = 0o4000;
 
-struct Trial<'a> {
-    transaction: &'a str,
-    stable: &'a str,
-    stable_epoch: u64,
-    candidate_epoch: u64,
-    deadline: u64,
-    not_before: u64,
-    expires: u64,
-    image_digest: &'a str,
-    image_bytes: u64,
-    launch: &'a str,
-    selection: guest_boot::Selection<'a>,
-}
-
-fn field<'a>(line: &'a str, key: &str) -> io::Result<&'a str> {
-    line.strip_prefix(key)
-        .ok_or_else(|| invalid("missing signed Guest trial field"))
-}
-
-fn number(line: &str, key: &str) -> io::Result<u64> {
-    guest_boot::positive(field(line, key)?)
-}
-
-impl<'a> Trial<'a> {
-    fn parse(body: &'a str) -> io::Result<Self> {
-        let (authority, launch) = body.split_at(
-            body.find("FVCA-GUEST-LAUNCH-1\n")
-                .ok_or_else(|| invalid("missing Guest trial launch selection"))?,
-        );
-        let fields: Vec<_> = authority.split('\n').collect();
-        let [
-            "FVCA-GUEST-TRIAL-1",
-            transaction,
-            guest,
-            stable,
-            stable_epoch,
-            candidate_epoch,
-            from,
-            until,
-            deadline,
-            "data=compatible",
-            image_digest,
-            image_bytes,
-            "",
-        ] = fields.as_slice()
-        else {
-            return Err(invalid("malformed Guest trial authorization"));
-        };
-        if field(guest, "guest=")?.as_bytes() != guest_boot::SERVICE_GUEST_UUID.to_bytes() {
-            return Err(invalid("trial does not authorize this Service Guest"));
-        }
-        let stable = runtime::hash(field(stable, "stable_bundle=")?)?;
-        let selection = guest_boot::parse(launch)?;
-        let stable_epoch = number(stable_epoch, "stable_epoch=")?;
-        let candidate_epoch = number(candidate_epoch, "candidate_epoch=")?;
-        let not_before = number(from, "not_before=")?;
-        let expires = number(until, "expires=")?;
-        let deadline = number(deadline, "health_seconds=")?;
-        let image_bytes = number(image_bytes, "candidate_image_bytes=")?;
-        if stable == selection.bundle
-            || candidate_epoch < stable_epoch
-            || !expires
-                .checked_sub(not_before)
-                .is_some_and(|duration| (1..=86_400).contains(&duration))
-            || !(10..=300).contains(&deadline)
-            || image_bytes > MAX_IMAGE
-            || !image_bytes.is_multiple_of(512)
-        {
-            return Err(invalid(
-                "Guest trial exceeds its approved composition, epoch, time or size bounds",
-            ));
-        }
-        Ok(Self {
-            transaction: recovery::uuid(field(transaction, "transaction=")?)?,
-            stable,
-            stable_epoch,
-            candidate_epoch,
-            deadline,
-            not_before,
-            expires,
-            image_digest: runtime::hash(field(image_digest, "candidate_image_sha256=")?)?,
-            image_bytes,
-            launch,
-            selection,
-        })
-    }
-
-    fn require_fresh(&self) -> io::Result<()> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(io::Error::other)?
-            .as_secs();
-        if !(self.not_before..self.expires).contains(&now) {
-            return Err(invalid(
-                "Guest trial is outside its signed validity interval",
-            ));
-        }
-        Ok(())
-    }
+fn require_fresh(trial: &Trial<'_>) -> io::Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_secs();
+    trial.require_fresh(now)
 }
 
 fn private_file(path: &Path, max: u64) -> io::Result<File> {
@@ -225,15 +132,12 @@ fn verify_mounted(root: &Path, trial: &Trial<'_>) -> io::Result<()> {
 }
 
 fn enrollment() -> io::Result<([u8; 32], u64)> {
-    let base = read(Path::new(guest_boot::TRIAL_ENROLLMENT), 53)?;
-    let (key, epoch) = base
-        .split_first_chunk::<32>()
-        .ok_or_else(|| invalid("Guest trial authority is not enrolled"))?;
-    let epoch = std::str::from_utf8(epoch)
-        .map_err(io::Error::other)?
-        .strip_suffix('\n')
-        .ok_or_else(|| invalid("invalid enrolled Guest epoch"))?;
-    Ok((*key, guest_boot::positive(epoch)?))
+    let base = read(
+        Path::new(guest_boot::TRIAL_ENROLLMENT),
+        ENROLLMENT_LIMIT as u64,
+    )?;
+    let (key, epoch) = guest::enrollment(&base)?;
+    Ok((*key, epoch))
 }
 
 fn signed<'a>(key: &[u8; 32], approval: &'a [u8]) -> io::Result<Trial<'a>> {
@@ -256,7 +160,7 @@ fn mount_image(trial: &Trial<'_>, target: &Path) -> io::Result<()> {
     super::private_directory(&directory)?;
     let path: PathBuf = directory.join("guest-boot.raw");
     super::require_pool_path(&path)?;
-    let file = private_file(&path, MAX_IMAGE)?;
+    let file = private_file(&path, IMAGE_LIMIT)?;
     if file.metadata()?.len() != trial.image_bytes
         || recovery::sha256(file.try_clone()?)? != trial.image_digest
     {
@@ -283,13 +187,13 @@ fn mount_image(trial: &Trial<'_>, target: &Path) -> io::Result<()> {
 
 pub(super) fn verify() -> io::Result<()> {
     let (key, epoch) = enrollment()?;
-    let approval = read(&store()?.join("pending-trial"), 4096)?;
+    let approval = read(&store()?.join("pending-trial"), ENVELOPE_LIMIT as u64)?;
     let trial = signed(&key, &approval)?;
     require_current(&trial, &key, epoch)?;
     // The verification service's private namespace reclaims a partial mount on error.
     mount_image(&trial, Path::new(MOUNT))?;
     run(Command::new(DISSECT).args(["--umount", MOUNT]))?;
-    trial.require_fresh()?;
+    require_fresh(&trial)?;
     println!(
         "FVCA_GUEST_TRIAL_PREPARED {} {} {} {}",
         trial.transaction, trial.candidate_epoch, trial.selection.bundle, trial.deadline
@@ -343,7 +247,7 @@ fn unmount_release(bundle: &str) -> io::Result<()> {
 }
 
 fn optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    match read(path, 4096) {
+    match read(path, ENVELOPE_LIMIT as u64) {
         Ok(value) => Ok(Some(value)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
@@ -380,7 +284,7 @@ fn require_current(trial: &Trial<'_>, key: &[u8; 32], enrolled: u64) -> io::Resu
             "Guest trial differs from the enrolled running release",
         ));
     }
-    trial.require_fresh()
+    require_fresh(trial)
 }
 
 fn publish_selection(trial: &Trial<'_>) -> io::Result<()> {
@@ -497,7 +401,7 @@ fn run_attempt(trial: &Trial<'_>, number: u8) -> io::Result<bool> {
 pub(super) fn boot_attempt() -> io::Result<()> {
     let (key, epoch) = enrollment()?;
     let root = Path::new(RUN);
-    let approval = read(&root.join(WORK), 4096)?;
+    let approval = read(&root.join(WORK), ENVELOPE_LIMIT as u64)?;
     let trial = signed(&key, &approval)?;
     if capture::optional_record(&root.join(FENCE))? != Some(format!("{}\n", trial.selection.bundle))
     {
@@ -520,7 +424,7 @@ pub(super) fn activate() -> io::Result<()> {
     }
     let store = store()?;
     let (key, epoch) = enrollment()?;
-    let approval = read(&store.join("pending-trial"), 4096)?;
+    let approval = read(&store.join("pending-trial"), ENVELOPE_LIMIT as u64)?;
     let trial = signed(&key, &approval)?;
     require_current(&trial, &key, epoch)?;
     let directory = store.join(trial.selection.bundle);
@@ -548,7 +452,7 @@ pub(super) fn activate() -> io::Result<()> {
     mount_release(&trial)?;
     capture::replace_bytes(root, WORK, &approval)?;
     configure_worker(&trial)?;
-    trial.require_fresh()?;
+    require_fresh(&trial)?;
     super::shutdown()?;
     let (volume, disk) = super::verify_data()?;
     if capture::optional_record(Path::new(super::RECEIPT))?
@@ -559,7 +463,7 @@ pub(super) fn activate() -> io::Result<()> {
         ));
     }
     for number in used + 1..=LIMIT {
-        trial.require_fresh()?;
+        require_fresh(&trial)?;
         if optional(&store.join("pending-trial"))?.as_deref() != Some(approval.as_slice()) {
             return Err(invalid("the pending Guest trial changed during activation"));
         }

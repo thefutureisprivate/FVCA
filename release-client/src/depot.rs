@@ -16,14 +16,11 @@ use tokio_util::io::ReaderStream;
 use tough::{Transport, TransportError, TransportErrorKind, TransportStream};
 use url::{Host, Url};
 
-use crate::{Result, invalid, state};
+use crate::{Result, Role, invalid, state};
 
 pub const METADATA_BYTES: u64 = 1024 * 1024;
 pub const CONFIG_BYTES: u64 = 64 * 1024;
-const HOST_DEPOT: &str = "/run/fvca/host-data/os-update/depot";
-const HOST_CA: &str = "/run/fvca/os-update-ca.pem";
-
-pub enum HostDepot {
+pub enum EnrolledDepot {
     Local,
     Https(IpAddr),
 }
@@ -76,7 +73,7 @@ impl Depot {
     pub fn with_scope(
         config: &[u8],
         max_target_bytes: u64,
-        scope: Option<&HostDepot>,
+        scope: Option<(&EnrolledDepot, Role)>,
     ) -> Result<Self> {
         let config: Config = serde_json::from_slice(config)?;
         let (metadata, targets, backend) = match config {
@@ -84,18 +81,23 @@ impl Depot {
                 if !path.is_absolute() {
                     return Err(invalid("local depot requires an absolute path").into());
                 }
-                if scope.is_some()
-                    && (!matches!(scope, Some(HostDepot::Local)) || path != Path::new(HOST_DEPOT))
+                let expected = scope.map(|(_, role)| {
+                    Path::new("/run/fvca/host-data")
+                        .join(role.update_state())
+                        .join("depot")
+                });
+                if let Some((endpoint, _)) = scope
+                    && (!matches!(endpoint, EnrolledDepot::Local)
+                        || expected.as_ref() != Some(&path))
                 {
-                    return Err(invalid(
-                        "local depot differs from the signed Host update enrollment",
-                    )
-                    .into());
+                    return Err(
+                        invalid("local depot differs from the signed update enrollment").into(),
+                    );
                 }
                 let root = path.canonicalize()?;
-                if scope.is_some() && root != Path::new(HOST_DEPOT) {
+                if expected.as_ref().is_some_and(|expected| expected != &root) {
                     return Err(invalid(
-                        "the signed Host depot path resolves outside the update state",
+                        "local depot resolves outside the signed update enrollment",
                     )
                     .into());
                 }
@@ -112,17 +114,19 @@ impl Depot {
                 ca_file,
                 deadline_seconds,
             } => {
-                if let Some(scope) = scope {
+                if let Some((endpoint, role)) = scope {
                     let address = match base_url.host() {
                         Some(Host::Ipv4(ip)) => Some(IpAddr::V4(ip)),
                         Some(Host::Ipv6(ip)) => Some(IpAddr::V6(ip)),
                         _ => None,
                     };
-                    if !matches!(scope, HostDepot::Https(ip) if address == Some(*ip))
-                        || ca_file != Path::new(HOST_CA)
+                    if !matches!(endpoint, EnrolledDepot::Https(ip) if address == Some(*ip))
+                        || ca_file
+                            != Path::new("/run/fvca")
+                                .join(format!("{}-ca.pem", role.update_state()))
                     {
                         return Err(invalid(
-                            "HTTPS depot or CA differs from the signed Host update enrollment",
+                            "HTTPS depot or CA differs from the signed update enrollment",
                         )
                         .into());
                     }
@@ -342,15 +346,16 @@ mod tests {
             "ca_file":"/run/fvca/os-update-ca.pem","deadline_seconds":60}"#;
         let wrong_ca = br#"{"transport":"https","base_url":"https://192.0.2.1/",
             "ca_file":"/different-ca.pem","deadline_seconds":60}"#;
-        let https = HostDepot::Https(IpAddr::from([192, 0, 2, 1]));
+        let https = EnrolledDepot::Https(IpAddr::from([192, 0, 2, 1]));
         for (config, scope) in [
-            (local.as_slice(), &HostDepot::Local),
-            (wrong_https.as_slice(), &HostDepot::Local),
+            (local.as_slice(), &EnrolledDepot::Local),
+            (wrong_https.as_slice(), &EnrolledDepot::Local),
             (wrong_https.as_slice(), &https),
             (wrong_ca.as_slice(), &https),
         ] {
-            let error = Depot::with_scope(config, 1024, Some(scope)).unwrap_err();
-            assert!(error.to_string().contains("signed Host update enrollment"));
+            let error =
+                Depot::with_scope(config, 1024, Some((scope, Role::Hypervisor))).unwrap_err();
+            assert!(error.to_string().contains("signed update enrollment"));
         }
     }
 }

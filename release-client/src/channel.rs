@@ -1,5 +1,7 @@
 //! Discover exact OS compositions under standing owner and qualification authority.
 
+mod guest;
+
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
@@ -18,7 +20,7 @@ use sha2::{Digest, Sha256};
 use tough::schema::key::Key;
 use tough::{IntoVec, Repository, TargetName};
 
-use crate::depot::{CONFIG_BYTES, Depot, HostDepot, METADATA_BYTES};
+use crate::depot::{CONFIG_BYTES, Depot, EnrolledDepot, METADATA_BYTES};
 use crate::{
     MANIFEST_BYTES, Member, Result, Role, Selection, check_target, gpt, handoff, install::Slot,
     invalid, load_repository, stage, state, valid_digest,
@@ -28,13 +30,14 @@ pub enum Operation {
     Discover,
     PrepareGpt,
     DeliverTrial(Delivery),
+    ScheduleGuest(EnrolledDepot),
 }
 
 pub enum Delivery {
     Inbox,
     Activate,
     Scheduled {
-        depot: HostDepot,
+        depot: EnrolledDepot,
         peer: Option<String>,
     },
 }
@@ -110,12 +113,14 @@ struct Hold {
     until: i64,
 }
 
-#[derive(Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Active {
     role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
     slot: Option<Slot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guest_bundle: Option<String>,
     sequence: u64,
     epoch: u64,
     manifest_sha256: String,
@@ -169,6 +174,7 @@ enum Disposition {
     Ready,
     OutsideMaintenance,
     Hold,
+    Exhausted,
 }
 
 #[derive(Serialize)]
@@ -208,10 +214,10 @@ impl Policy {
             || !valid_digest(&self.qualification_key_ed25519)
             || self.minimum_epoch == 0
             || (self.role != Role::Hypervisor && self.hypervisor_gpt.is_some())
-            || self
-                .trial_key_ed25519
-                .as_ref()
-                .is_some_and(|key| self.hypervisor_gpt.is_none() || !valid_digest(key))
+            || self.trial_key_ed25519.as_ref().is_some_and(|key| {
+                (self.role == Role::Hypervisor && self.hypervisor_gpt.is_none())
+                    || !valid_digest(key)
+            })
             || !(1..u64::MAX).contains(&self.max_release_bytes)
             || self.max_staged_bytes < self.max_release_bytes
             || self.hold.as_ref().is_some_and(|hold| {
@@ -245,7 +251,7 @@ impl Head {
         if let Some(release) = &self.release {
             if release.trial_approval.as_ref().is_some_and(|member| {
                 policy.trial_key_ed25519.is_none()
-                    || !(65..=APPROVAL_LIMIT as u64).contains(&member.bytes)
+                    || !(65..=trial_limit(policy.role)).contains(&member.bytes)
                     || !valid_digest(&member.sha256)
             }) {
                 return Err(
@@ -253,7 +259,8 @@ impl Head {
                 );
             }
             if release.promotion_approval.as_ref().is_some_and(|member| {
-                release.trial_approval.is_none()
+                policy.role != Role::Hypervisor
+                    || release.trial_approval.is_none()
                     || !(65..=APPROVAL_LIMIT as u64).contains(&member.bytes)
                     || !valid_digest(&member.sha256)
             }) {
@@ -293,6 +300,13 @@ fn verify(key: &[u8], bytes: &[u8], signature: &[u8], message: &str) -> Result<(
         .map_err(|_| invalid(message).into())
 }
 
+fn trial_limit(role: Role) -> u64 {
+    match role {
+        Role::Hypervisor => APPROVAL_LIMIT as u64,
+        Role::ServiceGuest => fvca_trial_authorization::guest::ENVELOPE_LIMIT as u64,
+    }
+}
+
 async fn boot_envelope(
     repo: &Repository,
     selected: &Selection,
@@ -300,7 +314,7 @@ async fn boot_envelope(
     file: &str,
 ) -> Result<Vec<u8>> {
     let name = selected.name(file)?;
-    if check_target(repo, &name, APPROVAL_LIMIT as u64, &member.sha256)? != member.bytes {
+    if check_target(repo, &name, trial_limit(selected.role), &member.sha256)? != member.bytes {
         return Err(invalid("boot envelope length differs from the qualified channel").into());
     }
     let bytes = repo
@@ -340,6 +354,7 @@ fn reconcile_promotion(directory: &Path, active: Active) -> Result<Active> {
     let promoted = Active {
         role: Role::Hypervisor,
         slot: Some(stable.other()),
+        guest_bundle: None,
         sequence: promotion.candidate_sequence,
         epoch: promotion.trial.candidate_epoch,
         manifest_sha256: promotion.candidate_manifest.into(),
@@ -495,6 +510,9 @@ pub async fn discover(
     )?;
     let policy: Policy = serde_json::from_slice(&file)?;
     let zone = policy.validate(Timestamp::now())?;
+    if matches!(operation, Operation::ScheduleGuest(_)) && policy.role != Role::ServiceGuest {
+        return Err(invalid("scheduled Guest updates require a Service Guest policy").into());
+    }
     let qualification = hex::decode(&policy.qualification_key_ed25519)?;
     let trial_key = policy
         .trial_key_ed25519
@@ -519,20 +537,23 @@ pub async fn discover(
     }
     if active.role != policy.role
         || active.sequence == 0
-        || active.epoch < policy.minimum_epoch
         || !valid_digest(&active.manifest_sha256)
     {
         return Err(invalid("active release is outside standing OS update policy").into());
     }
     let installation = match operation {
-        Operation::Discover => None,
+        Operation::Discover | Operation::ScheduleGuest(_) => None,
         Operation::PrepareGpt | Operation::DeliverTrial(_) => Some(
             policy.hypervisor_gpt.as_ref().zip(active.slot).ok_or_else(|| {
                 invalid("this operation requires a signed Hypervisor disk policy and the active slot")
             })?,
         ),
     };
-    if matches!(operation, Operation::DeliverTrial(_)) && trial_key.is_none() {
+    if matches!(
+        operation,
+        Operation::DeliverTrial(_) | Operation::ScheduleGuest(_)
+    ) && trial_key.is_none()
+    {
         return Err(invalid("trial delivery requires a pinned standing trial authority").into());
     }
     checkpoint(
@@ -541,6 +562,20 @@ pub async fn discover(
         policy.revision,
         &file,
     )?;
+    let active = if matches!(operation, Operation::ScheduleGuest(_)) {
+        guest::reconcile(
+            directory,
+            active,
+            trial_key
+                .as_deref()
+                .expect("validated Guest trial authority"),
+        )?
+    } else {
+        active
+    };
+    if active.epoch < policy.minimum_epoch || !valid_digest(&active.manifest_sha256) {
+        return Err(invalid("observed active release is outside standing OS update policy").into());
+    }
     let mut status = Status {
         schema: "fvca-os-update-status-v1",
         active: &active,
@@ -565,7 +600,10 @@ pub async fn discover(
         .prefix(".tuf-")
         .tempdir_in(directory)?;
     let scope = match &operation {
-        Operation::DeliverTrial(Delivery::Scheduled { depot, .. }) => Some(depot),
+        Operation::DeliverTrial(Delivery::Scheduled { depot, .. }) => {
+            Some((depot, Role::Hypervisor))
+        }
+        Operation::ScheduleGuest(depot) => Some((depot, Role::ServiceGuest)),
         _ => None,
     };
     let depot = Depot::with_scope(&config, policy.max_release_bytes.max(MANIFEST_BYTES), scope)?;
@@ -621,6 +659,15 @@ pub async fn discover(
             ))
         }
     };
+    if matches!(operation, Operation::ScheduleGuest(_)) {
+        let retain = head
+            .release
+            .as_ref()
+            .filter(|candidate| candidate.manifest_sha256 != active.manifest_sha256)
+            .map(|candidate| candidate.manifest_sha256.as_str());
+        require_fresh(Timestamp::now())?;
+        guest::retire_staging(directory, retain)?;
+    }
     let mut request_result = Ok(());
     status.disposition = match &head.release {
         None => Disposition::NoRelease,
@@ -644,21 +691,25 @@ pub async fn discover(
             status.staged = Some(candidate.manifest_sha256.clone());
             let now = Timestamp::now();
             require_fresh(now)?;
-            let (disposition, hold, missed) = eligibility(&policy, candidate, now, zone.clone());
+            let (mut disposition, hold, missed) =
+                eligibility(&policy, candidate, now, zone.clone());
+            let eligible = || {
+                let now = Timestamp::now();
+                require_fresh(now)?;
+                if !matches!(
+                    eligibility(&policy, candidate, now, zone.clone()).0,
+                    Disposition::Ready
+                ) {
+                    return Err(invalid(
+                        "release is no longer eligible for preparation or trial delivery",
+                    )
+                    .into());
+                }
+                Ok(())
+            };
             if let Some((site, slot)) = installation
                 && matches!(disposition, Disposition::Ready)
             {
-                let eligible = || {
-                    let now = Timestamp::now();
-                    require_fresh(now)?;
-                    if !matches!(
-                        eligibility(&policy, candidate, now, zone.clone()).0,
-                        Disposition::Ready
-                    ) {
-                        return Err(invalid("Hypervisor release is no longer eligible for preparation or trial delivery").into());
-                    }
-                    Ok(())
-                };
                 let active_slot = (slot, active.epoch, active.manifest_sha256.as_str());
                 match &operation {
                     Operation::DeliverTrial(delivery) => {
@@ -791,9 +842,40 @@ pub async fn discover(
                     Operation::PrepareGpt => {
                         site.install(active_slot, &selection, &staged, directory, &eligible, None)?
                     }
-                    Operation::Discover => unreachable!("discovery has no installation policy"),
+                    Operation::Discover | Operation::ScheduleGuest(_) => {
+                        unreachable!("this operation has no GPT installation policy")
+                    }
                 }
                 status.prepared_inactive_slot = Some(slot.other());
+            }
+            if matches!(operation, Operation::ScheduleGuest(_))
+                && matches!(disposition, Disposition::Ready)
+            {
+                let member = candidate.trial_approval.as_ref().ok_or_else(|| {
+                    invalid("qualified channel does not authorize a Guest trial envelope")
+                })?;
+                let envelope = boot_envelope(&repo, &selection, member, "guest-trial.bin").await?;
+                status.delivered_trial = guest::deliver(
+                    guest::Delivery {
+                        active: &active,
+                        selection: &selection,
+                        sequence: head.sequence,
+                        staged: &staged,
+                        envelope: &envelope,
+                        key: trial_key
+                            .as_deref()
+                            .expect("validated Guest trial authority"),
+                    },
+                    &eligible,
+                )?;
+                if status.delivered_trial.is_some() {
+                    request_result = eligible().and_then(|()| guest::request_activation());
+                    if request_result.is_ok() {
+                        status.requested_trial.clone_from(&status.delivered_trial);
+                    }
+                } else {
+                    disposition = Disposition::Exhausted;
+                }
             }
             status.hold_until = hold;
             status.security_deadline_missed = missed;

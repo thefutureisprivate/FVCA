@@ -33,6 +33,9 @@ GUEST_TRIAL_FILES = (
     Path("usr/lib/systemd/system/fvca-activate-guest-trial.service"),
     Path("usr/lib/systemd/system/fvca-guest-trial-attempt.service"),
 )
+GUEST_UPDATE_UNITS = tuple(
+    Path(f"usr/lib/systemd/system/fvca-guest-os-update.{kind}") for kind in ("service", "timer")
+)
 BASE_BINDING = Path("usr/share/fvca/vm-runtime-base.roothash")
 EXTENSION_RELEASE = Path("usr/lib/extension-release.d/extension-release.vm-runtime")
 REQUIRED_FILES = {
@@ -97,6 +100,7 @@ def allowed(path):
         or path == MCOPY
         or path in (TRIAL_HEALTH, TRIAL_HEALTH_WATCHDOG)
         or path in GUEST_TRIAL_FILES
+        or path in GUEST_UPDATE_UNITS
         or path in FIRMWARE_DATA
         or path.is_relative_to("usr/share/licenses")
         or (path.parent == Path("usr/share/libvirt/cpu_map") and path.suffix == ".xml")

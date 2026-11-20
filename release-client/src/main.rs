@@ -50,6 +50,13 @@ impl Role {
             Self::ServiceGuest => "service-guest",
         }
     }
+
+    fn update_state(self) -> &'static str {
+        match self {
+            Self::Hypervisor => "os-update",
+            Self::ServiceGuest => "guest-os-update",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -342,25 +349,27 @@ fn verify_staged(dir: &Path, manifest: &[u8], members: &[(&str, &Member)]) -> Re
         return Err(invalid("staged release differs from the approved manifest").into());
     }
     for (name, member) in members {
-        let input = state::open_regular(&dir.join(name))?;
-        if input.metadata()?.len() != member.bytes {
-            return Err(invalid("staged member differs from its authorized length").into());
+        verify_member(state::open_regular(&dir.join(name))?, member)?;
+    }
+    Ok(())
+}
+
+fn verify_member(input: File, member: &Member) -> Result<()> {
+    if input.metadata()?.len() != member.bytes {
+        return Err(invalid("staged member differs from its authorized length").into());
+    }
+    let mut stream = input.take(member.bytes + 1);
+    let mut buffer = [0; 64 * 1024];
+    let mut hash = Sha256::new();
+    loop {
+        let size = stream.read(&mut buffer)?;
+        if size == 0 {
+            break;
         }
-        let mut stream = input.take(member.bytes + 1);
-        let mut buffer = [0; 64 * 1024];
-        let mut hash = Sha256::new();
-        loop {
-            let size = stream.read(&mut buffer)?;
-            if size == 0 {
-                break;
-            }
-            hash.update(&buffer[..size]);
-        }
-        if stream.limit() != 1 || hex::encode(hash.finalize()) != member.sha256 {
-            return Err(
-                invalid("staged member differs from its authorized length or digest").into(),
-            );
-        }
+        hash.update(&buffer[..size]);
+    }
+    if stream.limit() != 1 || hex::encode(hash.finalize()) != member.sha256 {
+        return Err(invalid("staged member differs from its authorized length or digest").into());
     }
     Ok(())
 }
@@ -484,10 +493,16 @@ fn run() -> Result<()> {
         .skip(1)
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    if let [option] = operands.as_slice()
-        && option.as_os_str() == "--run-host-update"
-    {
-        return runtime()?.block_on(run_host_update());
+    if let [option] = operands.as_slice() {
+        match option.to_str() {
+            Some("--run-host-update") => {
+                return runtime()?.block_on(run_scheduled_update(Role::Hypervisor));
+            }
+            Some("--run-guest-update") => {
+                return runtime()?.block_on(run_scheduled_update(Role::ServiceGuest));
+            }
+            _ => (),
+        }
     }
     if let [option, disk, sector] = operands.as_slice()
         && option.as_os_str() == "--inspect-hypervisor-gpt"
@@ -571,31 +586,38 @@ fn run() -> Result<()> {
     runtime()?.block_on(intake(root, depot, state, selection, operation))
 }
 
-async fn run_host_update() -> Result<()> {
+async fn run_scheduled_update(role: Role) -> Result<()> {
     use fvca_trial_authorization::{APPROVAL_LIMIT, PEER_BYTES, PEER_ENROLLMENT, RUNNING_CONTEXT};
 
     let boot = Path::new("/run/fvca");
     if boot.join("boot-trial-started").try_exists()? {
-        return Err(invalid("Host update scheduling requires a stable boot").into());
+        return Err(invalid("release update scheduling requires a stable Hypervisor boot").into());
     }
-    state::read(Path::new(RUNNING_CONTEXT), APPROVAL_LIMIT as u64)?;
-    handoff::require_update_state()?;
-    let owner = boot.join("os-update-owner");
-    let scope = state::read(&boot.join("os-update-depot"), 64)?;
+    let name = role.update_state();
+    let directory = boot.join("host-data").join(name);
+    handoff::require_pool_directory(&directory)?;
+    let owner = boot.join(format!("{name}-owner"));
+    let scope = state::read(&boot.join(format!("{name}-depot")), 64)?;
     let scope = std::str::from_utf8(&scope)?
         .strip_suffix('\n')
-        .ok_or_else(|| invalid("invalid signed Host update depot selector"))?;
+        .ok_or_else(|| invalid("invalid signed update depot selector"))?;
     let depot = if scope == "local" {
-        depot::HostDepot::Local
+        depot::EnrolledDepot::Local
     } else {
-        depot::HostDepot::Https(scope.parse()?)
+        depot::EnrolledDepot::Https(scope.parse()?)
     };
-    let peer = match state::read(&boot.join(PEER_ENROLLMENT), PEER_BYTES as u64) {
-        Ok(record) => Some(String::from_utf8(record)?),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
+    let operation = match role {
+        Role::Hypervisor => {
+            state::read(Path::new(RUNNING_CONTEXT), APPROVAL_LIMIT as u64)?;
+            let peer = match state::read(&boot.join(PEER_ENROLLMENT), PEER_BYTES as u64) {
+                Ok(record) => Some(String::from_utf8(record)?),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            channel::Operation::DeliverTrial(channel::Delivery::Scheduled { depot, peer })
+        }
+        Role::ServiceGuest => channel::Operation::ScheduleGuest(depot),
     };
-    let directory = boot.join("host-data/os-update");
     channel::discover(
         &directory.join("trusted-root.json"),
         &directory.join("depot.json"),
@@ -603,7 +625,7 @@ async fn run_host_update() -> Result<()> {
         &directory.join("policy.json"),
         &directory.join("policy.sig"),
         &owner,
-        channel::Operation::DeliverTrial(channel::Delivery::Scheduled { depot, peer }),
+        operation,
     )
     .await
 }

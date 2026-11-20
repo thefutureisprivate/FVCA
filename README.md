@@ -444,6 +444,16 @@ After verified boot and Guest-agent readiness, the controller commits the exact 
 
 Use the `guest-trial-activation` initrd mode and pass `--activation commit` or `--activation exhaust` to the KVM test. These cases check the successful commit and three Host-enforced timeouts. Both then boot the Hypervisor again from their existing Btrfs members and check the selected Guest.
 
+### Enroll automatic Service Guest updates
+
+Compose the ordinary Hypervisor with `--guest-os-update-owner owner.public` and the independent Guest trial key and epoch. This enables a Host timer for the `service-guest` OS release channel. Provision a private root-owned `/run/fvca/host-data/guest-os-update` directory with the signed policy, its detached signature, the pinned TUF root, the depot configuration and `active-os-release.json`. The active record includes the baseline Guest's `guest_bundle` root hash, role, epoch, release manifest digest and channel sequence. Its bundle and epoch must match the signed boot selection. Use `/run/fvca/host-data/guest-os-update/depot` for a local depot. For HTTPS, compose with `--guest-os-update-address IP --guest-os-update-ca CA.pem` and use that literal IP and `/run/fvca/guest-os-update-ca.pem` in the signed depot configuration.
+
+Pin the enrolled independent Guest trial key as `trial_key_ed25519` in the owner policy. In the independently signed channel announcement, set `trial_approval` to the envelope's exact `bytes` and `sha256`. Publish the envelope as `service-guest-EPOCH-MANIFEST_SHA256-guest-trial.bin`. The Service Guest release manifest covers the entire direct-boot bundle and its qualification evidence.
+
+`fvca-guest-os-update.timer` checks after boot and hourly with bounded jitter. The release client stages the exact qualified image, then requests the existing Host trial service once the activation is eligible. Routine activation follows the signed maintenance window. Security activation can start as soon as the release is eligible. The Host keeps the writable Guest data disk attached to only one instance at a time. After commit, the next check reconciles the active channel record with the signed Guest selection and removes superseded download staging. Status is recorded in `guest-os-update/os-update-status.json`. The committed Guest bundle and its recovery dependencies stay available on the Host pool.
+
+Run `tests/check-guest-os-update.py` with the TUF fixture environment, a disposable enrolled Hypervisor image, an authenticated storage fixture and its test trial and owner keys. Use `--routine` to exercise staging outside the configured window. The default run exercises a security candidate and checks its active channel record after the next Hypervisor boot.
+
 ## Development Hypervisor storage
 
 The Hypervisor assembler accepts `--storage tests/host-storage.conf` for the disposable storage fixture. The signed `FVCA-HOST-STORAGE-4` record fixes the protection and unlock modes, the GPT and LUKS2 UUID of each member, and the shared Btrfs filesystem UUID. The initramfs checks both partitions and their LUKS2 identities before prompting on the console, then verifies that each decrypted mapping is backed by its authorized partition on a separate disk.

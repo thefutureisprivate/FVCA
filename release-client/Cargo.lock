@@ -370,6 +370,10 @@ name = "fvca-allocator-binding"
 version = "0.1.0"
 
 [[package]]
+name = "fvca-btrfs-boundary"
+version = "0.1.0"
+
+[[package]]
 name = "fvca-release-client"
 version = "0.1.0"
 dependencies = [
@@ -378,6 +382,7 @@ dependencies = [
  "cc",
  "futures-util",
  "fvca-allocator-binding",
+ "fvca-btrfs-boundary",
  "fvca-trial-authorization",
  "hex",
  "jiff",
