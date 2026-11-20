@@ -14,10 +14,6 @@ const SIGNED: &str = "/usr/lib/fvca/guest-vm-settings";
 const RUNTIME_SUPPORT: &str = "/sysroot/usr/lib/fvca/guest-vm-settings-v2";
 const O_NOFOLLOW: i32 = 0o400000;
 const O_NONBLOCK: i32 = 0o4000;
-#[cfg(any(feature = "libvirt", test))]
-const HOST_RESERVE_MIB: u32 = 1024;
-#[cfg(any(feature = "libvirt", test))]
-const QEMU_RESERVE_MIB: u32 = 512;
 
 #[cfg(feature = "libvirt")]
 pub fn active() -> io::Result<Resources> {
@@ -40,21 +36,10 @@ pub fn require_capacity(resources: Resources) -> io::Result<()> {
 
 #[cfg(any(feature = "libvirt", test))]
 fn check_capacity(resources: Resources, cpus: usize, memory: &str) -> io::Result<()> {
-    let available = memory
-        .lines()
-        .find_map(|line| line.strip_prefix("MemAvailable:"))
-        .and_then(|value| value.trim_ascii().strip_suffix(" kB"))
-        .map(str::trim_ascii)
-        .and_then(|value| value.parse::<u64>().ok())
-        .ok_or_else(|| invalid("Host memory headroom is unavailable"))?;
-    let required_kib =
-        (u64::from(resources.memory_mib) + u64::from(HOST_RESERVE_MIB + QEMU_RESERVE_MIB)) * 1024;
-    if cpus < resources.vcpus as usize || available < required_kib {
-        return Err(invalid(
-            "insufficient Host CPU or memory headroom for the Service Guest",
-        ));
-    }
-    Ok(())
+    resources.require_capacity(
+        cpus,
+        guest_config::host_memory_kib(memory, "MemAvailable:")?,
+    )
 }
 
 fn open(path: &Path, mode: u32) -> io::Result<Option<File>> {

@@ -793,7 +793,7 @@ Publish the approval as `hypervisor-EPOCH-MANIFEST_SHA256-guest-configuration-ch
 
 The two development entry points are `release-client --serve-management-broker` and `release-client --serve-management`. The root broker uses `/run/fvca-management-broker/broker.sock` and accepts the enrolled gateway account. The gateway uses that unprivileged UID and GID and takes `tls.crt` and `tls.key` from its credentials directory. Service confinement and production enablement require separate qualification.
 
-Connect with TLS 1.3, verify the enrolled server certificate and negotiate ALPN `fvca-management/1`. Each connection carries one request and response. Each frame starts with a four-byte big-endian length. The request frame contains the 64-byte Ed25519 signature followed by the exact UTF-8 JSON signed by the read operator. The response frame contains JSON. Requests and responses are limited to 2,048 and 4,096 bytes, respectively.
+Connect with TLS 1.3, verify the enrolled server certificate and negotiate ALPN `fvca-management/1`. Each connection carries one request and response. Each frame starts with a four-byte big-endian length. The request frame contains the 64-byte Ed25519 signature followed by the exact UTF-8 JSON signed by the enrolled operator for that operation. The response frame contains JSON. Requests and responses are limited to 2,048 and 4,096 bytes, respectively.
 
 ```json
 {
@@ -810,6 +810,31 @@ Connect with TLS 1.3, verify the enrolled server certificate and negotiate ALPN 
 Generate a fresh random nonce and use current Unix seconds with a validity window of at most 30 seconds. Use `{"type":"status"}` to read boot-selected settings, Host trial state and separate updater-owned release observations. For preflight, supply `expected: null` for the default profile or `expected: {"revision": 1, "sha256": "..."}` from status. The broker returns the candidate settings revision, its canonical digest and the required activation scope. A stale revision, a changed digest or a running Host trial produces a typed refusal. Check the `fvca-management-response-v1` schema, both identities and the echoed nonce on each response. Apply continues through the signed Host channel and trial described above.
 
 The [off-node OpenTofu provider and module](opentofu/README.md) use this protocol for authenticated Guest configuration preflight and separate release observations.
+
+#### Admit a planned Guest configuration
+
+Add `apply_operator_public_key` to the signed management enrollment to authorize submission. Use a dedicated hex-encoded Ed25519 public key distinct from the read operator and the appliance's signing and release authorities. Writer enrollment requires the existing signed Host configuration-change path. Sign the request envelope with the submitter key and use this operation:
+
+```json
+{
+  "type": "apply-configuration",
+  "plan": {
+    "expected": null,
+    "next": {
+      "revision": 1,
+      "sha256": "d1bfe17ab1d4bba583943189bf1a98f40381038bf6b768d6d7ab0d4979b62b99"
+    },
+    "vcpus": 3,
+    "memory_mib": 2560,
+    "planned_at": 1795190400,
+    "plan_expires": 1795191300
+  }
+}
+```
+
+Use the expected binding and candidate revision and digest from planning. Set the plan's Unix timestamps with a validity interval of at most 15 minutes. Keep the enclosing request within its separate 30-second validity interval. The broker checks the exact revision and digest, machine profile, Host resource capacity, and lifecycle lease before recording the signed intent on Host Btrfs. An accepted operation returns `pending-activation` with a stable `operation_id`. A fresh request for the same intent returns the existing operation. The broker accepts one pending intent at a time.
+
+Use the read operator to request `{"type":"configuration-operation","operation_id":"..."}`. The returned configuration state can be `pending-activation`, `in-trial`, `active` or `superseded`. The broker retains the latest admitted operation. Guest health is covered by the standing trial and promotion protocol. With a submitter enrolled, the scheduled updater admits a configuration-changing release only when its independently signed configuration change matches the broker's admitted intent. The release publisher still supplies the signed composition, trial, and promotion approvals through the TUF channel. The OpenTofu provider currently performs preflight and leaves submission to this protocol.
 
 The Hypervisor verifies that the Guest agent answers a ping before reporting readiness. The agent runs in the Guest's SELinux policy on a fixed virtio-serial channel. Its verified configuration allows synchronization, ping, shutdown, freeze status, mount-list freeze, and thaw RPCs. SELinux confines freeze and thaw to the Btrfs mount at `/run/fvca/guest-data`. Shutdown requires a normal libvirt lifecycle event and confirmation that QEMU exited. The Hypervisor retains the disk attachment while the VM may still be using it. [QEMU Guest Agent configuration](https://www.qemu.org/docs/master/interop/qemu-ga.html) · [libvirt domain lifecycle events](https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainEventStoppedDetailType)
 

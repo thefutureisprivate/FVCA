@@ -73,7 +73,7 @@ pub fn require_pool_directory(path: &Path) -> Result<File> {
 
 pub fn lock_install() -> Result<File> {
     let lock = install_lease()?;
-    lock.try_lock().map_err(io::Error::other)?;
+    lock.try_lock().map_err(io::Error::from)?;
     Ok(lock)
 }
 

@@ -307,10 +307,13 @@ def management_selection(args, authorities):
         return (), (), ()
     raw = read_bytes(args.management_enrollment, 4096)
     policy = parse_json(raw)
-    if (not isinstance(policy, dict) or policy.keys() != {
+    required = {
         "schema", "host", "address", "gateway_uid", "gateway_gid",
         "tls_certificate_sha256", "operator_public_key",
-    } or policy["schema"] != "fvca-hypervisor-management-v1"):
+    }
+    if (not isinstance(policy, dict)
+            or not required <= policy.keys() <= required | {"apply_operator_public_key"}
+            or policy["schema"] != "fvca-hypervisor-management-v1"):
         raise ValueError("invalid Hypervisor management enrollment schema")
     host = policy["host"]
     if type(host) is not str or str(UUID(host)) != host or UUID(host).int == 0 or host == guest_boot_bundle.SERVICE_GUEST_ID:
@@ -329,21 +332,25 @@ def management_selection(args, authorities):
     if any(type(policy[field]) is not int or not 1 <= policy[field] < 2**32 - 1
            for field in ("gateway_uid", "gateway_gid")):
         raise ValueError("invalid management gateway account")
-    for field in ("tls_certificate_sha256", "operator_public_key"):
+    writers = ("apply_operator_public_key",) if "apply_operator_public_key" in policy else ()
+    if writers and args.guest_configuration_public_key is None:
+        raise ValueError("management submission requires an enrolled Guest configuration signing authority")
+    for field in ("tls_certificate_sha256", "operator_public_key", *writers):
         value = policy[field]
         if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None or int(value, 16) == 0:
             raise ValueError("invalid management certificate or operator key pin")
-    operator = bytes.fromhex(policy["operator_public_key"])
+    operators = tuple((field, bytes.fromhex(policy[field])) for field in ("operator_public_key", *writers))
     certs = (args.boot_certificate, args.runtime_certificate, args.guest_release_certificate)
-    der = bytes.fromhex("302a300506032b6570032100") + operator
-    if operator in {key for _, key in authorities} or any(
+    certificate_keys = {
         run("openssl", "pkey", "-pubin", "-outform", "DER", input=guest_boot_bundle.public_key(certificate),
-            capture_output=True).stdout == der for certificate in certs
-    ):
-        raise ValueError("management requests require a distinct Ed25519 operator key")
-    return ((MANAGEMENT_POLICY, raw),), (f"{MANAGEMENT_ARGUMENT}={hashlib.sha256(raw).hexdigest()}",), (
-        (MANAGEMENT_POLICY, operator),
-    )
+            capture_output=True).stdout for certificate in certs
+    }
+    used = {key for _, key in authorities}
+    for _, key in operators:
+        if key in used or bytes.fromhex("302a300506032b6570032100") + key in certificate_keys:
+            raise ValueError("management requests require distinct Ed25519 operator keys")
+        used.add(key)
+    return ((MANAGEMENT_POLICY, raw),), (f"{MANAGEMENT_ARGUMENT}={hashlib.sha256(raw).hexdigest()}",), operators
 
 
 def assemble(args, work):

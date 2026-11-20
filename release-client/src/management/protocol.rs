@@ -24,6 +24,7 @@ pub(super) struct Enrollment {
     pub gateway_gid: u32,
     pub tls_certificate_sha256: String,
     operator_public_key: String,
+    pub apply_operator_public_key: Option<String>,
 }
 
 impl Enrollment {
@@ -42,6 +43,11 @@ impl Enrollment {
             || !valid_digest(&self.tls_certificate_sha256)
             || !valid_digest(&self.operator_public_key)
             || self.operator_public_key.bytes().all(|byte| byte == b'0')
+            || self.apply_operator_public_key.as_ref().is_some_and(|key| {
+                !valid_digest(key)
+                    || key == &self.operator_public_key
+                    || key.bytes().all(|byte| byte == b'0')
+            })
         {
             return Err(invalid("invalid Hypervisor management enrollment").into());
         }
@@ -61,11 +67,20 @@ fn uuid(value: &str) -> bool {
         && value != "00000000-0000-0000-0000-000000000000"
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Expected {
     revision: u64,
     sha256: String,
+}
+
+impl From<Expected> for Binding {
+    fn from(selected: Expected) -> Self {
+        Self {
+            revision: selected.revision,
+            sha256: selected.sha256,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -77,6 +92,31 @@ pub(super) enum Operation {
         vcpus: u32,
         memory_mib: u32,
     },
+    ApplyConfiguration {
+        plan: Plan,
+    },
+    #[serde(rename = "configuration-operation")]
+    InspectConfiguration {
+        operation_id: String,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Plan {
+    pub expected: Option<Expected>,
+    pub next: Expected,
+    pub vcpus: u32,
+    pub memory_mib: u32,
+    pub planned_at: u64,
+    pub plan_expires: u64,
+}
+
+impl Plan {
+    pub fn valid_at(&self, now: u64) -> bool {
+        self.plan_expires.saturating_sub(self.planned_at) <= 900
+            && (self.planned_at..self.plan_expires).contains(&now)
+    }
 }
 
 #[derive(Deserialize)]
@@ -103,13 +143,20 @@ pub(super) fn authorize(enrollment: &Enrollment, packet: &[u8], now: u64) -> Res
         .split_first_chunk::<64>()
         .filter(|_| packet.len() <= REQUEST_BYTES)
         .ok_or_else(|| invalid("invalid management request length"))?;
+    let request: Request = serde_json::from_slice(body)?;
+    let key = match &request.operation {
+        Operation::ApplyConfiguration { .. } => enrollment
+            .apply_operator_public_key
+            .as_deref()
+            .ok_or_else(|| invalid("the Host has no management configuration submitter"))?,
+        _ => &enrollment.operator_public_key,
+    };
     channel::verify(
-        &hex::decode(&enrollment.operator_public_key)?,
+        &hex::decode(key)?,
         body,
         signature,
         "invalid management request signature",
     )?;
-    let request: Request = serde_json::from_slice(body)?;
     if request.schema != "fvca-management-request-v1"
         || request.host != enrollment.host
         || request.guest.as_bytes() != SERVICE_GUEST_UUID.to_bytes()
@@ -131,8 +178,8 @@ pub(super) fn authorize(enrollment: &Enrollment, packet: &[u8], now: u64) -> Res
 
 #[derive(Serialize)]
 pub(super) struct Settings {
-    revision: Option<u64>,
-    sha256: Option<String>,
+    pub revision: Option<u64>,
+    pub sha256: Option<String>,
     vcpus: u32,
     memory_mib: u32,
 }
@@ -160,6 +207,12 @@ pub(super) enum Refusal {
     ConfigurationAuthorityUnavailable,
     ConfigurationExhausted,
     HostStateUnavailable,
+    InvalidConfigurationPlan,
+    ExpiredConfigurationPlan,
+    ConfigurationOperationPending,
+    UnknownConfigurationOperation,
+    LifecycleBusy,
+    OutsideHostCapacity,
 }
 
 #[derive(Serialize)]
@@ -340,5 +393,54 @@ mod tests {
             ),
             Err(Refusal::OutsideMachineProfile),
         ));
+    }
+
+    #[test]
+    fn confines_submitter_and_reader_to_their_enrolled_operations() -> Result<()> {
+        let key = || -> Result<Ed25519KeyPair> {
+            let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())?;
+            Ok(Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())?)
+        };
+        let reader = key()?;
+        let submitter = key()?;
+        let host = "367f5cbc-c46a-437d-af72-5d96d805d234";
+        let mut enrollment: Enrollment = serde_json::from_value(json!({
+            "schema": "fvca-hypervisor-management-v1",
+            "host": host, "address": "127.0.0.1:8443", "gateway_uid": 62000, "gateway_gid": 62000,
+            "tls_certificate_sha256": "b".repeat(64),
+            "operator_public_key": hex::encode(reader.public_key().as_ref()),
+            "apply_operator_public_key": hex::encode(submitter.public_key().as_ref()),
+        }))?;
+        enrollment.validate()?;
+        let request = |operation, key: &Ed25519KeyPair| -> Result<Vec<u8>> {
+            let body = serde_json::to_vec(&json!({
+                "schema": "fvca-management-request-v1", "host": host, "guest": SERVICE_GUEST_UUID.to_str()?,
+                "nonce": "4".repeat(32), "issued_at": 10, "expires": 40, "operation": operation,
+            }))?;
+            let mut packet = key.sign(&body).as_ref().to_vec();
+            packet.extend_from_slice(&body);
+            Ok(packet)
+        };
+        let mutation = json!({"type": "apply-configuration", "plan": {
+            "expected": null, "next": {"revision": 1, "sha256": "c".repeat(64)},
+            "vcpus": 3, "memory_mib": 2560, "planned_at": 5, "plan_expires": 300,
+        }});
+        let read = json!({"type": "configuration-operation", "operation_id": "d".repeat(64)});
+        assert!(authorize(&enrollment, &request(mutation.clone(), &reader)?, 20).is_err());
+        let write = request(mutation, &submitter)?;
+        assert!(matches!(
+            authorize(&enrollment, &write, 20)?.operation,
+            Operation::ApplyConfiguration { .. }
+        ));
+        assert!(authorize(&enrollment, &request(read.clone(), &submitter)?, 20).is_err());
+        assert!(matches!(
+            authorize(&enrollment, &request(read, &reader)?, 20)?.operation,
+            Operation::InspectConfiguration { .. }
+        ));
+        enrollment.apply_operator_public_key = None;
+        assert!(authorize(&enrollment, &write, 20).is_err());
+        enrollment.apply_operator_public_key = Some(enrollment.operator_public_key.clone());
+        assert!(enrollment.validate().is_err());
+        Ok(())
     }
 }

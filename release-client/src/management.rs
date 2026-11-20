@@ -1,5 +1,6 @@
 //! Authenticate requests on the network and authorize them again at the Host broker.
 
+mod intent;
 mod protocol;
 
 use std::fs;
@@ -10,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fvca_trial_authorization::{
-    MANAGEMENT_POLICY, MANAGEMENT_POLICY_BYTES, guest::SERVICE_GUEST_UUID, guest_config::Resources,
-    management_binding,
+    MANAGEMENT_POLICY, MANAGEMENT_POLICY_BYTES, guest::SERVICE_GUEST_UUID, guest_config::Change,
+    guest_config::Resources, management_binding,
 };
 use rustix::process::{Gid, getegid, geteuid};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
@@ -31,7 +32,12 @@ const CREDENTIAL_BYTES: u64 = 16 * 1024;
 const CONNECTIONS: usize = 8;
 const DEADLINE: Duration = Duration::from_secs(3);
 
-fn load_enrollment() -> Result<Arc<Enrollment>> {
+fn enrollment() -> Result<Option<Enrollment>> {
+    let cmdline = state::read(Path::new("/proc/cmdline"), 32 * 1024)?;
+    let selected = management_binding(std::str::from_utf8(&cmdline)?)?;
+    let Some(expected) = selected else {
+        return Ok(None);
+    };
     let file = state::open_regular(Path::new(MANAGEMENT_POLICY))?;
     let metadata = file.metadata()?;
     if metadata.uid() != 0
@@ -45,15 +51,36 @@ fn load_enrollment() -> Result<Arc<Enrollment>> {
     let mut data = Vec::new();
     file.take((MANAGEMENT_POLICY_BYTES + 1) as u64)
         .read_to_end(&mut data)?;
-    let cmdline = state::read(Path::new("/proc/cmdline"), 32 * 1024)?;
-    if data.len() > MANAGEMENT_POLICY_BYTES
-        || management_binding(std::str::from_utf8(&cmdline)?)? != Some(&channel::digest(&data))
-    {
+    if data.len() > MANAGEMENT_POLICY_BYTES || expected != channel::digest(&data) {
         return Err(invalid("management enrollment differs from its signed UKI").into());
     }
     let value: Enrollment = serde_json::from_slice(&data)?;
     value.validate()?;
-    Ok(Arc::new(value))
+    Ok(Some(value))
+}
+
+fn load_enrollment() -> Result<Arc<Enrollment>> {
+    Ok(Arc::new(enrollment()?.ok_or_else(|| {
+        invalid("the running Host has no management enrollment")
+    })?))
+}
+
+pub(super) fn require_configuration_intent(
+    change: &Change,
+    is_release_authority: impl FnOnce(&[u8]) -> bool,
+) -> Result<()> {
+    if let Some(enrollment) = enrollment()?
+        && let Some(key) = &enrollment.apply_operator_public_key
+    {
+        if is_release_authority(&hex::decode(key)?) {
+            return Err(invalid(
+                "the configuration submitter must be independent of release authorities",
+            )
+            .into());
+        }
+        intent::require_release_intent(&enrollment, change)?;
+    }
+    Ok(())
 }
 
 fn tls(enrollment: &Enrollment) -> Result<TlsAcceptor> {
@@ -147,45 +174,6 @@ impl HostState {
             observed_release: channel::observed_host_release()?,
         })
     }
-
-    fn respond(self, operation: &Operation) -> Outcome {
-        match operation {
-            Operation::Status => Outcome::Status {
-                boot_configuration: Settings::new(self.binding, self.resources),
-                host_trial: self.trial,
-                configuration_enrolled: self.configuration_enrolled,
-                observed_release: self.observed_release,
-            },
-            Operation::Preflight {
-                expected,
-                vcpus,
-                memory_mib,
-            } => {
-                if self.trial {
-                    return Outcome::Refused {
-                        code: Refusal::TrialInProgress,
-                    };
-                }
-                if !self.configuration_enrolled {
-                    return Outcome::Refused {
-                        code: Refusal::ConfigurationAuthorityUnavailable,
-                    };
-                }
-                let desired = Resources {
-                    vcpus: *vcpus,
-                    memory_mib: *memory_mib,
-                };
-                match protocol::preflight(self.binding, self.resources, expected.as_ref(), desired)
-                {
-                    Ok((configuration, activation)) => Outcome::Preflight {
-                        configuration,
-                        activation,
-                    },
-                    Err(code) => Outcome::Refused { code },
-                }
-            }
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -200,6 +188,10 @@ enum Outcome {
     Preflight {
         configuration: Settings,
         activation: Activation,
+    },
+    ConfigurationOperation {
+        #[serde(flatten)]
+        receipt: intent::Receipt,
     },
     Refused {
         code: Refusal,
@@ -216,12 +208,58 @@ struct Response<'a> {
     outcome: Outcome,
 }
 
-fn respond(request: &Request, enrollment: &Enrollment) -> Result<Vec<u8>> {
-    let outcome = HostState::read()
-        .map(|state| state.respond(&request.operation))
-        .unwrap_or(Outcome::Refused {
-            code: Refusal::HostStateUnavailable,
-        });
+fn dispatch(
+    operation: &Operation,
+    enrollment: &Enrollment,
+    packet: &[u8],
+) -> std::result::Result<Outcome, Refusal> {
+    match operation {
+        Operation::ApplyConfiguration { plan } => {
+            let receipt = intent::submit(enrollment, plan, packet)?;
+            Ok(Outcome::ConfigurationOperation { receipt })
+        }
+        Operation::InspectConfiguration { operation_id } => {
+            let receipt = intent::status(enrollment, operation_id)?;
+            Ok(Outcome::ConfigurationOperation { receipt })
+        }
+        Operation::Status => {
+            let active = HostState::read().map_err(|_| Refusal::HostStateUnavailable)?;
+            Ok(Outcome::Status {
+                boot_configuration: Settings::new(active.binding, active.resources),
+                host_trial: active.trial,
+                configuration_enrolled: active.configuration_enrolled,
+                observed_release: active.observed_release,
+            })
+        }
+        Operation::Preflight {
+            expected,
+            vcpus,
+            memory_mib,
+        } => {
+            let active = HostState::read().map_err(|_| Refusal::HostStateUnavailable)?;
+            if active.trial {
+                return Err(Refusal::TrialInProgress);
+            }
+            if !active.configuration_enrolled {
+                return Err(Refusal::ConfigurationAuthorityUnavailable);
+            }
+            let desired = Resources {
+                vcpus: *vcpus,
+                memory_mib: *memory_mib,
+            };
+            let (configuration, activation) =
+                protocol::preflight(active.binding, active.resources, expected.as_ref(), desired)?;
+            Ok(Outcome::Preflight {
+                configuration,
+                activation,
+            })
+        }
+    }
+}
+
+fn respond(request: &Request, enrollment: &Enrollment, packet: &[u8]) -> Result<Vec<u8>> {
+    let outcome = dispatch(&request.operation, enrollment, packet)
+        .unwrap_or_else(|code| Outcome::Refused { code });
     Ok(serde_json::to_vec(&Response {
         schema: "fvca-management-response-v1",
         nonce: &request.nonce,
@@ -238,7 +276,7 @@ async fn serve(mut stream: UnixStream, enrollment: &Enrollment) -> Result<()> {
     }
     let data = protocol::read_frame(&mut stream, protocol::REQUEST_BYTES).await?;
     let request = protocol::authorize(enrollment, &data, protocol::current_time()?)?;
-    let reply = respond(&request, enrollment)?;
+    let reply = respond(&request, enrollment, &data)?;
     protocol::write_frame(&mut stream, &reply, protocol::RESPONSE_BYTES).await?;
     Ok(())
 }

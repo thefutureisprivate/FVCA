@@ -23,7 +23,7 @@ use tough::{IntoVec, Repository, TargetName};
 use crate::depot::{CONFIG_BYTES, Depot, EnrolledDepot, METADATA_BYTES};
 use crate::{
     MANIFEST_BYTES, Member, Result, Role, Selection, check_target, gpt, guest_configuration,
-    handoff, install::Slot, invalid, load_repository, stage, state, valid_digest,
+    handoff, install::Slot, invalid, load_repository, management, stage, state, valid_digest,
 };
 
 pub enum Operation {
@@ -891,6 +891,16 @@ pub async fn discover(
                             None
                         };
                         let lease = peer.as_ref().map(|_| handoff::lock_install()).transpose()?;
+                        if let Some(grant) = &change {
+                            management::require_configuration_intent(&grant.change, |writer| {
+                                writer == owner || writer == qualification || writer == key
+                                    || writer == grant.authority
+                                    || promotion.as_ref().is_some_and(|(_, key)| writer == key)
+                                    || repo.root().signed.keys.values().any(|entry| {
+                                        matches!(entry, Key::Ed25519 { keyval, .. } if keyval.public.as_ref() == writer)
+                                    })
+                            })?;
+                        }
                         let transaction = approval.authorization.trial.transaction;
                         if let Some(peer) = peer
                             && !handoff::check_install(transaction, &envelope)?

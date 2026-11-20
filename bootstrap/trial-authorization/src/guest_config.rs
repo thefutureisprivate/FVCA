@@ -29,6 +29,28 @@ impl Resources {
             && (1024..=4096).contains(&memory_mib)
             && memory_mib.is_multiple_of(256)
     }
+
+    pub fn require_capacity(self, cpus: usize, memory_kib: u64) -> io::Result<()> {
+        const HOST_RESERVE_MIB: u64 = 1024;
+        const QEMU_RESERVE_MIB: u64 = 512;
+        let required = (u64::from(self.memory_mib) + HOST_RESERVE_MIB + QEMU_RESERVE_MIB) * 1024;
+        if cpus < self.vcpus as usize || memory_kib < required {
+            return Err(invalid(
+                "insufficient Host CPU or memory headroom for the Service Guest",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn host_memory_kib(meminfo: &str, field: &str) -> io::Result<u64> {
+    meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .and_then(|value| value.trim_ascii().strip_suffix(" kB"))
+        .map(str::trim_ascii)
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| invalid("Host memory capacity is unavailable"))
 }
 
 #[derive(Debug, Eq, PartialEq)]
