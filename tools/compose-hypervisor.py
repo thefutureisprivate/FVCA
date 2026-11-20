@@ -165,6 +165,7 @@ TRIAL_FILE = "hypervisor-trial"
 TRIAL_CANDIDATE_FILE = "hypervisor-trial-candidate"
 TRIAL_SUPPORT = "hypervisor-trial-support-v2"
 EPOCH_FILE = "hypervisor-epoch"
+EPOCH_ARGUMENT = "fvca.hypervisor_epoch"
 PROMOTION_KEY = "hypervisor-promotion-key"
 PROMOTION_SUPPORT = "hypervisor-promotion-support-v1"
 
@@ -214,7 +215,7 @@ def trial_selection(path, ids, guest, *, candidate):
 
 def epoch_selection(path, storage, tpm):
     if path is None:
-        return ()
+        return (), ()
     if storage is None or storage.protection != host_storage.AUTHENTICATED or not tpm:
         raise ValueError("a protected Hypervisor epoch requires authenticated TPM-bound Host storage")
     with path.open("rb") as source:
@@ -222,7 +223,8 @@ def epoch_selection(path, storage, tpm):
     match = re.fullmatch(rb"FVCA-HYPERVISOR-EPOCH-1\nepoch=([1-9][0-9]{0,19})\npolicy_sha256=([0-9a-f]{64})\n", policy)
     if match is None or int(match[1]) >= 2**64 or int(match[2], 16) == 0:
         raise ValueError("invalid signed Hypervisor epoch policy")
-    return ((EPOCH_FILE, policy),)
+    argument = f"{EPOCH_ARGUMENT}={match[1].decode('ascii')},{match[2].decode('ascii')}"
+    return ((EPOCH_FILE, policy),), (argument,)
 
 
 def assemble(args, work):
@@ -232,7 +234,7 @@ def assemble(args, work):
     token_paths = (args.tpm_token_a, args.tpm_token_b)
     if tpm != (args.pcr_key is not None) or any(tpm != (path is not None) for path in token_paths):
         raise ValueError("TPM storage requires a separate PCR signing key and both exported LUKS2 tokens")
-    epoch = epoch_selection(args.epoch_policy, storage, tpm)
+    epoch, epoch_arguments = epoch_selection(args.epoch_policy, storage, tpm)
     pcr_options = []
     if tpm:
         boot_public = run("openssl", "pkey", "-in", args.boot_key, "-pubout", "-outform", "DER",
@@ -296,7 +298,9 @@ def assemble(args, work):
                *trial_selection(args.boot_trial_candidate, ids, guest_hash, candidate=True),
                *promotion_selection(args)),
     )
-    cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS))
+    if any(arg.partition("=")[0] == EPOCH_ARGUMENT for arg in cmdline.split()):
+        raise ValueError("shared core already configures a Hypervisor epoch")
+    cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments))
     immutable = None
     if ids is None:
         disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)

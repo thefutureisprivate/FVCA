@@ -21,6 +21,7 @@ pub mod selinux;
 pub mod vm_confinement;
 
 pub const WORKLOAD_VERITY_CERTIFICATE: &str = "/usr/lib/fvca/workload-verity.der";
+pub const HYPERVISOR_EPOCH_ARGUMENT: &str = "fvca.hypervisor_epoch";
 
 pub fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)

@@ -99,16 +99,21 @@ def qualify(args):
     tuf["write_json"](qualification, {"profile": "disposable offline GPT installation"})
     signed = {}
     choices = {}
-    for label, epoch, slot, runtime in (
-        ("active", 17, args.active_boot, args.active_runtime),
-        ("next", 18, args.next_boot, args.next_runtime),
-        ("mixed", 19, args.next_boot, args.wrong_runtime),
-    ):
+    releases = (
+        ("active", args.active_boot, args.active_runtime),
+        ("next", args.next_boot, args.next_runtime),
+        ("mixed", args.next_boot, args.wrong_runtime),
+        ("wrong-candidate-epoch", args.next_boot, args.next_runtime),
+        ("wrong-recovery-epoch", args.active_boot, args.active_runtime),
+        ("wrong-policy", args.wrong_policy_boot, args.next_runtime),
+        ("missing-epoch", args.missing_epoch_boot, args.next_runtime),
+    )
+    for epoch, (label, slot, runtime) in enumerate(releases, start=args.active_epoch):
         selection, sources = tuf["make_release"](root, {
             "boot.raw": slot, "vm-runtime.raw": runtime, "guest-boot.raw": args.guest,
             "qualification.json": qualification,
         }, epoch, "hypervisor")
-        choices[label] = selection | {"minimum_epoch": 17}
+        choices[label] = selection | {"minimum_epoch": args.active_epoch}
         for logical, source in sources.items():
             member = TargetFile.from_file(logical, str(source), ["sha256"])
             os.link(source, targets / f"{member.hashes['sha256']}.{logical}")
@@ -142,8 +147,9 @@ def qualify(args):
         return json.loads(subprocess.check_output([args.client, "--inspect-hypervisor-gpt", disk, str(SECTOR)]))
 
     run("stage-recovery", "active")
-    review = {"schema": "fvca-hypervisor-gpt-install-v1", "sector_size": SECTOR,
-              "boot_certificate": str(args.boot_certificate), "active_epoch": 17,
+    review = {"schema": "fvca-hypervisor-gpt-install-v2", "sector_size": SECTOR,
+              "boot_certificate": str(args.boot_certificate), "active_epoch": args.active_epoch,
+              "epoch_policy_sha256": args.epoch_policy_sha256,
               "active_manifest_sha256": choices["active"]["manifest_sha256"],
               "active": inspect(active), "inactive": inspect(inactive)}
     initial_candidate = sparse_fingerprint(inactive)
@@ -154,6 +160,18 @@ def qualify(args):
     run("changed-gpt", "next", review | {"inactive": review["inactive"] | {"path": str(altered)}},
         refusal=b"GPT differs from the reviewed disk fingerprint")
     run("mixed-runtime", "mixed", review, refusal=b"packed Hypervisor slot differs")
+    epoch_error = b"signed Hypervisor UKI epoch differs from the approved release"
+    policy_error = b"signed Hypervisor UKI TPM policy differs from the reviewed enrollment"
+    run("wrong-candidate-epoch", "wrong-candidate-epoch", review, refusal=epoch_error)
+    run("stage-wrong-recovery-epoch", "wrong-recovery-epoch")
+    wrong_recovery = choices["wrong-recovery-epoch"]
+    run("wrong-recovery-epoch", "wrong-policy", review | {
+        "active_epoch": wrong_recovery["epoch"], "active_manifest_sha256": wrong_recovery["manifest_sha256"],
+    }, refusal=epoch_error)
+    other_policy = ("a" if args.epoch_policy_sha256.startswith("b") else "b") * 64
+    run("wrong-enrolled-policy", "next", review | {"epoch_policy_sha256": other_policy}, refusal=policy_error)
+    run("wrong-policy", "wrong-policy", review, refusal=policy_error)
+    run("missing-epoch", "missing-epoch", review, refusal=b"expected one epoch and TPM policy")
     broken = clone(active, root / "damaged-recovery.raw")
     with broken.open("r+b") as stream:
         stream.seek(partitions(active)["fvca-core"][0])
@@ -212,8 +230,10 @@ def qualify(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("client", "active", "inactive", "active-boot", "next-boot", "active-runtime", "next-runtime",
-                 "wrong-runtime", "guest", "boot-certificate", "output"):
+                 "wrong-runtime", "wrong-policy-boot", "missing-epoch-boot", "guest", "boot-certificate", "output"):
         parser.add_argument(f"--{name}", type=lambda path: Path(path).absolute(), required=True)
+    parser.add_argument("--active-epoch", type=int, required=True)
+    parser.add_argument("--epoch-policy-sha256", required=True)
     os.umask(0o077)
     qualify(parser.parse_args())
 

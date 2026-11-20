@@ -7,8 +7,11 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
-use fvca_initrd_bootstrap::{backup_job, backup_policy, guest_boot, hypervisor_slot::Slot, hypervisor_trial, invalid, recovery, retention_policy, run};
 use fvca_initrd_bootstrap::runtime::{self, Runtime, hash};
+use fvca_initrd_bootstrap::{
+    HYPERVISOR_EPOCH_ARGUMENT, backup_job, backup_policy, guest_boot, hypervisor_slot::Slot,
+    hypervisor_trial, invalid, recovery, retention_policy, run,
+};
 
 #[path = "fvca-activate-runtime/storage.rs"]
 mod storage;
@@ -23,15 +26,29 @@ fn activate() -> io::Result<()> {
     if fs::read_to_string("/sys/module/kvm_intel/parameters/nested")?.trim_end() != "N"
         || !fs::metadata("/dev/kvm")?.file_type().is_char_device()
     {
-        return Err(invalid("Intel KVM must be available with nested virtualization disabled"));
+        return Err(invalid(
+            "Intel KVM must be available with nested virtualization disabled",
+        ));
     }
     let slot = Slot::load()?;
     let protected_epoch = Path::new("/usr/lib/fvca/hypervisor-epoch").try_exists()?;
-    if protected_epoch {
+    let cmdline = fs::read_to_string("/proc/cmdline")?;
+    let mut epochs = cmdline
+        .split_ascii_whitespace()
+        .filter(|arg| arg.split('=').next() == Some(HYPERVISOR_EPOCH_ARGUMENT));
+    let epoch = epochs.next();
+    if epochs.next().is_some() || epoch.is_some() != protected_epoch {
+        return Err(invalid(
+            "expected exactly one command-line epoch with the signed Hypervisor epoch policy",
+        ));
+    }
+    if let Some(epoch) = epoch {
         if slot.is_none() {
-            return Err(invalid("a protected Hypervisor epoch requires a verified GPT slot"));
+            return Err(invalid(
+                "a protected Hypervisor epoch requires a verified GPT slot",
+            ));
         }
-        run(&mut Command::new("/usr/lib/fvca/check-hypervisor-epoch"))?;
+        run(Command::new("/usr/lib/fvca/check-hypervisor-epoch").arg(epoch))?;
     }
     let verified_runtime = runtime::activate(Runtime::Vm, slot.as_ref().map(|slot| &slot.runtime))?;
     runtime::install_development_probe("fvca-vm-runtime-probe.service", PROBE)?;
@@ -40,10 +57,18 @@ fn activate() -> io::Result<()> {
     retention_policy::activate_if_selected()?;
     let recovering = recovery::activate_if_selected()?;
     backup_job::activate_if_selected(recovering)?;
-    let guest = guest_boot::activate_if_selected(!recovering, slot.as_ref().map(|slot| &slot.guest))?;
+    let guest =
+        guest_boot::activate_if_selected(!recovering, slot.as_ref().map(|slot| &slot.guest))?;
     let esp = slot.as_ref().map(|slot| slot.esp.as_str());
-    hypervisor_trial::start_candidate(slot.as_ref(), guest.as_deref(), &verified_runtime, recovering)?;
-    if let Err(error) = hypervisor_trial::arm_if_authorized(esp, guest.as_deref(), &verified_runtime) {
+    hypervisor_trial::start_candidate(
+        slot.as_ref(),
+        guest.as_deref(),
+        &verified_runtime,
+        recovering,
+    )?;
+    if let Err(error) =
+        hypervisor_trial::arm_if_authorized(esp, guest.as_deref(), &verified_runtime)
+    {
         eprintln!("FVCA_TRIAL_REFUSED {error}");
     }
 

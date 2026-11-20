@@ -39,6 +39,7 @@ const HOST_DISK: [&str; 8] = [
 const DDI: [&str; 3] = [SLOT[1], SLOT[2], "41092b05-9fc8-4523-994f-2def0408b176"];
 const CHUNK: usize = 1024 * 1024;
 const MAX_ESP: u64 = 4 * 1024 * 1024 * 1024;
+const EPOCH_ARGUMENT: &str = "fvca.hypervisor_epoch";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +54,7 @@ struct Review {
     schema: String,
     sector_size: u64,
     boot_certificate: PathBuf,
+    epoch_policy_sha256: String,
     active_epoch: u64,
     active_manifest_sha256: String,
     active: ReviewedDisk,
@@ -63,6 +65,11 @@ struct Artifact {
     file: File,
     layout: Layout<7>,
     digests: [[u8; 32]; 7],
+}
+
+struct ReleaseEpoch<'a> {
+    number: u64,
+    policy: &'a str,
 }
 
 fn digest(file: &File, extent: Extent) -> io::Result<[u8; 32]> {
@@ -121,7 +128,60 @@ fn tool(program: &str, args: &[&Path]) -> Result<()> {
     Ok(())
 }
 
-fn loader(source: &File, esp: Extent, cert: &File, work: &Path) -> Result<[u8; 32]> {
+fn verify_epoch(efi: &Path, expected: &ReleaseEpoch<'_>) -> Result<()> {
+    let result = Command::new("/usr/bin/ukify")
+        .env_clear()
+        .args([
+            "--config=/dev/null",
+            "--json=short",
+            "--section=.cmdline:text",
+            "inspect",
+        ])
+        .arg(efi)
+        .output()?;
+    if !result.status.success() {
+        return Err(invalid("ukify could not inspect the signed Hypervisor command line").into());
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&result.stdout)?;
+    let cmdline = metadata[".cmdline"]["text"].as_str().ok_or_else(|| {
+        invalid("expected one textual command-line section in the signed Hypervisor UKI")
+    })?;
+    let mut epochs = cmdline
+        .split_ascii_whitespace()
+        .filter(|arg| arg.split('=').next() == Some(EPOCH_ARGUMENT));
+    let marker = epochs
+        .next()
+        .and_then(|arg| arg.split_once('='))
+        .and_then(|(_, value)| value.split_once(','));
+    let Some((epoch, policy)) =
+        marker.filter(|_| metadata.get("_profiles").is_none() && epochs.next().is_none())
+    else {
+        return Err(invalid(
+            "expected one epoch and TPM policy in a single-profile Hypervisor UKI",
+        )
+        .into());
+    };
+    if epoch != expected.number.to_string() {
+        return Err(
+            invalid("signed Hypervisor UKI epoch differs from the approved release").into(),
+        );
+    }
+    if policy != expected.policy {
+        return Err(invalid(
+            "signed Hypervisor UKI TPM policy differs from the reviewed enrollment",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn loader(
+    source: &File,
+    esp: Extent,
+    cert: &File,
+    work: &Path,
+    epoch: &ReleaseEpoch<'_>,
+) -> Result<[u8; 32]> {
     if esp.bytes > MAX_ESP {
         return Err(invalid("EFI System Partition exceeds its activation bound").into());
     }
@@ -142,6 +202,7 @@ fn loader(source: &File, esp: Extent, cert: &File, work: &Path) -> Result<[u8; 3
         "/usr/bin/sbverify",
         &[Path::new("--cert"), &fd_path(cert), &efi],
     )?;
+    verify_epoch(&efi, epoch)?;
     let signed = state::open_regular(&efi)?;
     Ok(digest(
         &signed,
@@ -254,14 +315,17 @@ pub fn install(plan: &Path, selected: &Selection, incoming: &Path, state_dir: &P
     let plan: Review = serde_json::from_slice(&state::read(plan, MANIFEST_BYTES)?)?;
     check_sector(plan.sector_size)?;
     if selected.role != Role::Hypervisor
-        || plan.schema != "fvca-hypervisor-gpt-install-v1"
+        || plan.schema != "fvca-hypervisor-gpt-install-v2"
         || !plan.active.path.is_absolute()
         || !plan.inactive.path.is_absolute()
         || !plan.boot_certificate.is_absolute()
+        || !valid_digest(&plan.epoch_policy_sha256)
+        || plan.epoch_policy_sha256.bytes().all(|byte| byte == b'0')
         || !valid_digest(&plan.active_manifest_sha256)
         || !valid_digest(&plan.active.gpt_sha256)
         || !valid_digest(&plan.inactive.gpt_sha256)
         || plan.active.gpt_sha256 == plan.inactive.gpt_sha256
+        || plan.active_epoch == 0
         || !(selected.minimum_epoch..selected.epoch).contains(&plan.active_epoch)
     {
         return Err(invalid("GPT installation requires distinct disks and an eligible reviewed Hypervisor recovery release").into());
@@ -281,17 +345,27 @@ pub fn install(plan: &Path, selected: &Selection, incoming: &Path, state_dir: &P
         .prefix(".gpt-")
         .permissions(Permissions::from_mode(0o700))
         .tempdir_in(state_dir)?;
+    let active_epoch = ReleaseEpoch {
+        number: plan.active_epoch,
+        policy: &plan.epoch_policy_sha256,
+    };
+    let next_epoch = ReleaseEpoch {
+        number: selected.epoch,
+        policy: &plan.epoch_policy_sha256,
+    };
     let stable_efi = loader(
         &stable.file,
         stable.layout.regions[0].extent,
         &cert,
         scratch.path(),
+        &active_epoch,
     )?;
     loader(
         &candidate.file,
         candidate.layout.regions[0].extent,
         &cert,
         scratch.path(),
+        &next_epoch,
     )?;
 
     let (active, active_layout) = reviewed(&plan.active, sector, false)?;
@@ -318,6 +392,7 @@ pub fn install(plan: &Path, selected: &Selection, incoming: &Path, state_dir: &P
         active_layout.regions[0].extent,
         &cert,
         scratch.path(),
+        &active_epoch,
     )? != stable_efi
     {
         return Err(invalid("active recovery EFI loader differs from its approved release").into());

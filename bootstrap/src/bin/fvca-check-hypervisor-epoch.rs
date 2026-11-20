@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::alloc::System;
+use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::FileTypeExt;
@@ -8,7 +9,7 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::Duration;
 
-use fvca_initrd_bootstrap::invalid;
+use fvca_initrd_bootstrap::{HYPERVISOR_EPOCH_ARGUMENT, invalid};
 
 #[global_allocator]
 static ALLOCATOR: System = System;
@@ -31,7 +32,7 @@ struct Selection {
     policy: [u8; 32],
 }
 
-fn selection() -> io::Result<Selection> {
+fn selection(command_line: &str) -> io::Result<Selection> {
     let mut data = String::new();
     File::open(POLICY)?.take(257).read_to_string(&mut data)?;
     let fields: Vec<_> = data.split('\n').collect();
@@ -62,6 +63,11 @@ fn selection() -> io::Result<Selection> {
     }
     if digest == [0; 32] {
         return Err(invalid("TPM counter policy digest must be nonzero"));
+    }
+    if command_line != format!("{HYPERVISOR_EPOCH_ARGUMENT}={epoch},{policy}") {
+        return Err(invalid(
+            "command-line epoch or TPM policy differs from the signed initramfs",
+        ));
     }
     Ok(Selection {
         epoch: number,
@@ -153,7 +159,15 @@ fn counter(device: &mut File) -> io::Result<u64> {
 
 fn check() -> io::Result<()> {
     fvca_allocator_binding::require_allocator()?;
-    let selected = selection()?;
+    let mut args = env::args_os().skip(1);
+    let command_line = args
+        .next()
+        .and_then(|arg| arg.into_string().ok())
+        .ok_or_else(|| invalid("expected one Hypervisor epoch argument"))?;
+    if args.next().is_some() {
+        return Err(invalid("expected one Hypervisor epoch argument"));
+    }
+    let selected = selection(&command_line)?;
     let mut device = OpenOptions::new()
         .read(true)
         .write(true)
