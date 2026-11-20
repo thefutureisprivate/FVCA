@@ -17,7 +17,6 @@ import backup_destination
 import guest_boot_bundle
 import host_storage
 import hypervisor_gpt
-from image_verity import VERITY_PARTITIONS, read_layout, verify_verity
 from runtime_boot import (
     DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_LAUNCH_FILES, WORKLOAD_TRUST_FILES,
     composition_archive, prepare_core, run, verify_initrd, write_disk,
@@ -78,17 +77,7 @@ def guest_selection(args, work):
                                         guest_boot_bundle.public_key(args.runtime_certificate))
     directory = work / "guest"
     directory.mkdir()
-    size, parts = read_layout(guest, VERITY_PARTITIONS)
-    root = verify_verity(guest, size, parts, args.boot_certificate, directory)
-    tree = directory / "tree"
-    run("fsck.erofs", f"--extract={tree}", "--preserve-perms", directory / "root")
-    if {entry.name for entry in tree.iterdir()} != set(guest_boot_bundle.BUNDLE_FILES):
-        raise ValueError("unexpected Guest boot disk contents")
-    _, release = guest_boot_bundle.verify(tree, certificate)
-    digests = release["files"] | {name: guest_boot_bundle.sha256(tree / name) for name in ("release.json", "release.p7s")}
-    checksums = "".join(f"{digests[name]}  {name}\n" for name in guest_boot_bundle.BUNDLE_FILES)
-    selection = (f"FVCA-GUEST-LAUNCH-1\nbundle={root}\ncore={release['core_root']}\n"
-                 f"runtime={release['runtime_root']}\n{checksums}").encode("ascii")
+    root, selection = guest_boot_bundle.select_image(guest, args.boot_certificate, certificate, directory)
     files = tuple(zip(GUEST_LAUNCH_FILES, (selection, (directory / "root.p7s").read_bytes()), strict=True))
     return files, root
 
@@ -200,6 +189,8 @@ EPOCH_ARGUMENT = "fvca.hypervisor_epoch"
 PROMOTION_KEY = "hypervisor-promotion-key"
 PROMOTION_SUPPORT = "hypervisor-promotion-support-v2"
 STANDING_TRIAL_KEY = "hypervisor-trial-key"
+GUEST_TRIAL_KEY = "guest-trial-key"
+GUEST_BASE_EPOCH = "guest-base-epoch"
 STANDING_TRIAL_SUPPORT = "hypervisor-standing-trial-support-v5"
 TRIAL_KEY_ARGUMENT = "fvca.trial_key"
 
@@ -207,6 +198,7 @@ TRIAL_KEY_ARGUMENT = "fvca.trial_key"
 def approval_keys(args):
     authorities = [(name, source) for name, source in (
         (PROMOTION_KEY, args.boot_promotion_public_key), (STANDING_TRIAL_KEY, args.boot_trial_public_key),
+        (GUEST_TRIAL_KEY, args.guest_trial_public_key),
     ) if source is not None]
     if not authorities:
         return ()
@@ -267,6 +259,8 @@ def epoch_selection(path, storage, tpm):
 
 def assemble(args, work):
     storage = host_storage.selection(args.storage) if args.storage is not None else None
+    if args.guest_trial_public_key is not None and (storage is None or storage.protection != host_storage.AUTHENTICATED):
+        raise ValueError("Guest trial enrollment requires authenticated Host storage")
     auto = storage is not None and storage.unlock == "tpm2-auto"
     if auto and args.epoch_policy is None:
         raise ValueError("unattended TPM unlock requires a protected Hypervisor epoch")
@@ -305,7 +299,8 @@ def assemble(args, work):
         "hypervisor.composition", "vm-runtime.p7s", "host-storage",
         *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, *BACKUP_FILES, BACKUP_JOB_FILE,
         RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE, TRIAL_FILE,
-        TRIAL_CANDIDATE_FILE, TRIAL_WATCHDOG_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY, EPOCH_FILE, *UPDATE_FILES, UPDATE_PEER,
+        TRIAL_CANDIDATE_FILE, TRIAL_WATCHDOG_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY,
+        GUEST_TRIAL_KEY, GUEST_BASE_EPOCH, EPOCH_FILE, *UPDATE_FILES, UPDATE_PEER,
     ))
     required = ACTIVATION_FILES
     if storage is not None:
@@ -325,6 +320,12 @@ def assemble(args, work):
     if args.boot_trial_public_key is not None:
         required += (f"usr/lib/fvca/{STANDING_TRIAL_SUPPORT}", "usr/lib/fvca/set-boot-next",
                      "usr/lib/fvca/verify-boot-approval", "usr/bin/systemctl")
+    if args.guest_trial_public_key is not None:
+        required += ("usr/lib/fvca/guest-trial-enrollment-v1",)
+        for member in vm_runtime.GUEST_TRIAL_FILES:
+            path = runtime_work / "tree" / member
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("the VM runtime lacks the staged Guest trial verifier")
     if args.os_update_owner is not None:
         required += ("usr/lib/fvca/hypervisor-update-support-v2", "usr/bin/chcon")
         if args.boot_promotion_public_key is not None:
@@ -355,6 +356,7 @@ def assemble(args, work):
     candidate_trial, trial_arguments = trial_selection(args.boot_trial_candidate, ids, guest_hash,
                                                         candidate=True)
     authorities = approval_keys(args)
+    guest_epoch = ((GUEST_BASE_EPOCH, f"{args.guest_trial_epoch}\n".encode("ascii")),) if args.guest_trial_epoch else ()
     trial_key_arguments = tuple(f"{TRIAL_KEY_ARGUMENT}={key.hex()}" for name, key in authorities
                                 if name == STANDING_TRIAL_KEY)
     composition = composition_archive(
@@ -362,7 +364,7 @@ def assemble(args, work):
         extra=(*extra, *epoch, *guest, *backup, *backup_job_selection(args.backup_job, backup),
                *restore_selection(args.restore_authorization, backup),
                *retention_selection(args.retention_policy, backup),
-               *stable_trial, *candidate_trial, *watchdog,
+               *stable_trial, *candidate_trial, *watchdog, *guest_epoch,
                *authorities, *update_selection(args, authorities)),
     )
     if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT, TRIAL_WATCHDOG_ARGUMENT)
@@ -400,6 +402,8 @@ def main():
     parser.add_argument("--storage", type=Path, help="host storage selection to embed in the signed UKI")
     parser.add_argument("--guest-boot", type=Path, help="verified Guest boot bundle disk to authorize")
     parser.add_argument("--guest-release-certificate", type=Path, help="trusted Guest release signer")
+    parser.add_argument("--guest-trial-public-key", type=Path, help="pin the independent Service Guest trial signer")
+    parser.add_argument("--guest-trial-epoch", type=int, help="initial epoch of the enrolled Service Guest release")
     parser.add_argument("--gpt-slot", type=UUID, help="assign one unique UUID to a self-contained Hypervisor GPT slot image")
     parser.add_argument("--epoch-policy", type=Path, help="signed release epoch and enrolled TPM counter policy")
     parser.add_argument("--gpt-sector-size", type=int, choices=(512, 4096), help="GPT slot logical sector size (default 4096)")
@@ -429,6 +433,13 @@ def main():
     for member in ("a", "b"):
         parser.add_argument(f"--tpm-token-{member}", type=Path, help=f"exported LUKS2 token for member {member}")
     args = parser.parse_args()
+    if (args.guest_trial_public_key is None) != (args.guest_trial_epoch is None) or (
+        args.guest_trial_epoch is not None and (
+            not 0 < args.guest_trial_epoch < 2**64 or args.guest_boot is None or args.storage is None
+            or args.restore_authorization is not None
+        )
+    ):
+        parser.error("Guest trial enrollment requires a key, positive epoch, Guest bundle and ordinary Host storage")
     if (args.guest_boot is None) != (args.guest_release_certificate is None) or (
         args.guest_boot is not None and args.storage is None
     ):

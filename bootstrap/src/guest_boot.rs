@@ -2,7 +2,8 @@
 
 use std::ffi::CStr;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::{invalid, runtime};
@@ -12,6 +13,9 @@ pub const SERVICE_GUEST_UUID: &CStr = c"e629aa43-af11-47c6-aedc-a2dc47f1cc3a";
 pub const SELECTION: &str = "/run/fvca/guest-launch";
 const SOURCE: &str = "/usr/lib/fvca/guest-launch";
 const SIGNATURE: &str = "/usr/lib/fvca/guest-launch.p7s";
+const TRIAL_KEY: &str = "/usr/lib/fvca/guest-trial-key";
+const BASE_EPOCH: &str = "/usr/lib/fvca/guest-base-epoch";
+pub const TRIAL_ENROLLMENT: &str = "/run/fvca/guest-trial-enrollment";
 pub const FILES: [&str; 9] = [
     "boot.efi", "linux", "initrd", "cmdline", "domain.xml", "core.raw", "runtime.raw", "release.json", "release.p7s",
 ];
@@ -27,6 +31,27 @@ fn field<'a>(line: Option<&'a str>, prefix: &str) -> io::Result<&'a str> {
     let content = line.and_then(|line| line.strip_prefix(prefix))
         .ok_or_else(|| invalid("invalid Guest launch selection field"))?;
     runtime::hash(content)
+}
+
+pub fn positive(value: &str) -> io::Result<u64> {
+    value.parse().ok()
+        .filter(|number: &u64| *number != 0 && number.to_string() == value)
+        .ok_or_else(|| invalid("expected a canonical positive Guest release number"))
+}
+
+fn publish_trial_enrollment() -> io::Result<()> {
+    let authority = match fs::read(TRIAL_KEY) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !Path::new(BASE_EPOCH).try_exists()? => return Ok(()),
+        result => result?,
+    };
+    let epoch = fs::read_to_string(BASE_EPOCH)?;
+    let value = epoch.strip_suffix('\n').ok_or_else(|| invalid("invalid signed Guest epoch"))?;
+    positive(value)?;
+    if authority.len() != 32 || !authority.iter().any(|byte| *byte != 0) {
+        return Err(invalid("invalid signed Guest trial authority"));
+    }
+    fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(TRIAL_ENROLLMENT)?
+        .write_all(&[authority.as_slice(), epoch.as_bytes()].concat())
 }
 
 pub fn parse(payload: &str) -> io::Result<Selection<'_>> {
@@ -67,6 +92,7 @@ pub fn activate_if_selected(auto_start: bool, devices: Option<&(PathBuf, PathBuf
     if !auto_start {
         return Ok(Some(bundle));
     }
+    publish_trial_enrollment()?;
     let control = Path::new("/run/systemd/system");
     let dropin = control.join("fvca-base-ready.service.d");
     let wants = control.join("fvca-base-ready.service.wants");

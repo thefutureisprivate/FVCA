@@ -1,0 +1,20 @@
+[Unit]
+Description=Verify the staged FVCA Service Guest trial
+Requires=fvca-service-guest.service
+After=fvca-service-guest.service
+AssertPathExists=/run/fvca/guest-trial-enrollment
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/libexec/fvca/launch-guest --verify-staged-guest-trial
+RuntimeDirectory=fvca/guest-trial-verify
+RuntimeDirectoryMode=0700
+PrivateMounts=yes
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+TimeoutStartSec=120s
+StandardOutput=journal+console
+StandardError=journal+console

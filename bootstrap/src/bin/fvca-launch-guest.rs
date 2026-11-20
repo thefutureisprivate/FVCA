@@ -15,6 +15,8 @@ use fvca_trial_authorization::GUEST_CAPTURE_LOCK as CAPTURE_LOCK;
 
 #[path = "fvca-launch-guest/capture.rs"]
 mod capture;
+#[path = "fvca-launch-guest/guest_trial.rs"]
+mod guest_trial;
 
 #[global_allocator]
 static ALLOCATOR: System = System;
@@ -106,14 +108,19 @@ fn verify_storage_directory() -> io::Result<File> {
     if entries != ["data.raw"] {
         return Err(invalid("unexpected persistent files in the registered Guest subvolume"));
     }
+    require_pool_path(Path::new(DISK))?;
+    fvca_btrfs_boundary::require_cow_and_checksums(&root)?;
+    Ok(root)
+}
+
+fn require_pool_path(path: &Path) -> io::Result<()> {
     let mount = Command::new("/usr/bin/findmnt").env_clear()
-        .args(["--target", DISK, "--noheadings", "--raw", "--output", "TARGET"])
+        .arg("--target").arg(path).args(["--noheadings", "--raw", "--output", "TARGET"])
         .output()?;
     if !mount.status.success() || mount.stdout != format!("{POOL}\n").as_bytes() {
         return Err(invalid("Guest data must reside in the authorized Host pool"));
     }
-    fvca_btrfs_boundary::require_cow_and_checksums(&root)?;
-    Ok(root)
+    Ok(())
 }
 
 fn verify_data() -> io::Result<(File, File)> {
@@ -313,6 +320,11 @@ fn activate() -> io::Result<()> {
         [option] if option == "--activate-hypervisor-trial" => update::activate(false),
         [option] if option == "--return-healthy-hypervisor" => update::activate(true),
         [option] if option == "--recover-hypervisor-activation" => update::recover(),
+        [option] if option == "--verify-staged-guest-trial" => {
+            let _capture = capture::lease(Path::new(CAPTURE_LOCK))?;
+            let _lease = capture::lease(Path::new(OPERATION_LOCK))?;
+            guest_trial::verify()
+        }
         [option] if option == "--release" => {
             let _lease = capture::lease(Path::new(OPERATION_LOCK))?;
             capture::live::require_idle()?;

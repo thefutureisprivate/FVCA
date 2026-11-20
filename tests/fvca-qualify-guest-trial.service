@@ -1,0 +1,23 @@
+[Unit]
+Description=Qualify staged direct-boot verification on a running Guest
+Requires=fvca-base-ready.service
+After=fvca-base-ready.service
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+TimeoutStartSec=180s
+NoNewPrivileges=yes
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/bin/systemctl start fvca-verify-guest-trial.service
+ExecStart=/usr/bin/cp /run/fvca/host-data/guest-updates/test-bad-signature /run/fvca/host-data/guest-updates/pending-trial
+ExecStart=-/usr/bin/systemctl start fvca-verify-guest-trial.service
+ExecStart=/usr/bin/systemctl --quiet is-failed fvca-verify-guest-trial.service
+ExecStart=/usr/bin/cp /run/fvca/host-data/guest-updates/test-bad-image /run/fvca/host-data/guest-updates/pending-trial
+ExecStart=/usr/bin/systemctl reset-failed fvca-verify-guest-trial.service
+ExecStart=-/usr/bin/systemctl start fvca-verify-guest-trial.service
+ExecStart=/usr/bin/systemctl --quiet is-failed fvca-verify-guest-trial.service
+ExecStart=/usr/bin/systemctl --quiet is-active fvca-service-guest.service
+ExecStart=/usr/bin/findmnt --mountpoint /run/fvca/guest-boot --source /dev/mapper/fvca-guest-boot --types erofs
+ExecStart=/usr/bin/echo FVCA_GUEST_TRIAL_QUALIFIED

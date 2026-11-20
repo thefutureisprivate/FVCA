@@ -430,6 +430,14 @@ If the write is interrupted after the intent is flushed, the original stable ord
 
 Run `tests/check-hypervisor-promotion.py` against two fresh 4Kn slot images signed with a disposable promotion authority. Supply the stable trial file, the stable core and VM runtime root hashes, a signed-Guest seeded mirror from `tests/storage-lab.sh`, and separate Ed25519 private keys for the approved and incorrect signers. The test writes the packet only to disposable Btrfs copies. It checks rejection of an incorrect signer, a candidate-first order without a durable approval, and candidate media corruption. It also checks that the promoted candidate and the retained stable entry can both reach Guest readiness.
 
+### Verify a staged direct-boot Guest trial
+
+Enroll a distinct Ed25519 Guest trial authority and the current Guest epoch with `--guest-trial-public-key` and `--guest-trial-epoch` when composing the Hypervisor. This profile requires authenticated Host storage and an authorized Service Guest. Use `tools/sign-guest-trial.py` off-node with an exact candidate `guest-boot.raw`, the two public certificates that authorize its Guest release and dm-verity image, and the independent trial signing key. Supply the current bundle and epoch, the candidate epoch, the validity interval and a 10–300 second health deadline. Use `--compatible-data` after reviewing both releases against the current mutable data.
+
+Place the approval at `/run/fvca/host-data/guest-updates/pending-trial` and the exact candidate at `/run/fvca/host-data/guest-updates/BUNDLE_ROOT/guest-boot.raw` through the authorized staging path. The directories are root-owned with mode `0700` and the files are private regular files. Run `fvca-verify-guest-trial.service` to authenticate the approval and check the candidate digest, signed dm-verity mount and complete direct-boot inventory. The service uses a private mount namespace while the current Guest continues running. [systemd-dissect](https://www.freedesktop.org/software/systemd/man/latest/systemd-dissect.html)
+
+Use the `guest-trial` mode of `tests/nested-guest-shutdown-initrd.sh` and run `tests/check-guest-trial.py` against a disposable Secure Boot Hypervisor and an authenticated Btrfs fixture. The test checks the approved candidate, a damaged signature and a signed image digest mismatch against the same running Guest.
+
 ## Development Hypervisor storage
 
 The Hypervisor assembler accepts `--storage tests/host-storage.conf` for the disposable storage fixture. The signed `FVCA-HOST-STORAGE-4` record fixes the protection and unlock modes, the GPT and LUKS2 UUID of each member, and the shared Btrfs filesystem UUID. The initramfs checks both partitions and their LUKS2 identities before prompting on the console, then verifies that each decrypted mapping is backed by its authorized partition on a separate disk.
