@@ -1,0 +1,19 @@
+[Unit]
+Description=Activate an authorized FVCA Service Guest trial
+Requires=fvca-service-guest.service
+After=fvca-service-guest.service
+AssertPathExists=/run/fvca/guest-trial-enrollment
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/libexec/fvca/launch-guest --activate-guest-trial
+ExecStopPost=/usr/libexec/fvca/launch-guest --recover-guest-trial
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+TimeoutStartSec=19min
+TimeoutStopSec=120s
+StandardOutput=journal+console
+StandardError=journal+console

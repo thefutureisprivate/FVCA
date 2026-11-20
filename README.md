@@ -430,13 +430,19 @@ If the write is interrupted after the intent is flushed, the original stable ord
 
 Run `tests/check-hypervisor-promotion.py` against two fresh 4Kn slot images signed with a disposable promotion authority. Supply the stable trial file, the stable core and VM runtime root hashes, a signed-Guest seeded mirror from `tests/storage-lab.sh`, and separate Ed25519 private keys for the approved and incorrect signers. The test writes the packet only to disposable Btrfs copies. It checks rejection of an incorrect signer, a candidate-first order without a durable approval, and candidate media corruption. It also checks that the promoted candidate and the retained stable entry can both reach Guest readiness.
 
-### Verify a staged direct-boot Guest trial
+### Trial a staged direct-boot Guest release
 
 Enroll a distinct Ed25519 Guest trial authority and the current Guest epoch with `--guest-trial-public-key` and `--guest-trial-epoch` when composing the Hypervisor. This profile requires authenticated Host storage and an authorized Service Guest. Use `tools/sign-guest-trial.py` off-node with an exact candidate `guest-boot.raw`, the two public certificates that authorize its Guest release and dm-verity image, and the independent trial signing key. Supply the current bundle and epoch, the candidate epoch, the validity interval and a 10–300 second health deadline. Use `--compatible-data` after reviewing both releases against the current mutable data.
 
 Place the approval at `/run/fvca/host-data/guest-updates/pending-trial` and the exact candidate at `/run/fvca/host-data/guest-updates/BUNDLE_ROOT/guest-boot.raw` through the authorized staging path. The directories are root-owned with mode `0700` and the files are private regular files. Run `fvca-verify-guest-trial.service` to authenticate the approval and check the candidate digest, signed dm-verity mount and complete direct-boot inventory. The service uses a private mount namespace while the current Guest continues running. [systemd-dissect](https://www.freedesktop.org/software/systemd/man/latest/systemd-dissect.html)
 
 Use the `guest-trial` mode of `tests/nested-guest-shutdown-initrd.sh` and run `tests/check-guest-trial.py` against a disposable Secure Boot Hypervisor and an authenticated Btrfs fixture. The test checks the approved candidate, a damaged signature and a signed image digest mismatch against the same running Guest.
+
+Start `fvca-activate-guest-trial.service` to activate the authorized candidate. The controller verifies the candidate and stable boot files, acquires the Guest lifecycle lease, and confirms a clean shutdown of the running Guest. It records each attempt on Btrfs before letting a separate Host systemd unit boot the candidate. Host systemd kills a trial worker that exceeds the signed deadline. The controller stops the failed VM, reclaims the disk attachment and retries up to three attempts for the candidate bundle.
+
+After verified boot and Guest-agent readiness, the controller commits the exact signed approval as the active Guest selection. Ordinary startup revalidates and mounts the committed bundle from the Host pool. When attempts are exhausted or activation is interrupted before commit, the controller or its recovery handler starts the last authorized active bundle on the same writable data disk.
+
+Use the `guest-trial-activation` initrd mode and pass `--activation commit` or `--activation exhaust` to the KVM test. These cases check the successful commit and three Host-enforced timeouts. Both then boot the Hypervisor again from their existing Btrfs members and check the selected Guest.
 
 ## Development Hypervisor storage
 

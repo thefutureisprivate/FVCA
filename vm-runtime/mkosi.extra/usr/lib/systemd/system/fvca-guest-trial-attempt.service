@@ -1,0 +1,17 @@
+[Unit]
+Description=Boot the prepared FVCA Service Guest trial
+AssertPathExists=/run/fvca/guest-trial-work
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/libexec/fvca/launch-guest --boot-guest-trial
+TimeoutStartSec=10s
+TimeoutStartFailureMode=kill
+TimeoutStopSec=5s
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+StandardOutput=journal+console
+StandardError=journal+console

@@ -1,0 +1,20 @@
+[Unit]
+Description=Qualify Service Guest trial activation on the existing data disk
+Requires=fvca-base-ready.service
+After=fvca-base-ready.service
+ConditionPathExists=/run/fvca/host-data/guest-updates/pending-trial
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+TimeoutStartSec=230s
+NoNewPrivileges=yes
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/bin/stat --format=FVCA_GUEST_TRIAL_DATA_%%d.%%i /run/fvca/host-data/vms/service-guest/data.raw
+ExecStart=/usr/bin/systemctl start fvca-activate-guest-trial.service
+ExecStart=/usr/bin/stat --format=FVCA_GUEST_TRIAL_DATA_%%d.%%i /run/fvca/host-data/vms/service-guest/data.raw
+ExecStart=/usr/bin/systemctl --quiet is-active fvca-service-guest.service
+ExecStart=/usr/bin/test ! -e /run/fvca/guest-trial-inflight
+ExecStart=/usr/bin/test ! -e /run/fvca/host-data/guest-updates/pending-trial
+ExecStart=/usr/bin/echo FVCA_GUEST_TRIAL_ACTIVATION_QUALIFIED

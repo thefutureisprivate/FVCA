@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a staged Guest release and reject two tampered inputs in disposable KVM."""
+"""Qualify staged Guest verification, activation and recovery in disposable KVM."""
 
 import argparse
 import gzip
@@ -83,6 +83,48 @@ def install(args, work, members):
     assert b"FVCA_GUEST_TRIAL_FIXTURE_INSTALLED" in log.read_bytes(), log
 
 
+def boot(args, options, members, storage, phase, finish, timeout):
+    for attempt in range(1, 4):
+        prompts, log = storage["boot"](
+            options, f"{phase}-{attempt}", (args.lab / "storage.key").read_bytes(), *members,
+            firmware=args.firmware, firmware_timeout=35, timeout=timeout, ready_marker=finish,
+        )
+        if b"Linux version " in log:
+            break
+    log = storage["rejoin_serial_output"](log)
+    assert prompts == 2 and storage["FAIL"] not in log and b"secureboot: Secure boot enabled" in log
+    assert b"FVCA_HOST_STORAGE_AUTHENTICATED" in log and b"FVCA_SELINUX_ENFORCING" in log
+    assert finish in log, (args.output, phase)
+    return log
+
+
+def activated(args, log, cold, storage):
+    body = args.approval.read_bytes()[64:]
+    txn = re.search(rb"\ntransaction=([0-9a-f-]+)\n", body)[1]
+    bundle = re.search(rb"\nbundle=([0-9a-f]{64})\n", body)[1]
+    healthy = args.activation == "commit"
+    count = 1 if healthy else 3
+    attempts = re.findall(rb"FVCA_GUEST_TRIAL_ATTEMPT " + txn + rb" ([1-3])", log)
+    assert attempts == [str(number).encode() for number in range(1, count + 1)]
+    disk = re.findall(rb"FVCA_GUEST_TRIAL_DATA_([0-9]+\.[0-9]+)", log)
+    assert len(disk) == 2 and disk[0] == disk[1], disk
+    assert log.count(b"FVCA_SERVICE_GUEST_READY") == 2
+    assert b"FVCA_SERVICE_GUEST_READY" in cold and storage["READY"] in cold
+    assert b"FVCA_GUEST_TRIAL_ATTEMPT " not in cold
+    if healthy:
+        commit = b"FVCA_GUEST_TRIAL_COMMITTED " + txn + b" 1 " + bundle
+        selected = b"FVCA_GUEST_RELEASE_SELECTED " + bundle
+        assert commit in log and log.rfind(b"FVCA_SERVICE_GUEST_READY") < log.index(commit)
+        assert selected in cold and cold.index(selected) < cold.index(b"FVCA_SERVICE_GUEST_READY")
+    else:
+        exhausted = b"FVCA_GUEST_TRIAL_EXHAUSTED " + txn + b" 3"
+        assert log.count(b"Job for fvca-guest-trial-attempt.service failed because a timeout was exceeded.") == 3
+        assert log.count(b"FVCA_GUEST_TRIAL_FORCED_STOP crash-consistent") == 3
+        assert exhausted in log and log.rfind(b"FVCA_SERVICE_GUEST_READY") < log.index(exhausted)
+        assert b"FVCA_GUEST_TRIAL_COMMITTED" not in log and b"FVCA_GUEST_RELEASE_SELECTED" not in cold
+    print(f"{args.activation} qualified with the same Guest data disk across a cold Hypervisor boot")
+
+
 def qualify(args):
     storage = runpy.run_path(Path(__file__).with_name("check-storage.py"))
     with tempfile.TemporaryDirectory(prefix="disposable-", dir=args.output) as directory:
@@ -92,18 +134,15 @@ def qualify(args):
             subprocess.run(["cp", "--reflink=auto", "--sparse=always", args.lab / member.name, member], check=True)
         install(args, work, members)
         options = SimpleNamespace(disk=args.disk, runtime=None, guest=False, output=args.output, variables=args.variables,
-                                  nvme_boot=True, boot_sector_size=4096, no_default_devices=True, memory_mib=4096)
+                                  nvme_boot=True, boot_sector_size=4096, no_default_devices=True,
+                                  memory_mib=4096, persistent_members=args.activation is not None)
+        if args.activation:
+            log = boot(args, options, members, storage, "activation", b"FVCA_GUEST_TRIAL_ACTIVATION_QUALIFIED", 245)
+            cold = boot(args, options, members, storage, "cold", storage["READY"], 140)
+            activated(args, log, cold, storage)
+            return
         finish = b"FVCA_GUEST_TRIAL_QUALIFIED"
-        for attempt in range(1, 4):
-            prompts, log = storage["boot"](
-                options, f"guest-trial-{attempt}", (args.lab / "storage.key").read_bytes(), *members,
-                firmware=args.firmware, firmware_timeout=35, timeout=170, ready_marker=finish,
-            )
-            if b"Linux version " in log:
-                break
-    log = storage["rejoin_serial_output"](log)
-    assert prompts == 2 and storage["FAIL"] not in log and b"secureboot: Secure boot enabled" in log
-    assert b"FVCA_HOST_STORAGE_AUTHENTICATED" in log and b"FVCA_SELINUX_ENFORCING" in log
+        log = boot(args, options, members, storage, "guest-trial", finish, 170)
     assert log.count(b"FVCA_SERVICE_GUEST_READY") == 1 and b"FVCA_SERVICE_GUEST_STOPPED" not in log
     assert log.count(b"FVCA_GUEST_TRIAL_PREPARED") == 1
     position = 0
@@ -117,6 +156,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("disk", "candidate", "lab", "approval", "sign-key", "firmware", "variables", "kernel", "output"):
         parser.add_argument(f"--{name}", required=True, type=lambda value: Path(value).resolve())
+    parser.add_argument("--activation", choices=("commit", "exhaust"))
     args = parser.parse_args()
     args.output.mkdir(mode=0o700)
     qualify(args)

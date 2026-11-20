@@ -27,7 +27,12 @@ DOMAIN_SCHEMAS = {
 BASE_INPUT = "vm-runtime-base"
 TRIAL_HEALTH = Path("usr/libexec/fvca/trial-health")
 TRIAL_HEALTH_WATCHDOG = Path("usr/libexec/fvca/trial-health-watchdog-v2")
-GUEST_TRIAL_FILES = (Path("usr/bin/systemd-dissect"), Path("usr/lib/systemd/system/fvca-verify-guest-trial.service"))
+GUEST_TRIAL_FILES = (
+    Path("usr/bin/systemd-dissect"),
+    Path("usr/lib/systemd/system/fvca-verify-guest-trial.service"),
+    Path("usr/lib/systemd/system/fvca-activate-guest-trial.service"),
+    Path("usr/lib/systemd/system/fvca-guest-trial-attempt.service"),
+)
 BASE_BINDING = Path("usr/share/fvca/vm-runtime-base.roothash")
 EXTENSION_RELEASE = Path("usr/lib/extension-release.d/extension-release.vm-runtime")
 REQUIRED_FILES = {

@@ -49,14 +49,26 @@ fn verify_boot_files(directory: &Path, selection: &guest_boot::Selection<'_>) ->
 }
 
 fn verified_definition(selection: &guest_boot::Selection<'_>) -> io::Result<CString> {
-    run(Command::new("/usr/bin/findmnt").args([
-        "--mountpoint", guest_boot::BOOT, "--source", "/dev/mapper/fvca-guest-boot",
-        "--types", "erofs", "--options", "ro,nodev,nosuid,noexec",
-    ]).stdout(Stdio::null()))?;
-    let boot = Path::new(guest_boot::BOOT);
-    verify_boot_files(boot, selection)?;
-    let xml = fs::read(boot.join("domain.xml"))
-        .map_err(|error| io::Error::other(format!("could not read the authorized machine definition: {error}")))?;
+    let boot = guest_trial::boot_directory(selection.bundle)?;
+    if boot == Path::new(guest_boot::BOOT) {
+        run(Command::new("/usr/bin/findmnt").args([
+            "--mountpoint", guest_boot::BOOT, "--source", "/dev/mapper/fvca-guest-boot",
+            "--types", "erofs", "--options", "ro,nodev,nosuid,noexec",
+        ]).stdout(Stdio::null()))?;
+    } else {
+        guest_trial::require_verity_mount(&boot)?;
+    }
+    verify_boot_files(&boot, selection)?;
+    let mut xml = fs::read_to_string(boot.join("domain.xml"))?;
+    if boot != Path::new(guest_boot::BOOT) {
+        // The signed machine names four boot files at the original mount. The
+        // only rebinding is to the same verified files at the selected mount.
+        let prefix = format!("{}/", guest_boot::BOOT);
+        if xml.matches(&prefix).count() != 4 {
+            return Err(invalid("the approved machine has an unexpected boot file layout"));
+        }
+        xml = xml.replace(&prefix, &format!("{}/", boot.display()));
+    }
     CString::new(xml).map_err(io::Error::other)
 }
 
@@ -192,7 +204,7 @@ fn prepare_data() -> io::Result<()> {
     run(Command::new("/usr/bin/mount").args(["--internal-only", "--bind", DISK, ALIAS]))
 }
 
-fn wait_for_boot(domain: &Domain<'_>, runtime: &str, events: &EventLoop) -> io::Result<()> {
+fn wait_for_boot(domain: &Domain<'_>, runtime: &str, events: &EventLoop, timeout: Duration) -> io::Result<()> {
     if domain.state()? != PAUSED {
         return Err(invalid("libvirt did not create the Guest paused"));
     }
@@ -208,7 +220,7 @@ fn wait_for_boot(domain: &Domain<'_>, runtime: &str, events: &EventLoop) -> io::
     let mut seen = [false; 3];
     let mut buffer = [0; 4096];
     let mut tail = Vec::with_capacity(buffer.len() + 128);
-    let deadline = Instant::now() + Duration::from_secs(75);
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         let count = console.receive(&mut buffer)?;
         if count == 0 {
@@ -224,7 +236,7 @@ fn wait_for_boot(domain: &Domain<'_>, runtime: &str, events: &EventLoop) -> io::
             println!("FVCA_SERVICE_GUEST_AGENT_READY");
             return Ok(());
         }
-        if tail.windows(16).any(|bytes| bytes == b"FVCA_BOOT_FAILED") {
+        if tail.windows(b"FVCA_BOOT_FAILED".len()).any(|bytes| bytes == b"FVCA_BOOT_FAILED") {
             return Err(invalid("the Service Guest reported boot failure"));
         }
         tail.drain(..tail.len().saturating_sub(128));
@@ -236,22 +248,27 @@ fn wait_for_boot(domain: &Domain<'_>, runtime: &str, events: &EventLoop) -> io::
 }
 
 fn launch() -> io::Result<()> {
+    guest_trial::prepare_active()?;
     let payload = fs::read_to_string(guest_boot::SELECTION)?;
-    let selection = guest_boot::parse(&payload)?;
+    launch_selection(&payload, Duration::from_secs(75))
+}
+
+fn launch_selection(payload: &str, timeout: Duration) -> io::Result<()> {
+    let selection = guest_boot::parse(payload)?;
     capture::restore::authorize_launch(selection.bundle)?;
     let xml = verified_definition(&selection)?;
     let events = EventLoop::register()?;
     let connection = Connection::connect()?;
-    start(&connection, &events, &selection, &xml)
+    start(&connection, &events, &selection, &xml, timeout)
 }
 
-fn start(connection: &Connection, events: &EventLoop, selection: &guest_boot::Selection<'_>, xml: &CStr) -> io::Result<()> {
+fn start(connection: &Connection, events: &EventLoop, selection: &guest_boot::Selection<'_>, xml: &CStr, timeout: Duration) -> io::Result<()> {
     if connection.lookup(UUID)?.is_some() {
         return Err(invalid("the registered Guest already exists"));
     }
     prepare_data().map_err(|error| io::Error::other(format!("Guest data preparation failed: {error}")))?;
     let domain = connection.start_registered(xml)?;
-    if let Err(error) = wait_for_boot(&domain, selection.runtime, events)
+    if let Err(error) = wait_for_boot(&domain, selection.runtime, events, timeout)
         .and_then(|()| capture::live::record_launch(selection.bundle))
     {
         if let Err(cleanup) = domain.destroy() {
@@ -315,11 +332,15 @@ fn activate() -> io::Result<()> {
         [option] if option == "--shutdown" => {
             let _lease = capture::lease(Path::new(OPERATION_LOCK))?;
             capture::live::require_idle()?;
+            guest_trial::require_idle()?;
             shutdown()
         }
         [option] if option == "--activate-hypervisor-trial" => update::activate(false),
         [option] if option == "--return-healthy-hypervisor" => update::activate(true),
         [option] if option == "--recover-hypervisor-activation" => update::recover(),
+        [option] if option == "--activate-guest-trial" => guest_trial::activate(),
+        [option] if option == "--boot-guest-trial" => guest_trial::boot_attempt(),
+        [option] if option == "--recover-guest-trial" => guest_trial::recover(),
         [option] if option == "--verify-staged-guest-trial" => {
             let _capture = capture::lease(Path::new(CAPTURE_LOCK))?;
             let _lease = capture::lease(Path::new(OPERATION_LOCK))?;
@@ -328,6 +349,7 @@ fn activate() -> io::Result<()> {
         [option] if option == "--release" => {
             let _lease = capture::lease(Path::new(OPERATION_LOCK))?;
             capture::live::require_idle()?;
+            guest_trial::require_idle()?;
             if !Path::new(ALIAS).try_exists()? && !Path::new(VM_PARENT).join(ATTACHMENT).try_exists()? {
                 return Ok(());
             }

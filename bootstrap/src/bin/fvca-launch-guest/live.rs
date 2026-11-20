@@ -40,7 +40,7 @@ pub(crate) fn record_launch(bundle: &str) -> io::Result<()> {
     publish(Path::new(RUN), "guest-live-instance", &format!("{bundle}\n{vm}"))
 }
 
-pub(super) fn require_instance(bundle: &str) -> io::Result<String> {
+pub(crate) fn require_instance(bundle: &str) -> io::Result<String> {
     let vm = instance()?;
     if read_record(Path::new(INSTANCE))? != format!("{bundle}\n{vm}") {
         return Err(invalid("the running VM does not match its verified launch receipt"));

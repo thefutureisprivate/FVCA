@@ -84,8 +84,9 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
     ]
     for index, member in enumerate(members):
         drive = f"fvca-member-{index}"
+        member_access = "" if getattr(args, "persistent_members", False) else state_access
         command += [
-            "-drive", f"if=none,id={drive},format=raw,{state_access}file={image(member)}",
+            "-drive", f"if=none,id={drive},format=raw,{member_access}file={image(member)}",
             "-device", f"virtio-blk-pci,drive={drive},serial={drive}",
         ]
     command += [

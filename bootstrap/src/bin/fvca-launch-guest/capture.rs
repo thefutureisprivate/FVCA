@@ -110,6 +110,7 @@ pub(super) fn lease(path: &Path) -> io::Result<File> {
     let file = exclusive_lease(path)?;
     if path == Path::new(CAPTURE_LOCK) {
         super::update::require_idle()?;
+        super::guest_trial::require_idle()?;
     }
     Ok(file)
 }
@@ -123,6 +124,7 @@ pub(super) fn wait_for_lease(path: &Path) -> io::Result<File> {
     file.lock()?;
     if path == Path::new(CAPTURE_LOCK) {
         super::update::require_idle()?;
+        super::guest_trial::require_idle()?;
     }
     Ok(file)
 }
@@ -176,11 +178,15 @@ pub(super) fn publish(dir: &Path, name: &str, text: &str) -> io::Result<()> {
     replace_record(dir, name, text)
 }
 
-fn replace_record(dir: &Path, name: &str, text: &str) -> io::Result<()> {
+pub(super) fn replace_record(dir: &Path, name: &str, text: &str) -> io::Result<()> {
+    replace_bytes(dir, name, text.as_bytes())
+}
+
+pub(super) fn replace_bytes(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let staged = dir.join(format!(".{name}.tmp"));
     remove_stale_stage(&staged)?;
     let mut file = OpenOptions::new().create_new(true).write(true).mode(0o600).open(&staged)?;
-    file.write_all(text.as_bytes())?;
+    file.write_all(bytes)?;
     file.sync_all()?;
     fs::rename(staged, dir.join(name))?;
     File::open(dir)?.sync_all()
@@ -209,7 +215,7 @@ fn escrow(releases: &Path, payload: &str, pool: &File, disk_size: u64) -> io::Re
     if dir.join("selection").try_exists()? {
         return verify_escrow(&dir, payload, &selection);
     }
-    let boot = Path::new(guest_boot::BOOT);
+    let boot = crate::guest_trial::boot_directory(selection.bundle)?;
     let mut required = disk_size;
     for name in files(&selection) {
         required = required.checked_add(boot.join(name).metadata()?.len())
