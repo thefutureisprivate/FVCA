@@ -80,9 +80,35 @@ def qualify(client, output):
     stamp = int(now.timestamp())
     revision = 0
     files = {}
+    transition_targets = {}
+
+    def transition_for(document):
+        selected = document["offer"]
+        before = {
+            "esp": "d0d2fd6b-ee28-4034-a022-b3da25744690",
+            "core": "7" * 64, "runtime": "8" * 64, "epoch": 10,
+            "epoch_policy_sha256": "9" * 64,
+            "filesystem": "dfc379cc-7f43-4c4d-8b3b-e9b34c112712",
+            "storage_policy_sha256": "a" * 64,
+        }
+        return {
+            "schema": "fvca-firmware-boot-transition-v1",
+            "system_uuid": document["system_uuid"], "fwupd_version": document["fwupd_version"],
+            "device": selected["device"], "from": selected["from"], "to": selected["to"],
+            "archive_sha256": selected["archive"]["sha256"], "payload_sha256": selected["payload_sha256"],
+            "before": before, "after": dict(before, storage_policy_sha256="b" * 64),
+        }
+
+    def bind_transition(document, evidence):
+        body = json.dumps(evidence, sort_keys=True).encode() + b"\n"
+        checksum = digest(body)
+        path = output / f"fvca-firmware-transition-{checksum}.json"
+        path.write_bytes(body)
+        transition_targets[checksum] = path
+        document["offer"]["qualification"]["transition_evidence_sha256"] = checksum
 
     def offer(identity, version, target, sequence):
-        return {
+        document = {
             "schema": "fvca-firmware-channel-v1", "role": "hypervisor", "channel": "stable",
             "sequence": sequence, "valid_from": stamp - 60, "expires": stamp + 3600,
             "system_uuid": platform["system_uuid"], "fwupd_version": "2.1.10",
@@ -92,11 +118,13 @@ def qualify(client, output):
                 "catalog": deepcopy(catalog),
                 "qualification": {
                     "distribution_evidence_sha256": "2" * 64, "vendor_authentication": "device-signature",
-                    "vendor_evidence_sha256": "3" * 64, "transition_evidence_sha256": "4" * 64,
+                    "vendor_evidence_sha256": "3" * 64,
                     "reboot_policy_sha256": "5" * 64, "recovery_evidence_sha256": "6" * 64,
                 },
             },
         }
+        bind_transition(document, transition_for(document))
+        return document
 
     def snapshot(document, serial=None):
         document = document["offer"]
@@ -118,7 +146,7 @@ def qualify(client, output):
 
     root_keys = intake["new_keys"]()
 
-    def publish(document, signer=qualified):
+    def publish(document, signer=qualified, *, transition_source=None):
         nonlocal revision
         revision += 1
         version = output / f"tuf-{revision}"
@@ -128,6 +156,11 @@ def qualify(client, output):
         intake["write_json"](pointer, document)
         proof.write_bytes(bytes.fromhex(signer.sign(pointer.read_bytes()).signature))
         sources = {pointer.name: pointer, proof.name: proof, cabinet.name: cabinet, **catalog_targets}
+        if document.get("offer"):
+            evidence = document["offer"]["qualification"]["transition_evidence_sha256"]
+            path = transition_source or transition_targets.get(evidence)
+            if path is not None:
+                sources[f"fvca-firmware-transition-{evidence}.json"] = path
         targets = {}
         for name, path in sources.items():
             reference = TargetFile.from_file(name, str(path), ["sha256"])
@@ -170,8 +203,11 @@ def qualify(client, output):
                 assert "verified_payload_sha256" not in status
                 assert "capsule_delivery" not in status
                 stage = Path(status["staged"])
-                assert {path.name for path in stage.iterdir()} == {"firmware.cab", "offer.json", "offer.sig"}
+                assert {path.name for path in stage.iterdir()} == {
+                    "firmware.cab", "offer.json", "offer.sig", "transition.json",
+                }
                 assert (stage / "firmware.cab").read_bytes() == archive
+                assert digest((stage / "transition.json").read_bytes()) == status["transition_evidence_sha256"]
                 assert list((directory / "staged").iterdir()) == [stage]
             else:
                 assert "staged" not in status and not any((directory / "staged").iterdir())
@@ -179,6 +215,47 @@ def qualify(client, output):
 
     run("capsule-staged", snapshot(initial))
     run("exact-retry", snapshot(initial))
+    stored = next((state / "staged").iterdir()) / "transition.json"
+    assert stored.stat().st_mode & 0o777 == 0o400
+    original = stored.read_bytes()
+    stored.unlink()
+    stored.write_bytes(b"x" * len(original))
+    stored.chmod(0o400)
+    run("changed-staged-transition", snapshot(initial), "existing firmware stage does not match")
+    stored.unlink()
+    stored.write_bytes(original)
+    stored.chmod(0o400)
+    evidence_state = output / "transition-state"
+    evidence_state.mkdir(mode=0o700)
+    missing = deepcopy(initial)
+    missing["offer"]["qualification"]["transition_evidence_sha256"] = "d" * 64
+    publish(missing)
+    run("missing-boot-transition", snapshot(initial), "missing or oversized TUF channel target", directory=evidence_state)
+    substitute = output / "substitute-transition.json"
+    intake["write_json"](substitute, transition_for(next_nvme))
+    publish(initial, transition_source=substitute)
+    # Use an independent state so the offer checkpoint does not hide a substituted artifact.
+    replacement_state = output / "transition-substitution-state"
+    replacement_state.mkdir(mode=0o700)
+    run("tuf-cannot-substitute-transition", snapshot(initial), "differs from the signed offer", directory=replacement_state)
+    wrong = deepcopy(initial)
+    changed = transition_for(wrong)
+    changed["to"] = {"text": "1.52", "raw": 65588}
+    bind_transition(wrong, changed)
+    publish(wrong)
+    mismatch_state = output / "transition-mismatch-state"
+    mismatch_state.mkdir(mode=0o700)
+    run("transition-target-mismatch", snapshot(initial), "differs from the qualified release", directory=mismatch_state)
+    changed = transition_for(wrong)
+    changed["after"]["epoch"] = changed["before"]["epoch"] - 1
+    bind_transition(wrong, changed)
+    publish(wrong)
+    rollback_state = output / "transition-rollback-state"
+    rollback_state.mkdir(mode=0o700)
+    run("transition-epoch-rollback", snapshot(initial), "invalid boot or storage policies", directory=rollback_state)
+    for unused in (evidence_state, replacement_state, mismatch_state, rollback_state):
+        assert not any((unused / "staged").iterdir())
+    publish(initial)
     catalog_state = output / "tampered-catalog-state"
     catalog_state.mkdir(mode=0o700)
     metadata = next(name for name in catalog_targets if name.endswith(".bin"))

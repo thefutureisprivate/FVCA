@@ -6,10 +6,10 @@ use std::path::Path;
 
 use fvca_trial_authorization::firmware::{VERIFIED_BOOT, VERIFIED_BOOT_LIMIT, VerifiedBoot};
 use rustix::fs::{StatVfsMountFlags, fstatvfs};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use super::capsule;
-use crate::{Result, handoff, invalid, state};
+use super::{capsule, uuid};
+use crate::{Result, handoff, invalid, state, valid_digest};
 
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "kebab-case")]
@@ -21,15 +21,38 @@ pub(super) enum Evidence {
 #[derive(Serialize)]
 pub(super) struct Observation {
     boot_entry: u16,
+    #[serde(flatten)]
+    pub(super) policy: Policy,
+    pub(super) storage_error_free: bool,
+    mirror_members: [MirrorMember; 2],
+}
+
+#[derive(Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Policy {
     esp: String,
     core: String,
     runtime: String,
-    epoch: u64,
+    pub(super) epoch: u64,
     epoch_policy_sha256: String,
-    filesystem: String,
+    pub(super) filesystem: String,
     storage_policy_sha256: String,
-    storage_error_free: bool,
-    mirror_members: [MirrorMember; 2],
+}
+
+impl Policy {
+    pub(super) fn valid(&self) -> bool {
+        uuid(&self.esp)
+            && uuid(&self.filesystem)
+            && self.epoch > 0
+            && [
+                &self.core,
+                &self.runtime,
+                &self.epoch_policy_sha256,
+                &self.storage_policy_sha256,
+            ]
+            .into_iter()
+            .all(|field| valid_digest(field))
+    }
 }
 
 #[derive(Serialize)]
@@ -102,13 +125,15 @@ fn collect(pool: &File, boot_id: &str) -> Result<Evidence> {
     let boot_entry = capsule::verify_ordinary_boot()?;
     Ok(Evidence::Observed(Box::new(Observation {
         boot_entry,
-        esp: receipt.esp.to_owned(),
-        core: receipt.core.to_owned(),
-        runtime: receipt.runtime.to_owned(),
-        epoch: receipt.epoch,
-        epoch_policy_sha256: receipt.epoch_policy_sha256.to_owned(),
-        filesystem,
-        storage_policy_sha256: receipt.storage_policy_sha256.to_owned(),
+        policy: Policy {
+            esp: receipt.esp.to_owned(),
+            core: receipt.core.to_owned(),
+            runtime: receipt.runtime.to_owned(),
+            epoch: receipt.epoch,
+            epoch_policy_sha256: receipt.epoch_policy_sha256.to_owned(),
+            filesystem,
+            storage_policy_sha256: receipt.storage_policy_sha256.to_owned(),
+        },
         storage_error_free: mirror_members.iter().all(MirrorMember::error_free),
         mirror_members,
     })))
@@ -184,6 +209,52 @@ fn member(entry: &fs::DirEntry, fsid: &str) -> Result<MirrorMember> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::firmware::transition::{Status, compare};
+
+    #[test]
+    fn qualifies_only_the_expected_policy_with_healthy_mirror_members() -> Result<()> {
+        let policy = |storage: &str| Policy {
+            esp: "d0d2fd6b-ee28-4034-a022-b3da25744690".into(),
+            core: "7".repeat(64),
+            runtime: "8".repeat(64),
+            epoch: 10,
+            epoch_policy_sha256: "9".repeat(64),
+            filesystem: "dfc379cc-7f43-4c4d-8b3b-e9b34c112712".into(),
+            storage_policy_sha256: storage.repeat(64),
+        };
+        let member = |id| MirrorMember {
+            id,
+            write_errors: 0,
+            read_errors: 0,
+            flush_errors: 0,
+            corruption_errors: 0,
+            generation_errors: 0,
+        };
+        let observation = |storage, healthy| {
+            Evidence::Observed(Box::new(Observation {
+                boot_entry: 1,
+                policy: policy(storage),
+                storage_error_free: healthy,
+                mirror_members: [member(1), member(2)],
+            }))
+        };
+        let qualified = policy("b");
+        let current = observation("b", true);
+        assert!(matches!(compare(&qualified, &current), Status::Matched));
+        assert_eq!(
+            serde_json::to_value(&current)?["storage_policy_sha256"],
+            "b".repeat(64)
+        );
+        assert!(matches!(
+            compare(&qualified, &observation("a", true)),
+            Status::Blocked { reason } if reason.contains("exact qualified boot")
+        ));
+        assert!(matches!(
+            compare(&qualified, &observation("b", false)),
+            Status::Blocked { reason } if reason.contains("persistent errors")
+        ));
+        Ok(())
+    }
 
     #[test]
     fn requires_two_current_writable_members_and_preserves_error_counts() -> Result<()> {

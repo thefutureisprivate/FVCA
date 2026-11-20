@@ -2,15 +2,16 @@
 
 use std::fs::File;
 use std::io::Read;
+use std::os::unix::fs::MetadataExt;
 
 use rustix::fs::{self, Mode, OFlags, ResolveFlags};
 use serde::Serialize;
 
 use super::{
     Esrt, HEAD_SCHEMA, Head, OFFER, Offer, Version, activation::Activation, boot, boot_id, live,
-    uuid,
+    transition, uuid,
 };
-use crate::{MANIFEST_BYTES, Result, Role, channel::digest, handoff, invalid};
+use crate::{MANIFEST_BYTES, Result, Role, channel::digest, invalid};
 
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "kebab-case")]
@@ -26,6 +27,7 @@ pub(super) enum Evidence {
         boot_id: String,
         assessment: Assessment,
         boot_evidence: boot::Evidence,
+        boot_transition: transition::Status,
         #[serde(flatten)]
         observed: Observed,
     },
@@ -78,12 +80,16 @@ pub(super) fn inspect(directory: &File, activation: &Activation) -> Evidence {
     };
     let observed = collect(directory, activation);
     match observed {
-        Ok((assessment, observed)) => Evidence::Observed {
-            boot_evidence: boot::inspect(directory, &boot),
-            boot_id: boot,
-            assessment,
-            observed,
-        },
+        Ok((assessment, observed, expected_boot)) => {
+            let boot_evidence = boot::inspect(directory, &boot);
+            Evidence::Observed {
+                boot_transition: transition::compare(&expected_boot, &boot_evidence),
+                boot_evidence,
+                boot_id: boot,
+                assessment,
+                observed,
+            }
+        }
         Err(error) => Evidence::Unavailable {
             boot_id: Some(boot),
             reason: error.to_string(),
@@ -91,8 +97,27 @@ pub(super) fn inspect(directory: &File, activation: &Activation) -> Evidence {
     }
 }
 
-fn collect(directory: &File, activation: &Activation) -> Result<(Assessment, Observed)> {
-    let relative = format!("staged/{}/{OFFER}", activation.offer_sha256);
+fn collect(
+    directory: &File,
+    activation: &Activation,
+) -> Result<(Assessment, Observed, boot::Policy)> {
+    let bytes = staged_record(directory, activation, OFFER, MANIFEST_BYTES)?;
+    let (head, offer) = parse_offer(&bytes, &activation.offer_sha256, &activation.device_id)?;
+    let evidence = staged_record(directory, activation, transition::FILE, transition::LIMIT)?;
+    let qualified = transition::Transition::parse(&evidence, &head, &offer)?;
+    require_baseline(&offer, activation.esrt_before.as_ref())?;
+    let observed = live::read_result(&offer, &head.system_uuid, &head.fwupd_version, activation)?;
+    let assessment = assess(&offer, &observed);
+    Ok((assessment, observed, qualified.after))
+}
+
+fn staged_record(
+    directory: &File,
+    activation: &Activation,
+    name: &str,
+    limit: u64,
+) -> Result<Vec<u8>> {
+    let relative = format!("staged/{}/{name}", activation.offer_sha256);
     let file = File::from(fs::openat2(
         directory,
         relative.as_str(),
@@ -100,14 +125,23 @@ fn collect(directory: &File, activation: &Activation) -> Result<(Assessment, Obs
         Mode::empty(),
         ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
     )?);
-    handoff::private_file(&file)?;
+    let meta = file.metadata()?;
+    if !meta.is_file()
+        || meta.uid() != 0
+        || meta.gid() != 0
+        || meta.nlink() != 1
+        || meta.mode() & 0o7777 != 0o400
+    {
+        return Err(
+            invalid("staged firmware record must be a private read-only root-owned file").into(),
+        );
+    }
     let mut bytes = Vec::new();
-    file.take(MANIFEST_BYTES + 1).read_to_end(&mut bytes)?;
-    let (head, offer) = parse_offer(&bytes, &activation.offer_sha256, &activation.device_id)?;
-    require_baseline(&offer, activation.esrt_before.as_ref())?;
-    let observed = live::read_result(&offer, &head.system_uuid, &head.fwupd_version, activation)?;
-    let assessment = assess(&offer, &observed);
-    Ok((assessment, observed))
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if !(1..=limit).contains(&(bytes.len() as u64)) {
+        return Err(invalid("staged firmware record exceeds its size bound or is empty").into());
+    }
+    Ok(bytes)
 }
 
 fn parse_offer(bytes: &[u8], sha256: &str, device_id: &str) -> Result<(Head, Offer)> {

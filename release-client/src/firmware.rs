@@ -6,6 +6,7 @@ mod bus;
 mod capsule;
 mod live;
 mod result;
+mod transition;
 
 use std::fs::{self, File, Permissions};
 use std::io::{self, Write};
@@ -628,7 +629,7 @@ fn unique_device<'a>(devices: &'a Devices, id: &str) -> Result<&'a ObservedDevic
 pub enum ObservationSource<'a> {
     File(&'a Path),
     Live,
-    Scheduled(&'a EnrolledDepot),
+    Scheduled(&'a EnrolledDepot, &'a File),
 }
 
 enum SnapshotSource {
@@ -677,7 +678,7 @@ pub async fn scheduled() -> Result<()> {
             signature: &directory.join("policy.sig"),
             owner: &boot.join("firmware-update-owner"),
         },
-        ObservationSource::Scheduled(&depot),
+        ObservationSource::Scheduled(&depot, &pool_directory),
     )
     .await
 }
@@ -713,7 +714,7 @@ pub async fn stage(inputs: Intake<'_>, source: ObservationSource<'_>) -> Result<
 
 async fn stage_locked(inputs: Intake<'_>, source: ObservationSource<'_>) -> Result<()> {
     let directory = inputs.directory;
-    let scheduled = matches!(source, ObservationSource::Scheduled(_));
+    let scheduled = matches!(source, ObservationSource::Scheduled(..));
     let freshness = if scheduled {
         match state::read(&directory.join(STATUS), MANIFEST_BYTES) {
             Ok(previous) => serde_json::from_slice(&previous)?,
@@ -764,7 +765,7 @@ async fn refresh(
 ) -> Result<Option<Staged>> {
     let directory = inputs.directory;
     let scheduled = match source {
-        ObservationSource::Scheduled(depot) => Some((depot, ENROLLMENT)),
+        ObservationSource::Scheduled(depot, _) => Some((depot, ENROLLMENT)),
         _ => None,
     };
     let owner = state::read(inputs.owner, 32)?;
@@ -851,7 +852,7 @@ async fn refresh(
         &head_bytes,
     )?;
     *freshness = Freshness {
-        channel: Some(head.channel),
+        channel: Some(head.channel.clone()),
         last_refresh: Some(verified_at),
         fresh_until: Some(expires),
         channel_sequence: Some(head.sequence),
@@ -862,23 +863,24 @@ async fn refresh(
     let keep = head.offer.as_ref().map(|_| approval_sha256.as_str());
     require_current()?;
     retire_stages(&parent, keep, scheduled.is_some())?;
-    let Some(offer) = head.offer else {
+    let Some(offer) = head.offer.as_ref() else {
         require_current()?;
         return Ok(None);
     };
+    let (transition_bytes, transition) = transition::download(&repo, &head, offer).await?;
     let payloads = offer.catalog.download(&repo).await?;
     require_current()?;
-    let source = match source {
+    let snapshot = match source {
         ObservationSource::File(path) => {
             let bytes = state::read(path, OBSERVATION_LIMIT)?;
             SnapshotSource::File(serde_json::from_slice(&bytes)?, digest(&bytes))
         }
-        ObservationSource::Live | ObservationSource::Scheduled(_) => {
-            SnapshotSource::Live(live::Session::open(&policy, &offer, &payloads)?)
+        ObservationSource::Live | ObservationSource::Scheduled(..) => {
+            SnapshotSource::Live(live::Session::open(&policy, offer, &payloads)?)
         }
     };
     drop(payloads);
-    let observe = |payload_bytes| match &source {
+    let observe = |payload_bytes| match &snapshot {
         SnapshotSource::File(observed, sha256) => {
             offer.require_observation(&policy, observed, require_current()?)?;
             Ok(AdmittedObservation {
@@ -901,8 +903,8 @@ async fn refresh(
     let check_cabinet = |path: &Path| {
         require_current()?;
         let file = state::open_regular(path)?;
-        let payload_bytes = match &source {
-            SnapshotSource::Live(live) => Some(live.verify_cabinet(file, &offer)?),
+        let payload_bytes = match &snapshot {
+            SnapshotSource::Live(live) => Some(live.verify_cabinet(file, offer)?),
             SnapshotSource::File(..) => {
                 verify_member(file, &offer.archive)?;
                 None
@@ -913,9 +915,12 @@ async fn refresh(
     let (staged, observed) = stage_archive(
         &repo,
         &parent,
-        &offer,
-        &head_bytes,
-        &signature,
+        offer,
+        [
+            (OFFER, &head_bytes),
+            (SIGNATURE, &signature),
+            (transition::FILE, &transition_bytes),
+        ],
         &approval_sha256,
         &check_cabinet,
     )
@@ -929,6 +934,12 @@ async fn refresh(
     } else {
         None
     };
+    let boot_transition = match source {
+        ObservationSource::Scheduled(_, pool) => {
+            Some(transition::preflight(pool, &transition.before))
+        }
+        _ => None,
+    };
     require_current()?;
     let vendor_authentication = match offer.qualification.vendor_authentication {
         VendorAuthentication::DeviceSignature => "device-signature",
@@ -938,11 +949,13 @@ async fn refresh(
     };
     Ok(Some(Staged {
         offer_sha256: approval_sha256,
-        archive_sha256: offer.archive.sha256,
-        verified_payload_sha256: observed.payload_bytes.map(|_| offer.payload_sha256),
+        archive_sha256: offer.archive.sha256.clone(),
+        verified_payload_sha256: observed.payload_bytes.map(|_| offer.payload_sha256.clone()),
         verified_payload_bytes: observed.payload_bytes,
         observation_sha256: observed.sha256,
         capsule_delivery,
+        transition_evidence_sha256: offer.qualification.transition_evidence_sha256.clone(),
+        boot_transition,
         qualified_vendor_authentication: vendor_authentication,
         staged,
     }))
@@ -965,6 +978,9 @@ struct Staged {
     observation_sha256: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     capsule_delivery: Option<capsule::Delivery>,
+    transition_evidence_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    boot_transition: Option<transition::Status>,
     qualified_vendor_authentication: &'static str,
     staged: PathBuf,
 }
@@ -994,8 +1010,10 @@ fn retire_stages(parent: &Path, retain: Option<&str>, scheduled: bool) -> Result
         }
         let files = fs::read_dir(&path)?.collect::<io::Result<Vec<_>>>()?;
         for file in &files {
-            if !matches!(file.file_name().to_str(), Some(ARCHIVE | OFFER | SIGNATURE))
-                || !file.file_type()?.is_file()
+            if !matches!(
+                file.file_name().to_str(),
+                Some(ARCHIVE | OFFER | SIGNATURE | transition::FILE)
+            ) || !file.file_type()?.is_file()
             {
                 return Err(invalid("unrecognized firmware staging file").into());
             }
@@ -1016,8 +1034,7 @@ async fn stage_archive(
     repo: &Repository,
     parent: &Path,
     offer: &Offer,
-    document: &[u8],
-    signature: &[u8],
+    records: [(&str, &[u8]); 3],
     approval_sha256: &str,
     check_cabinet: &dyn Fn(&Path) -> Result<AdmittedObservation>,
 ) -> Result<(PathBuf, AdmittedObservation)> {
@@ -1031,13 +1048,17 @@ async fn stage_archive(
     match fs::symlink_metadata(&destination) {
         Ok(_) => {
             state::directory(&destination)?;
-            if fs::read_dir(&destination)?.count() != 3
-                || state::read(&destination.join(OFFER), MANIFEST_BYTES)? != document
-                || state::read(&destination.join(SIGNATURE), 64)? != signature
-            {
+            if fs::read_dir(&destination)?.count() != records.len() + 1 {
                 return Err(
                     invalid("existing firmware stage does not match the signed offer").into(),
                 );
+            }
+            for (name, bytes) in records {
+                if state::read(&destination.join(name), bytes.len() as u64)? != bytes {
+                    return Err(
+                        invalid("existing firmware stage does not match the signed offer").into(),
+                    );
+                }
             }
             let observation = check_cabinet(&destination.join(ARCHIVE))?;
             return Ok((destination, observation));
@@ -1051,7 +1072,7 @@ async fn stage_archive(
         .tempdir_in(parent)?;
     let path = temporary.path();
     download(repo, &target, &path.join(ARCHIVE), offer.archive.bytes).await?;
-    for (name, bytes) in [(OFFER, document), (SIGNATURE, signature)] {
+    for (name, bytes) in records {
         let mut file = output_file(&path.join(name))?;
         file.write_all(bytes)?;
         file.sync_all()?;
