@@ -95,15 +95,16 @@ def qualify(client, output):
             "esp": "d0d2fd6b-ee28-4034-a022-b3da25744690",
             "core": "7" * 64, "runtime": "8" * 64, "epoch": 10,
             "epoch_policy_sha256": "9" * 64,
+            "tpm_floor": 9, "pcr7_sha256": "c" * 64,
             "filesystem": "dfc379cc-7f43-4c4d-8b3b-e9b34c112712",
             "storage_policy_sha256": "a" * 64,
         }
         return {
-            "schema": "fvca-firmware-boot-transition-v1",
+            "schema": "fvca-firmware-boot-transition-v2",
             "system_uuid": document["system_uuid"], "fwupd_version": document["fwupd_version"],
             "device": selected["device"], "from": selected["from"], "to": selected["to"],
             "archive_sha256": selected["archive"]["sha256"], "payload_sha256": selected["payload_sha256"],
-            "before": before, "after": dict(before, storage_policy_sha256="b" * 64),
+            "key_release": "preserve-enrollment", "before": before, "after": dict(before),
         }
 
     def bind_transition(document, evidence):
@@ -329,13 +330,28 @@ def qualify(client, output):
     mismatch_state.mkdir(mode=0o700)
     run("transition-target-mismatch", snapshot(initial), "differs from the qualified release", directory=mismatch_state)
     changed = transition_for(wrong)
+    changed["key_release"] = "requires-preparation"
     changed["after"]["epoch"] = changed["before"]["epoch"] - 1
     bind_transition(wrong, changed)
     publish(wrong)
     rollback_state = output / "transition-rollback-state"
     rollback_state.mkdir(mode=0o700)
     run("transition-epoch-rollback", snapshot(initial), "invalid boot or storage policies", directory=rollback_state)
-    for unused in (evidence_state, replacement_state, mismatch_state, rollback_state):
+    changed["after"]["epoch"] = changed["before"]["epoch"]
+    changed["after"]["tpm_floor"] = changed["before"]["tpm_floor"] - 1
+    bind_transition(wrong, changed)
+    publish(wrong)
+    floor_state = output / "transition-floor-rollback-state"
+    floor_state.mkdir(mode=0o700)
+    run("transition-floor-rollback", snapshot(initial), "invalid boot or storage policies", directory=floor_state)
+    changed = transition_for(wrong)
+    changed["after"]["pcr7_sha256"] = "d" * 64
+    bind_transition(wrong, changed)
+    publish(wrong)
+    pcr_state = output / "transition-changed-pcr-state"
+    pcr_state.mkdir(mode=0o700)
+    run("preservation-with-changed-pcr", snapshot(initial), "under preserved TPM enrollment", directory=pcr_state)
+    for unused in (evidence_state, replacement_state, mismatch_state, rollback_state, floor_state, pcr_state):
         assert not any((unused / "staged").iterdir())
     publish(initial)
     catalog_state = output / "tampered-catalog-state"

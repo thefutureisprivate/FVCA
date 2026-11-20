@@ -9,12 +9,19 @@ use super::{DeviceIdentity, Head, Offer, Version, boot, boot_id};
 use crate::{
     Result,
     channel::{digest, target},
-    handoff, invalid,
+    invalid,
 };
 
 pub(super) const FILE: &str = "transition.json";
 pub(super) const LIMIT: u64 = 8192;
-const SCHEMA: &str = "fvca-firmware-boot-transition-v1";
+const SCHEMA: &str = "fvca-firmware-boot-transition-v2";
+
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum KeyRelease {
+    PreserveEnrollment,
+    RequiresPreparation,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +34,7 @@ pub(super) struct Transition {
     to: Version,
     archive_sha256: String,
     payload_sha256: String,
+    pub(super) key_release: KeyRelease,
     pub(super) before: boot::Policy,
     pub(super) after: boot::Policy,
 }
@@ -58,9 +66,16 @@ impl Transition {
             || !record.after.valid()
             || record.before.filesystem != record.after.filesystem
             || record.after.epoch < record.before.epoch
+            || record.after.tpm_floor < record.before.tpm_floor
         {
             return Err(invalid(
                 "firmware transition evidence has invalid boot or storage policies",
+            )
+            .into());
+        }
+        if record.key_release == KeyRelease::PreserveEnrollment && record.before != record.after {
+            return Err(invalid(
+                "firmware transition changes the boot or storage policy under preserved TPM enrollment",
             )
             .into());
         }
@@ -89,15 +104,14 @@ pub(super) enum Status {
     Blocked { reason: String },
 }
 
+/// The caller holds the Host lifecycle lease and has checked that it is idle.
 pub(super) fn preflight(pool: &File, expected: &boot::Policy) -> Status {
-    let observe = || -> Result<Status> {
-        let _lease = handoff::lock_install()?;
-        handoff::require_idle()?;
-        Ok(compare(expected, &boot::inspect(pool, &boot_id()?)))
-    };
-    observe().unwrap_or_else(|error| Status::Blocked {
-        reason: error.to_string(),
-    })
+    match boot_id() {
+        Ok(id) => compare(expected, &boot::inspect(pool, &id)),
+        Err(error) => Status::Blocked {
+            reason: error.to_string(),
+        },
+    }
 }
 
 pub(super) fn compare(expected: &boot::Policy, observed: &boot::Evidence) -> Status {

@@ -7,7 +7,7 @@ use std::path::Path;
 pub const STATE_DIRECTORY: &str = "firmware-update";
 pub const ACTIVATION: &str = "activation.json";
 pub const VERIFIED_BOOT: &str = "/run/fvca/firmware-verified-boot";
-pub const VERIFIED_BOOT_LIMIT: u64 = 512;
+pub const VERIFIED_BOOT_LIMIT: u64 = 640;
 const HOST_DATA: &str = "/run/fvca/host-data";
 
 pub struct VerifiedBoot<'a> {
@@ -17,6 +17,8 @@ pub struct VerifiedBoot<'a> {
     pub runtime: &'a str,
     pub epoch: u64,
     pub epoch_policy_sha256: &'a str,
+    pub tpm_floor: u64,
+    pub pcr7_sha256: &'a str,
     pub filesystem: &'a str,
     pub storage_policy_sha256: &'a str,
 }
@@ -27,12 +29,14 @@ impl<'a> VerifiedBoot<'a> {
 
         let lines: Vec<_> = text.split('\n').collect();
         let [
-            "FVCA-FIRMWARE-BOOT-1",
+            "FVCA-FIRMWARE-BOOT-2",
             boot,
             esp,
             core,
             runtime,
             epoch,
+            floor,
+            pcr7,
             filesystem,
             storage,
             "",
@@ -56,13 +60,21 @@ impl<'a> VerifiedBoot<'a> {
         let (epoch, policy) = epoch
             .split_once(',')
             .ok_or_else(|| invalid("invalid verified firmware boot epoch"))?;
+        let epoch = number(epoch, "epoch=")?;
+        let tpm_floor = number(floor, "tpm_floor=")?;
+        let pcr7_sha256 = digest(pcr7, "pcr7_sha256=")?;
+        if tpm_floor > epoch || pcr7_sha256.bytes().all(|byte| byte == b'0') {
+            return Err(invalid("invalid measured firmware TPM policy"));
+        }
         Ok(Self {
             boot_id: identifier(boot, "boot_id=")?,
             esp: identifier(esp, "esp=")?,
             core: digest(core, "core=")?,
             runtime: digest(runtime, "runtime=")?,
-            epoch: number(epoch, "epoch=")?,
+            epoch,
             epoch_policy_sha256: digest(policy, "")?,
+            tpm_floor,
+            pcr7_sha256,
             filesystem: identifier(filesystem, "filesystem=")?,
             storage_policy_sha256: digest(storage, "storage_policy_sha256=")?,
         })

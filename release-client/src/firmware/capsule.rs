@@ -63,6 +63,7 @@ enum Route {
     },
 }
 
+/// The caller holds the Host lifecycle lease and has checked that it is idle.
 pub(super) fn inspect(esrt: Esrt, target: u32, cabinet: VerifiedCabinet) -> Delivery {
     let observation = if cabinet.capsule_on_disk {
         live_route(&esrt, target, cabinet.bytes)
@@ -86,8 +87,6 @@ pub(super) fn inspect(esrt: Esrt, target: u32, cabinet: VerifiedCabinet) -> Deli
 }
 
 fn live_route(esrt: &Esrt, target: u32, payload_bytes: u64) -> Result<(String, Route)> {
-    let _lease = handoff::lock_install()?;
-    handoff::require_idle()?;
     let binding = read_binding()?;
     let (device_id, expected) = esp_binding(&binding)?;
     let efivars = File::from(fs::openat(CWD, EFIVARS, DIRECTORY, Mode::empty())?);

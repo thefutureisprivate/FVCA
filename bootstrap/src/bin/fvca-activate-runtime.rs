@@ -2,10 +2,12 @@
 
 use std::alloc::System;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::FileTypeExt;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 
 use fvca_initrd_bootstrap::runtime::{self, Runtime, hash};
 use fvca_initrd_bootstrap::{
@@ -20,6 +22,49 @@ mod storage;
 static ALLOCATOR: System = System;
 
 const PROBE: &str = include_str!("../../../tests/fvca-vm-runtime-probe.service");
+
+fn check_epoch(epoch: &str) -> io::Result<Option<host_update::FirmwareTpm>> {
+    let checker = "/usr/lib/fvca/check-hypervisor-epoch";
+    if !Path::new("/usr/lib/fvca/firmware-update-owner").try_exists()? {
+        run(Command::new(checker).arg(epoch))?;
+        return Ok(None);
+    }
+    let (report, stdout) = UnixStream::pair()?;
+    run(Command::new(checker)
+        .args([epoch, "--measure-firmware-tpm"])
+        .stdout(Stdio::from(OwnedFd::from(stdout))))?;
+    let mut text = String::new();
+    report.take(256).read_to_string(&mut text)?;
+    let (accepted, measurement) = text
+        .split_once('\n')
+        .ok_or_else(|| invalid("missing accepted Hypervisor epoch"))?;
+    let prefix = epoch
+        .strip_prefix(HYPERVISOR_EPOCH_ARGUMENT)
+        .and_then(|epoch| epoch.strip_prefix('='))
+        .and_then(|epoch| epoch.split_once(','))
+        .map(|(epoch, _)| format!("FVCA_HYPERVISOR_EPOCH_ACCEPTED {epoch} "))
+        .ok_or_else(|| invalid("invalid measured Hypervisor epoch selection"))?;
+    let floor_text = accepted
+        .strip_prefix(&prefix)
+        .ok_or_else(|| invalid("invalid accepted TPM release floor"))?;
+    let floor = floor_text
+        .parse::<u64>()
+        .ok()
+        .filter(|floor| *floor != 0 && floor.to_string() == floor_text)
+        .ok_or_else(|| invalid("invalid accepted TPM release floor"))?;
+    println!("{accepted}");
+    if measurement.is_empty() {
+        return Ok(None);
+    }
+    let pcr7 = measurement
+        .strip_suffix('\n')
+        .and_then(|line| line.strip_prefix("FVCA_FIRMWARE_PCR7 "))
+        .ok_or_else(|| invalid("invalid firmware TPM measurement"))?;
+    Ok(Some(host_update::FirmwareTpm {
+        floor,
+        pcr7_sha256: hash(pcr7)?.to_owned(),
+    }))
+}
 
 fn activate() -> io::Result<()> {
     fvca_allocator_binding::require_allocator()?;
@@ -44,14 +89,16 @@ fn activate() -> io::Result<()> {
             "expected exactly one command-line epoch with the signed Hypervisor epoch policy",
         ));
     }
-    if let Some(epoch) = epoch {
+    let firmware_tpm = if let Some(epoch) = epoch {
         if slot.is_none() {
             return Err(invalid(
                 "a protected Hypervisor epoch requires a verified GPT slot",
             ));
         }
-        run(Command::new("/usr/lib/fvca/check-hypervisor-epoch").arg(epoch))?;
-    }
+        check_epoch(epoch)?
+    } else {
+        None
+    };
     let verified_runtime = runtime::activate(Runtime::Vm, slot.as_ref().map(|slot| &slot.runtime))?;
     runtime::install_development_probe("fvca-vm-runtime-probe.service", PROBE)?;
     let storage = storage::activate_if_selected(protected_epoch)?;
@@ -64,6 +111,7 @@ fn activate() -> io::Result<()> {
                 &verified_runtime,
                 &storage.filesystem,
                 &storage.policy_sha256,
+                firmware_tpm.as_ref(),
                 recovery,
             );
         }

@@ -225,6 +225,7 @@ pub(super) async fn download(repo: &Repository, offer: &Offer) -> Result<Qualifi
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub(super) enum Status {
     Blocked { reason: String },
+    RecoveryNeeded { reason: &'static str },
     AwaitingMaintenance,
     ChecksSatisfied,
 }
@@ -245,6 +246,7 @@ impl Reboot {
 
     pub(super) fn preflight(
         &self,
+        key_release: transition::KeyRelease,
         boot: &transition::Status,
         capsule: Option<&capsule::Delivery>,
         requires_ac: bool,
@@ -253,6 +255,11 @@ impl Reboot {
     ) -> Result<Status> {
         if let Some(reason) = self.delivery_blocker() {
             return Ok(Status::blocked(reason));
+        }
+        if key_release == transition::KeyRelease::RequiresPreparation {
+            return Ok(Status::RecoveryNeeded {
+                reason: "qualified TPM key release requires separately authorized preparation",
+            });
         }
         if !matches!(boot, transition::Status::Matched) {
             return Ok(Status::blocked(
@@ -311,7 +318,7 @@ impl Reboot {
 }
 
 impl Status {
-    fn blocked(reason: &str) -> Self {
+    pub(super) fn blocked(reason: &str) -> Self {
         Self::Blocked {
             reason: reason.into(),
         }
@@ -391,6 +398,28 @@ mod tests {
         ));
         reboot.steps.push(Step::PowerCycle);
         assert!(reboot.delivery_blocker().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn changed_tpm_enrollment_requires_recovery_preparation() -> Result<()> {
+        let reboot = Reboot {
+            urgency: Urgency::Security,
+            delivery: Delivery::CapsuleOnDisk,
+            power: Power::NoAdditionalRequirement,
+            steps: vec![Step::Reboot],
+        };
+        assert!(matches!(
+            reboot.preflight(
+                transition::KeyRelease::RequiresPreparation,
+                &transition::Status::Matched,
+                None,
+                false,
+                &Window::default(),
+                Timestamp::now(),
+            )?,
+            Status::RecoveryNeeded { .. }
+        ));
         Ok(())
     }
 

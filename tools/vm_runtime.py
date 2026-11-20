@@ -41,7 +41,7 @@ FIRMWARE_UPDATE_UNITS = tuple(
         "fvca-firmware-update.service", "fvca-firmware-update.timer", "fvca-firmware-recovery.service",
     )
 )
-FIRMWARE_UPDATE_SUPPORT = Path("usr/lib/fvca/firmware-update-support-v10")
+FIRMWARE_UPDATE_SUPPORT = Path("usr/lib/fvca/firmware-update-support-v11")
 BASE_BINDING = Path("usr/share/fvca/vm-runtime-base.roothash")
 EXTENSION_RELEASE = Path("usr/lib/extension-release.d/extension-release.vm-runtime")
 REQUIRED_FILES = {

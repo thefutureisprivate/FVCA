@@ -310,6 +310,7 @@ pub(crate) fn publish_firmware_boot(
     active: &runtime::Activation,
     filesystem: &str,
     storage_policy_sha256: &str,
+    tpm: &crate::host_update::FirmwareTpm,
 ) -> io::Result<()> {
     use fvca_trial_authorization::firmware::{VERIFIED_BOOT, VerifiedBoot};
 
@@ -319,8 +320,8 @@ pub(crate) fn publish_firmware_boot(
         .ok_or_else(|| invalid("missing accepted firmware boot epoch"))?;
     let boot = boot_id()?;
     let contents = format!(
-        "FVCA-FIRMWARE-BOOT-1\nboot_id={boot}\nesp={esp}\ncore={}\nruntime={}\nepoch={epoch}\nfilesystem={filesystem}\nstorage_policy_sha256={storage_policy_sha256}\n",
-        active.core, active.extension,
+        "FVCA-FIRMWARE-BOOT-2\nboot_id={boot}\nesp={esp}\ncore={}\nruntime={}\nepoch={epoch}\ntpm_floor={}\npcr7_sha256={}\nfilesystem={filesystem}\nstorage_policy_sha256={storage_policy_sha256}\n",
+        active.core, active.extension, tpm.floor, tpm.pcr7_sha256,
     );
     VerifiedBoot::parse(&contents)?;
     publish(Path::new(VERIFIED_BOOT), contents.as_bytes())

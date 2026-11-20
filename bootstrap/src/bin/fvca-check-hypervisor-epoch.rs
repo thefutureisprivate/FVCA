@@ -25,7 +25,10 @@ const NO_SESSIONS: u16 = 0x8001;
 const SESSIONS: u16 = 0x8002;
 const NV_READ_PUBLIC: u32 = 0x0000_0169;
 const NV_READ: u32 = 0x0000_014e;
+const PCR_READ: u32 = 0x0000_017e;
 const PASSWORD: u32 = 0x4000_0009;
+// One SHA-256 bank with PCR 7 selected.
+const PCR7_SELECTION: [u8; 10] = [0, 0, 0, 1, 0, 11, 3, 0x80, 0, 0];
 
 struct Selection {
     epoch: u64,
@@ -75,25 +78,25 @@ fn selection(command_line: &str) -> io::Result<Selection> {
     })
 }
 
-fn exchange(device: &mut File, tag: u16, code: u32, body: &[u8]) -> io::Result<Vec<u8>> {
+fn exchange(device: &mut File, tag: u16, command: u32, body: &[u8]) -> io::Result<Vec<u8>> {
     let mut packet = tag.to_be_bytes().to_vec();
     packet.extend(((10 + body.len()) as u32).to_be_bytes());
-    packet.extend(code.to_be_bytes());
+    packet.extend(command.to_be_bytes());
     packet.extend(body);
     let mut response = [0; 128];
     for attempt in 0..5 {
         if device.write(&packet)? != packet.len() {
-            return Err(invalid("incomplete TPM counter command"));
+            return Err(invalid("incomplete TPM read command"));
         }
         let received = device.read(&mut response)?;
         let Some(([wire_tag_a, wire_tag_b, a, b, c, d, e, f, g, h], payload)) =
             response[..received].split_first_chunk::<10>()
         else {
-            return Err(invalid("truncated TPM counter response"));
+            return Err(invalid("truncated TPM read response"));
         };
         let wire_tag = u16::from_be_bytes([*wire_tag_a, *wire_tag_b]);
         if u32::from_be_bytes([*a, *b, *c, *d]) as usize != received {
-            return Err(invalid("invalid TPM counter response size"));
+            return Err(invalid("invalid TPM read response size"));
         }
         let code = u32::from_be_bytes([*e, *f, *g, *h]);
         if code == 0 && wire_tag == tag {
@@ -107,7 +110,7 @@ fn exchange(device: &mut File, tag: u16, code: u32, body: &[u8]) -> io::Result<V
             || attempt == 4
         {
             return Err(invalid(&format!(
-                "TPM refused the enrolled release counter (0x{code:08x})"
+                "TPM refused read command 0x{command:08x} (0x{code:08x})"
             )));
         }
         thread::sleep(Duration::from_millis(50));
@@ -157,6 +160,16 @@ fn counter(device: &mut File) -> io::Result<u64> {
     Ok(floor)
 }
 
+fn pcr7_digest(response: &[u8]) -> io::Result<[u8; 32]> {
+    let digest = response
+        .get(4..) // pcrUpdateCounter
+        .and_then(|data| data.strip_prefix(&PCR7_SELECTION))
+        .and_then(|data| data.strip_prefix(&[0, 0, 0, 1, 0, 32]))
+        .and_then(|data| <[u8; 32]>::try_from(data).ok())
+        .filter(|digest| *digest != [0; 32]);
+    digest.ok_or_else(|| invalid("TPM did not report a measured SHA-256 PCR 7"))
+}
+
 fn check() -> io::Result<()> {
     fvca_allocator_binding::require_allocator()?;
     let mut args = env::args_os().skip(1);
@@ -164,9 +177,11 @@ fn check() -> io::Result<()> {
         .next()
         .and_then(|arg| arg.into_string().ok())
         .ok_or_else(|| invalid("expected one Hypervisor epoch argument"))?;
-    if args.next().is_some() {
-        return Err(invalid("expected one Hypervisor epoch argument"));
-    }
+    let firmware = match args.next().as_deref() {
+        None => false,
+        Some(option) if option == "--measure-firmware-tpm" && args.next().is_none() => true,
+        _ => return Err(invalid("invalid Hypervisor epoch arguments")),
+    };
     let selected = selection(&command_line)?;
     let mut device = OpenOptions::new()
         .read(true)
@@ -190,7 +205,39 @@ fn check() -> io::Result<()> {
         )));
     }
     println!("FVCA_HYPERVISOR_EPOCH_ACCEPTED {} {floor}", selected.epoch);
+    if firmware {
+        let measurement = exchange(&mut device, NO_SESSIONS, PCR_READ, &PCR7_SELECTION)
+            .and_then(|response| pcr7_digest(&response));
+        match measurement {
+            Ok(digest) => {
+                let digest: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+                println!("FVCA_FIRMWARE_PCR7 {digest}");
+            }
+            Err(error) => eprintln!("FVCA_HOST_FIRMWARE_TPM_EVIDENCE_BLOCKED {error}"),
+        }
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_one_measured_sha256_pcr7() -> io::Result<()> {
+        let mut report = vec![0; 4];
+        report.extend(PCR7_SELECTION);
+        report.extend([0, 0, 0, 1, 0, 32]);
+        report.extend([0xab; 32]);
+        assert_eq!(pcr7_digest(&report)?, [0xab; 32]);
+        report[11] = 0x40;
+        assert!(pcr7_digest(&report).is_err());
+        report[11] = 0x80;
+        assert!(pcr7_digest(&report[..report.len() - 1]).is_err());
+        report[20..].fill(0);
+        assert!(pcr7_digest(&report).is_err());
+        Ok(())
+    }
 }
 
 fn main() -> ExitCode {

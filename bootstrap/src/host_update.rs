@@ -231,12 +231,18 @@ pub fn activate_guest_if_selected() -> io::Result<()> {
     Ok(())
 }
 
+pub struct FirmwareTpm {
+    pub floor: u64,
+    pub pcr7_sha256: String,
+}
+
 pub fn activate_firmware_if_selected(
     esp: &str,
     epoch: &str,
     runtime: &crate::runtime::Activation,
     filesystem: &str,
     storage_policy_sha256: &str,
+    tpm: Option<&FirmwareTpm>,
     recovery: bool,
 ) -> io::Result<bool> {
     let Some(owner) = owner_for(FIRMWARE_STATE)? else {
@@ -252,13 +258,19 @@ pub fn activate_firmware_if_selected(
     if let Err(error) = crate::hypervisor_trial::publish_firmware_esp(esp) {
         eprintln!("FVCA_HOST_FIRMWARE_ESP_BLOCKED {error}");
     }
-    if let Err(error) = crate::hypervisor_trial::publish_firmware_boot(
-        esp,
-        epoch,
-        runtime,
-        filesystem,
-        storage_policy_sha256,
-    ) {
+    let boot = tpm
+        .ok_or_else(|| invalid("missing initramfs TPM measurement for firmware continuity"))
+        .and_then(|tpm| {
+            crate::hypervisor_trial::publish_firmware_boot(
+                esp,
+                epoch,
+                runtime,
+                filesystem,
+                storage_policy_sha256,
+                tpm,
+            )
+        });
+    if let Err(error) = boot {
         eprintln!("FVCA_HOST_FIRMWARE_BOOT_EVIDENCE_BLOCKED {error}");
     }
     publish_depot(FIRMWARE_STATE, "fvca-firmware-update", &owner)?;

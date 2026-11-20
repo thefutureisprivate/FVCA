@@ -35,6 +35,8 @@ pub(super) struct Policy {
     runtime: String,
     pub(super) epoch: u64,
     epoch_policy_sha256: String,
+    pub(super) tpm_floor: u64,
+    pcr7_sha256: String,
     pub(super) filesystem: String,
     storage_policy_sha256: String,
 }
@@ -43,11 +45,13 @@ impl Policy {
     pub(super) fn valid(&self) -> bool {
         uuid(&self.esp)
             && uuid(&self.filesystem)
-            && self.epoch > 0
+            && (1..=self.epoch).contains(&self.tpm_floor)
+            && self.pcr7_sha256.bytes().any(|byte| byte != b'0')
             && [
                 &self.core,
                 &self.runtime,
                 &self.epoch_policy_sha256,
+                &self.pcr7_sha256,
                 &self.storage_policy_sha256,
             ]
             .into_iter()
@@ -131,6 +135,8 @@ fn collect(pool: &File, boot_id: &str) -> Result<Evidence> {
             runtime: receipt.runtime.to_owned(),
             epoch: receipt.epoch,
             epoch_policy_sha256: receipt.epoch_policy_sha256.to_owned(),
+            tpm_floor: receipt.tpm_floor,
+            pcr7_sha256: receipt.pcr7_sha256.to_owned(),
             filesystem,
             storage_policy_sha256: receipt.storage_policy_sha256.to_owned(),
         },
@@ -219,6 +225,8 @@ mod tests {
             runtime: "8".repeat(64),
             epoch: 10,
             epoch_policy_sha256: "9".repeat(64),
+            tpm_floor: 10,
+            pcr7_sha256: "a".repeat(64),
             filesystem: "dfc379cc-7f43-4c4d-8b3b-e9b34c112712".into(),
             storage_policy_sha256: storage.repeat(64),
         };

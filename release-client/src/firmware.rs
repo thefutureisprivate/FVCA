@@ -960,7 +960,7 @@ async fn refresh(
             .into_iter()
             .zip(qualified.records.iter().map(Vec::as_slice)),
     );
-    let (staged, observed) = stage_archive(
+    let (staged, mut observed) = stage_archive(
         &repo,
         &parent,
         offer,
@@ -969,34 +969,43 @@ async fn refresh(
         &check_cabinet,
     )
     .await?;
-    let capsule_delivery = if scheduled.is_some() {
-        observed
-            .esrt
-            .zip(offer.to.raw)
-            .zip(observed.cabinet)
-            .map(|((esrt, to), cabinet)| capsule::inspect(esrt, to, cabinet))
-    } else {
-        None
-    };
-    let boot_transition = match source {
-        ObservationSource::Scheduled(_, pool) => {
-            Some(transition::preflight(pool, &transition.before))
-        }
-        _ => None,
-    };
-    let now = Timestamp::from_second(require_current()?)?;
-    let operational_preflight = boot_transition
-        .as_ref()
-        .map(|boot| {
-            qualified.reboot.preflight(
-                boot,
-                capsule_delivery.as_ref(),
-                observed.requires_ac,
-                &policy.maintenance,
-                now,
-            )
-        })
-        .transpose()?;
+    let (capsule_delivery, boot_transition, operational_preflight) =
+        if let ObservationSource::Scheduled(_, pool) = source {
+            let preflight = || -> Result<_> {
+                let _lease = handoff::lock_install()?;
+                handoff::require_idle()?;
+                let current = check_cabinet(&staged.join(ARCHIVE))?;
+                let capsule = current
+                    .esrt
+                    .clone()
+                    .zip(offer.to.raw)
+                    .zip(current.cabinet)
+                    .map(|((esrt, to), cabinet)| capsule::inspect(esrt, to, cabinet));
+                let boot = transition::preflight(pool, &transition.before);
+                let operational = qualified.reboot.preflight(
+                    transition.key_release,
+                    &boot,
+                    capsule.as_ref(),
+                    current.requires_ac,
+                    &policy.maintenance,
+                    Timestamp::from_second(require_current()?)?,
+                )?;
+                Ok((current, capsule, boot, operational))
+            };
+            match preflight() {
+                Ok((current, capsule, boot, operational)) => {
+                    observed = current;
+                    (capsule, Some(boot), Some(operational))
+                }
+                Err(error) => (
+                    None,
+                    None,
+                    Some(qualification::Status::blocked(&error.to_string())),
+                ),
+            }
+        } else {
+            (None, None, None)
+        };
     require_current()?;
     Ok(Some(Staged {
         offer_sha256: approval_sha256,
