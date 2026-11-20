@@ -16,6 +16,7 @@ use crate::{find_partition, identity, invalid, recovery, runtime, sys_block};
 
 mod promotion;
 mod standing;
+mod standing_promotion;
 
 pub const PROMOTION_KEY: &str = "/usr/lib/fvca/hypervisor-promotion-key";
 pub const TRIAL_KEY: &str = "/usr/lib/fvca/hypervisor-trial-key";
@@ -100,6 +101,8 @@ pub fn publish_running_context(
 
 #[cfg(feature = "promotion")]
 pub mod online;
+#[cfg(feature = "promotion")]
+pub use standing_promotion::healthy_return;
 
 pub fn verify_standing_key(cmdline: &str) -> io::Result<()> {
     use fvca_trial_authorization::{KEY_ARGUMENT, key_marker};
@@ -548,6 +551,9 @@ pub fn arm_if_authorized(
         Ok(prior) if prior == raw => {
             println!("FVCA_TRIAL_PREVIOUSLY_RECORDED {}", trial.transaction);
             if let Some(health) = prior_health(&directory, &approved, &raw)? {
+                if dynamic && standing_promotion::commit(&directory, &raw, &health, &order)? {
+                    return Ok(ArmOutcome::RebootIntoTrial);
+                }
                 promotion::apply(
                     &directory,
                     &approved,
@@ -643,7 +649,11 @@ pub fn start_candidate(
     }
     let directory = record_directory()?;
     let order = boot_order()?;
-    if order.first() == Some(&trial.candidate.id) {
+    if order.first() == Some(&trial.candidate.id)
+        || directory
+            .join(format!("{}.promotion-confirmed", trial.transaction))
+            .try_exists()?
+    {
         return promotion::authorize_promoted(
             &directory,
             &trial,
@@ -720,6 +730,12 @@ pub fn start_candidate(
     })?;
     promotion::record_candidate_key(&directory, trial.transaction)?;
     publish(Path::new(STARTED), record.as_bytes())?;
+    if standing.is_some()
+        && let Err(error) =
+            standing_promotion::enroll_return(&directory, &trial, &attempt, &slot.payload_ids)
+    {
+        eprintln!("FVCA_STANDING_PROMOTION_REFUSED {error}");
+    }
     let units = Path::new("/run/systemd/system");
     let requires = units.join("fvca-base.target.requires");
     fs::create_dir_all(&requires)?;

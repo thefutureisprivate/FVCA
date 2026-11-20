@@ -325,6 +325,8 @@ def assemble(args, work):
                      "usr/lib/fvca/verify-boot-approval", "usr/bin/systemctl")
     if args.os_update_owner is not None:
         required += ("usr/lib/fvca/hypervisor-update-support-v2", "usr/bin/chcon")
+        if args.boot_promotion_public_key is not None:
+            required += ("usr/lib/fvca/hypervisor-standing-promotion-v1",)
     if args.boot_trial_candidate is not None:
         recorder = runtime_work / "tree" / vm_runtime.TRIAL_HEALTH
         if recorder.is_symlink() or not recorder.is_file() or recorder.stat().st_mode & 0o111 == 0:

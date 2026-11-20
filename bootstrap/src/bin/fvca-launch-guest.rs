@@ -310,7 +310,8 @@ fn activate() -> io::Result<()> {
             capture::live::require_idle()?;
             shutdown()
         }
-        [option] if option == "--activate-hypervisor-trial" => update::activate(),
+        [option] if option == "--activate-hypervisor-trial" => update::activate(false),
+        [option] if option == "--return-healthy-hypervisor" => update::activate(true),
         [option] if option == "--recover-hypervisor-activation" => update::recover(),
         [option] if option == "--release" => {
             let _lease = capture::lease(Path::new(OPERATION_LOCK))?;

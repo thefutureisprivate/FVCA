@@ -8,7 +8,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, symlink};
 use std::path::Path;
 use std::process::Command;
 
-use fvca_trial_authorization::{PEER_ENROLLMENT, peer_partitions};
+use fvca_trial_authorization::{PEER_ENROLLMENT, PROMOTION_ENROLLMENT, peer_partitions};
 
 use crate::{invalid, run};
 
@@ -106,6 +106,12 @@ pub fn activate_if_selected() -> io::Result<()> {
     }
     fs::write(run.join(DEPOT), depot)?;
     fs::write(run.join(OWNER), owner)?;
+    match fs::read(crate::hypervisor_trial::PROMOTION_KEY) {
+        Ok(key) if key.len() == 32 => fs::write(PROMOTION_ENROLLMENT, key)?,
+        Ok(_) => return Err(invalid("invalid signed Host promotion authority")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error),
+    }
     let wants = units.join("fvca-base.target.wants");
     fs::create_dir_all(&wants)?;
     symlink(

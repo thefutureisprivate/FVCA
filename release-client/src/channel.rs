@@ -5,7 +5,10 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
-use fvca_trial_authorization::{APPROVAL_LIMIT, RUNNING_CONTEXT, Standing, peer_partitions};
+use fvca_trial_authorization::{
+    APPROVAL_LIMIT, PROMOTED_RELEASE, PROMOTION_ENROLLMENT, Promotion, RUNNING_CONTEXT, Standing,
+    peer_partitions,
+};
 use jiff::{
     Timestamp,
     tz::{TimeZone, TimeZoneDatabase},
@@ -107,7 +110,7 @@ struct Hold {
     until: i64,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Active {
     role: Role,
@@ -139,6 +142,8 @@ struct Candidate {
     activation: Activation,
     #[serde(skip_serializing_if = "Option::is_none")]
     trial_approval: Option<Member>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    promotion_approval: Option<Member>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -247,6 +252,15 @@ impl Head {
                     invalid("channel trial approval is outside standing policy scope").into(),
                 );
             }
+            if release.promotion_approval.as_ref().is_some_and(|member| {
+                release.trial_approval.is_none()
+                    || !(65..=APPROVAL_LIMIT as u64).contains(&member.bytes)
+                    || !valid_digest(&member.sha256)
+            }) {
+                return Err(
+                    invalid("channel promotion approval is outside standing policy scope").into(),
+                );
+            }
             let current = release.manifest_sha256 == active.manifest_sha256;
             if !valid_digest(&release.manifest_sha256)
                 || release.epoch < active.epoch
@@ -279,23 +293,24 @@ fn verify(key: &[u8], bytes: &[u8], signature: &[u8], message: &str) -> Result<(
         .map_err(|_| invalid(message).into())
 }
 
-async fn trial_envelope(
+async fn boot_envelope(
     repo: &Repository,
     selected: &Selection,
     member: &Member,
+    file: &str,
 ) -> Result<Vec<u8>> {
-    let name = selected.name("boot-trial.bin")?;
+    let name = selected.name(file)?;
     if check_target(repo, &name, APPROVAL_LIMIT as u64, &member.sha256)? != member.bytes {
-        return Err(invalid("trial envelope length differs from the qualified channel").into());
+        return Err(invalid("boot envelope length differs from the qualified channel").into());
     }
     let bytes = repo
         .read_target(&name)
         .await?
-        .ok_or_else(|| invalid("qualified trial envelope disappeared"))?
+        .ok_or_else(|| invalid("qualified boot envelope disappeared"))?
         .into_vec()
         .await?;
     if bytes.len() as u64 != member.bytes {
-        return Err(invalid("trial envelope is incomplete").into());
+        return Err(invalid("boot envelope is incomplete").into());
     }
     Ok(bytes)
 }
@@ -308,6 +323,46 @@ fn save(path: &Path, name: &str, value: &impl Serialize) -> Result<()> {
     record.persist(path.join(name))?;
     File::open(path)?.sync_all()?;
     Ok(())
+}
+
+fn reconcile_promotion(directory: &Path, active: Active) -> Result<Active> {
+    let body = match state::read(Path::new(PROMOTED_RELEASE), APPROVAL_LIMIT as u64) {
+        Ok(body) => body,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(active),
+        Err(error) => return Err(error.into()),
+    };
+    let promotion = Promotion::parse(std::str::from_utf8(&body)?)?;
+    let stable = if promotion.stable_slot == "a" {
+        Slot::A
+    } else {
+        Slot::B
+    };
+    let promoted = Active {
+        role: Role::Hypervisor,
+        slot: Some(stable.other()),
+        sequence: promotion.candidate_sequence,
+        epoch: promotion.trial.candidate_epoch,
+        manifest_sha256: promotion.candidate_manifest.into(),
+    };
+    if active != promoted {
+        if active.role != Role::Hypervisor
+            || active.slot != Some(stable)
+            || active.sequence != promotion.stable_sequence
+            || active.epoch != promotion.trial.stable_epoch
+            || active.manifest_sha256 != promotion.stable_manifest
+        {
+            return Err(invalid(
+                "standing promotion does not advance the recorded active composition",
+            )
+            .into());
+        }
+        save(directory, "active-os-release.json", &promoted)?;
+        println!(
+            "FVCA_PROMOTED_RELEASE_COMMITTED {}",
+            promotion.candidate_manifest
+        );
+    }
+    Ok(promoted)
 }
 
 fn checkpoint(path: &Path, name: &str, sequence: u64, bytes: &[u8]) -> Result<()> {
@@ -418,6 +473,18 @@ pub async fn discover(
     operation: Operation,
 ) -> Result<()> {
     let _lock = state::lock(directory)?;
+    let active: Active = serde_json::from_slice(&state::read(
+        &directory.join("active-os-release.json"),
+        MANIFEST_BYTES,
+    )?)?;
+    let active = if matches!(
+        operation,
+        Operation::DeliverTrial(Delivery::Scheduled { .. })
+    ) {
+        reconcile_promotion(directory, active)?
+    } else {
+        active
+    };
     let owner = state::read(owner_key, 32)?;
     let file = state::read(standing_policy, MANIFEST_BYTES)?;
     verify(
@@ -450,10 +517,6 @@ pub async fn discover(
     {
         return Err(invalid("release root or depot differs from standing OS update policy").into());
     }
-    let active: Active = serde_json::from_slice(&state::read(
-        &directory.join("active-os-release.json"),
-        MANIFEST_BYTES,
-    )?)?;
     if active.role != policy.role
         || active.sequence == 0
         || active.epoch < policy.minimum_epoch
@@ -596,13 +659,14 @@ pub async fn discover(
                     }
                     Ok(())
                 };
-                let active = (slot, active.epoch, active.manifest_sha256.as_str());
+                let active_slot = (slot, active.epoch, active.manifest_sha256.as_str());
                 match &operation {
                     Operation::DeliverTrial(delivery) => {
                         let member = candidate.trial_approval.as_ref().ok_or_else(|| {
                             invalid("qualified channel does not authorize a trial envelope")
                         })?;
-                        let envelope = trial_envelope(&repo, &selection, member).await?;
+                        let envelope =
+                            boot_envelope(&repo, &selection, member, "boot-trial.bin").await?;
                         let (proof, body) = envelope
                             .split_first_chunk::<64>()
                             .ok_or_else(|| invalid("truncated standing trial envelope"))?;
@@ -616,6 +680,47 @@ pub async fn discover(
                             "invalid independent standing trial signature",
                         )?;
                         let approval = Standing::parse(std::str::from_utf8(body)?)?;
+                        let promotion = if let (Delivery::Scheduled { .. }, Some(member)) =
+                            (delivery, &candidate.promotion_approval)
+                        {
+                            let authority = state::read(Path::new(PROMOTION_ENROLLMENT), 32)?;
+                            if authority == owner || authority == qualification || authority == key
+                                || repo.root().signed.keys.values().any(|entry| {
+                                    matches!(entry, Key::Ed25519 { keyval, .. } if keyval.public.as_ref() == authority)
+                                })
+                            {
+                                return Err(invalid("the standing promotion authority must be independent").into());
+                            }
+                            let packet =
+                                boot_envelope(&repo, &selection, member, "boot-promotion.bin")
+                                    .await?;
+                            let (signature, body) = packet
+                                .split_first_chunk::<64>()
+                                .ok_or_else(|| invalid("truncated standing promotion approval"))?;
+                            verify(
+                                &authority,
+                                body,
+                                signature,
+                                "invalid standing promotion signature",
+                            )?;
+                            let promote = Promotion::parse(std::str::from_utf8(body)?)?;
+                            promote.matches_trial(&envelope)?;
+                            if promote.stable_slot
+                                != match slot {
+                                    Slot::A => "a",
+                                    Slot::B => "b",
+                                }
+                                || promote.stable_sequence != active.sequence
+                                || promote.candidate_sequence != head.sequence
+                                || promote.stable_manifest != active.manifest_sha256
+                                || promote.candidate_manifest != selection.manifest_sha256
+                            {
+                                return Err(invalid("standing promotion differs from the release channel transition").into());
+                            }
+                            Some(packet)
+                        } else {
+                            None
+                        };
                         let authorize = || {
                             eligible()?;
                             approval.require_fresh(Timestamp::now().as_second().try_into()?)?;
@@ -647,7 +752,7 @@ pub async fn discover(
                                 Ok(())
                             };
                             site.install(
-                                active,
+                                active_slot,
                                 &selection,
                                 &staged,
                                 directory,
@@ -660,7 +765,7 @@ pub async fn discover(
                             )?;
                         } else {
                             site.verify_prepared(
-                                active,
+                                active_slot,
                                 &selection,
                                 &staged,
                                 scratch.path(),
@@ -668,7 +773,11 @@ pub async fn discover(
                                 key,
                             )?;
                         }
-                        handoff::publish(&envelope, &authorize)?;
+                        handoff::publish(
+                            &envelope,
+                            promotion.as_deref().map(|packet| (transaction, packet)),
+                            &authorize,
+                        )?;
                         drop(lease);
                         status.delivered_trial = Some(transaction.into());
                         if !matches!(delivery, Delivery::Inbox) {
@@ -680,7 +789,7 @@ pub async fn discover(
                         }
                     }
                     Operation::PrepareGpt => {
-                        site.install(active, &selection, &staged, directory, &eligible, None)?
+                        site.install(active_slot, &selection, &staged, directory, &eligible, None)?
                     }
                     Operation::Discover => unreachable!("discovery has no installation policy"),
                 }

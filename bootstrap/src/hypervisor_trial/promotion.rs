@@ -6,9 +6,12 @@ use std::io;
 use std::path::Path;
 use std::process::Command;
 
+use fvca_trial_authorization::STANDING_PROMOTION;
+
 use super::{
     Authorization, PROMOTION_KEY, Trial, approved_evidence, authorization, boot_next, boot_order,
-    digest, gpt_device, promoted_order, publish, read, read_record, verify_signature,
+    digest, gpt_device, promoted_order, publish, read, read_record, standing_promotion,
+    verify_signature,
 };
 use crate::{find_partition, invalid, recovery, run, runtime, sys_block};
 
@@ -29,8 +32,7 @@ fn pair<'a>(line: &'a str, field: &str) -> io::Result<[&'a str; 2]> {
     Ok([recovery::uuid(data)?, recovery::uuid(tree)?])
 }
 
-fn verified_approval(envelope: &[u8]) -> io::Result<Approval<'_>> {
-    let body = verify_signature("promotion", envelope)?;
+fn parse_approval(body: &str) -> io::Result<Approval<'_>> {
     let (header, rest) = body.split_at(
         body.find("FVCA-HYPERVISOR-TRIAL-2\n")
             .ok_or_else(|| invalid("promotion is missing its trial authorization"))?,
@@ -67,24 +69,33 @@ fn verified_approval(envelope: &[u8]) -> io::Result<Approval<'_>> {
     })
 }
 
-fn verify_installed(approval: &Approval<'_>, approved: &Authorization<'_>) -> io::Result<()> {
+fn verify_installed(
+    esp_digest: &str,
+    partitions: [[&str; 2]; 3],
+    approved: &Authorization<'_>,
+) -> io::Result<()> {
     let (device, size) = gpt_device(&approved.trial.candidate)?;
-    if size != approved.bytes || recovery::sha256(File::open(&device)?)? != approval.esp_after_trial
-    {
+    if size != approved.bytes || recovery::sha256(File::open(&device)?)? != esp_digest {
         return Err(invalid(
             "installed candidate ESP differs from the post-trial promotion approval",
         ));
     }
-    let esp = sys_block(&device)?;
+    verify_payloads(&device, partitions, approved)
+}
+
+pub(super) fn verify_payloads(
+    device: &Path,
+    partitions: [[&str; 2]; 3],
+    approved: &Authorization<'_>,
+) -> io::Result<()> {
+    let esp = sys_block(device)?;
     let disk = esp
         .parent()
         .ok_or_else(|| invalid("candidate ESP has no parent disk"))?;
     let mut used = BTreeSet::from([approved.trial.candidate.esp]);
-    for (ids, root) in
-        approval
-            .partitions
-            .iter()
-            .zip([approved.core, approved.runtime, approved.guest])
+    for (ids, root) in partitions
+        .iter()
+        .zip([approved.core, approved.runtime, approved.guest])
     {
         let mut verify = Command::new("/usr/bin/veritysetup");
         verify.arg("verify");
@@ -103,7 +114,7 @@ fn verify_installed(approval: &Approval<'_>, approved: &Authorization<'_>) -> io
     Ok(())
 }
 
-fn pinned_key() -> io::Result<Option<[u8; 32]>> {
+pub(super) fn pinned_key() -> io::Result<Option<[u8; 32]>> {
     match read(Path::new(PROMOTION_KEY), 32) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         result => Ok(Some(
@@ -139,7 +150,7 @@ pub(super) fn apply(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         result => result?,
     };
-    let approval = verified_approval(&envelope)?;
+    let approval = parse_approval(verify_signature("promotion", &envelope)?)?;
     if read_record(&directory.join(format!("{tx}.promotion-key")))? != key {
         return Err(invalid(
             "the trial candidate pinned a different promotion authority",
@@ -158,7 +169,7 @@ pub(super) fn apply(
     if boot_next()?.is_some() {
         return Err(invalid("promotion cannot override a pending one-shot boot"));
     }
-    verify_installed(&approval, approved)?;
+    verify_installed(approval.esp_after_trial, approval.partitions, approved)?;
 
     // Commit authorization before the only firmware write. An interrupted write
     // leaves either a usable default candidate or the original recovery order.
@@ -190,7 +201,8 @@ pub(super) fn authorize_promoted(
     order: &[u16],
     payload_ids: &[String; 6],
 ) -> io::Result<()> {
-    if order.get(..2) != Some(&[trial.candidate.id, trial.stable.id]) {
+    let default = order.get(..2) == Some(&[trial.candidate.id, trial.stable.id]);
+    if !default && order.get(..2) != Some(&[trial.stable.id, trial.candidate.id]) {
         return Err(invalid(
             "promoted boot must retain the authorized stable recovery entry",
         ));
@@ -204,7 +216,24 @@ pub(super) fn authorize_promoted(
                 error
             }
         })?;
-    let approval = verified_approval(&envelope)?;
+    let body = verify_signature("promotion", &envelope)?;
+    if body.starts_with(STANDING_PROMOTION) {
+        return standing_promotion::authorize_boot(
+            directory,
+            trial,
+            guest,
+            active,
+            payload_ids,
+            body,
+            default,
+        );
+    }
+    if !default {
+        return Err(invalid(
+            "candidate-first order is required by this promotion",
+        ));
+    }
+    let approval = parse_approval(body)?;
     let approved = authorization(approval.attempt)?;
     approved_evidence(&approved, approval.health.as_bytes())?;
     if *trial != approved.trial

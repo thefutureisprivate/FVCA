@@ -12,6 +12,105 @@ pub const GUEST_CAPTURE_LOCK: &str = "/run/fvca/guest-capture.lock";
 pub const PEER_PARTITIONS: usize = 7;
 pub const PEER_ENROLLMENT: &str = "os-update-peer";
 pub const PEER_BYTES: usize = PEER_PARTITIONS * 37;
+pub const PROMOTION_ENROLLMENT: &str = "/run/fvca/os-update-promotion-key";
+pub const PROMOTED_RELEASE: &str = "/run/fvca/promoted-os-release";
+pub const STANDING_PROMOTION: &str = "FVCA-HYPERVISOR-STANDING-PROMOTION-1";
+
+pub struct Promotion<'a> {
+    pub trial_body: &'a str,
+    pub trial: Standing<'a>,
+    pub stable_slot: &'a str,
+    pub stable_sequence: u64,
+    pub candidate_sequence: u64,
+    pub stable_manifest: &'a str,
+    pub candidate_manifest: &'a str,
+    pub candidate_uki: &'a str,
+    pub candidate_uki_bytes: u64,
+    pub payloads: [[&'a str; 2]; 3],
+}
+
+impl Promotion<'_> {
+    pub fn parse(body: &str) -> io::Result<Promotion<'_>> {
+        if body.len() + 64 > APPROVAL_LIMIT {
+            return Err(invalid("standing promotion exceeds its size bound"));
+        }
+        let (header, trial_body) = body.split_at(
+            body.find("FVCA-HYPERVISOR-STANDING-TRIAL-1\n")
+                .ok_or_else(|| invalid("standing promotion is missing its trial"))?,
+        );
+        let fields: Vec<_> = header.split('\n').collect();
+        let [
+            STANDING_PROMOTION,
+            stable_slot,
+            stable_sequence,
+            candidate_sequence,
+            stable_manifest,
+            candidate_manifest,
+            uki,
+            uki_bytes,
+            core,
+            runtime,
+            guest,
+            "",
+        ] = fields.as_slice()
+        else {
+            return Err(invalid("invalid standing promotion"));
+        };
+        let stable_slot = stable_slot
+            .strip_prefix("stable_slot=")
+            .filter(|slot| matches!(*slot, "a" | "b"))
+            .ok_or_else(|| invalid("invalid standing promotion stable slot"))?;
+        let stable_sequence = number(stable_sequence, "stable_sequence=")?;
+        let candidate_sequence = number(candidate_sequence, "candidate_sequence=")?;
+        let stable_manifest = digest(stable_manifest, "stable_manifest_sha256=")?;
+        let candidate_manifest = digest(candidate_manifest, "candidate_manifest_sha256=")?;
+        if stable_sequence >= candidate_sequence || stable_manifest == candidate_manifest {
+            return Err(invalid(
+                "standing promotion must advance the active release",
+            ));
+        }
+        let candidate_uki = digest(uki, "candidate_uki_sha256=")?;
+        let candidate_uki_bytes = number(uki_bytes, "candidate_uki_bytes=")?;
+        if candidate_uki_bytes > 256 * 1024 * 1024 {
+            return Err(invalid(
+                "standing promotion candidate UKI exceeds its size bound",
+            ));
+        }
+        let mut payloads = [[""; 2]; 3];
+        for (output, (line, field)) in payloads.iter_mut().zip([
+            (core, "candidate_core_devices="),
+            (runtime, "candidate_runtime_devices="),
+            (guest, "candidate_guest_devices="),
+        ]) {
+            let (data, tree) = line
+                .strip_prefix(field)
+                .and_then(|x| x.split_once(','))
+                .ok_or_else(|| invalid("standing promotion is missing candidate partition IDs"))?;
+            *output = [uuid(data)?, uuid(tree)?];
+        }
+        Ok(Promotion {
+            trial_body,
+            trial: Standing::parse(trial_body)?,
+            stable_slot,
+            stable_sequence,
+            candidate_sequence,
+            stable_manifest,
+            candidate_manifest,
+            candidate_uki,
+            candidate_uki_bytes,
+            payloads,
+        })
+    }
+
+    pub fn matches_trial(&self, envelope: &[u8]) -> io::Result<()> {
+        if envelope.get(64..) != Some(self.trial_body.as_bytes()) {
+            return Err(invalid(
+                "standing promotion does not authorize the exact trial",
+            ));
+        }
+        Ok(())
+    }
+}
 
 pub fn peer_partitions(record: &str) -> io::Result<[&str; PEER_PARTITIONS]> {
     let text = record
@@ -263,6 +362,51 @@ impl Standing<'_> {
                 "standing trial is outside its signed validity interval",
             ));
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standing_promotion_binds_exact_trial_and_advances_sequence() -> io::Result<()> {
+        let prior = "a".repeat(64);
+        let candidate = "b".repeat(64);
+        let first = "11111111-1111-4111-8111-111111111111";
+        let other = "22222222-2222-4222-8222-222222222222";
+        let trial = format!(
+            concat!(
+                "FVCA-HYPERVISOR-STANDING-TRIAL-1\nnot_before=10\nexpires=300\n",
+                "stable_epoch=1\ncandidate_epoch=2\nepoch_policy_sha256={0}\n",
+                "stable_core={0}\nstable_runtime={0}\nstable_guest_bundle={0}\n",
+                "FVCA-HYPERVISOR-TRIAL-2\ntransaction=33333333-3333-4333-8333-333333333333\n",
+                "stable=000a,{1}\ncandidate=000b,{2}\ncandidate_esp_sha256={3}\n",
+                "candidate_esp_bytes=4096\ncandidate_core={3}\ncandidate_runtime={3}\nguest_bundle={3}\n",
+            ),
+            prior, first, other, candidate,
+        );
+        let body = format!(
+            "{STANDING_PROMOTION}\nstable_slot=a\nstable_sequence=3\ncandidate_sequence=4\n\
+             stable_manifest_sha256={prior}\ncandidate_manifest_sha256={candidate}\n\
+             candidate_uki_sha256={candidate}\ncandidate_uki_bytes=16384\n\
+             candidate_core_devices=11111111-1111-4111-8111-111111111112,11111111-1111-4111-8111-111111111113\n\
+             candidate_runtime_devices=11111111-1111-4111-8111-111111111114,11111111-1111-4111-8111-111111111115\n\
+             candidate_guest_devices=11111111-1111-4111-8111-111111111116,11111111-1111-4111-8111-111111111117\n{trial}",
+        );
+        let approval = Promotion::parse(&body)?;
+        assert_eq!(approval.candidate_manifest, candidate);
+        assert_eq!(approval.candidate_sequence, 4);
+        let mut envelope = vec![0; 64];
+        envelope.extend_from_slice(trial.as_bytes());
+        approval.matches_trial(&envelope)?;
+        envelope[64] ^= 1;
+        assert!(approval.matches_trial(&envelope).is_err());
+        assert!(
+            Promotion::parse(&body.replace("candidate_sequence=4", "candidate_sequence=3"))
+                .is_err()
+        );
         Ok(())
     }
 }

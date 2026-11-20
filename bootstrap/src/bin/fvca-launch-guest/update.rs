@@ -5,7 +5,9 @@ use std::io;
 use std::path::Path;
 use std::process::Command;
 
-use fvca_initrd_bootstrap::hypervisor_trial::{online::PendingTrial, queue_host_reboot};
+use fvca_initrd_bootstrap::hypervisor_trial::{
+    healthy_return, online::PendingTrial, queue_host_reboot,
+};
 use fvca_libvirt_boundary::{Connection, RUNNING};
 
 use super::{
@@ -26,13 +28,17 @@ pub(super) fn require_idle() -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn activate() -> io::Result<()> {
+pub(super) fn activate(returning: bool) -> io::Result<()> {
     let _capture = capture::lease(Path::new(CAPTURE_LOCK))?;
     let _operation = capture::lease(Path::new(OPERATION_LOCK))?;
     capture::live::require_idle()?;
     capture::restore::require_idle()?;
     verify_pool()?;
-    let pending = PendingTrial::verify()?;
+    let pending = (!returning).then(PendingTrial::verify).transpose()?;
+    let transaction = match &pending {
+        Some(pending) => pending.transaction().to_owned(),
+        None => healthy_return()?,
+    };
     let connection = Connection::connect()?;
     let running = match connection.lookup(UUID)? {
         Some(guest) if guest.state()? == RUNNING && !guest.guest_frozen()? => true,
@@ -66,8 +72,15 @@ pub(super) fn activate() -> io::Result<()> {
     {
         return Err(invalid("the Guest or its disk attachment is still active"));
     }
-    pending.recheck()?;
-    println!("FVCA_HYPERVISOR_TRIAL_DRAINED {}", pending.transaction());
+    if let Some(pending) = pending {
+        pending.recheck()?;
+        println!("FVCA_HYPERVISOR_TRIAL_DRAINED {transaction}");
+    } else {
+        if healthy_return()? != transaction {
+            return Err(invalid("healthy trial changed during Guest shutdown"));
+        }
+        println!("FVCA_HYPERVISOR_PROMOTION_DRAINED {transaction}");
+    }
     queue_host_reboot()
 }
 

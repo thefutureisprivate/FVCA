@@ -261,6 +261,19 @@ To enable scheduled installation, compose each slot with `--os-update-peer-slot 
 
 A verified stable boot enrolls `fvca-host-update.timer`. It checks after boot and hourly with up to 90 seconds of jitter. A failed service can retry after five minutes, capped at three starts in 30 minutes. For an eligible release, the client checks the signed trial approval against the running boot, verifies the active recovery image, and takes the Guest lifecycle lease during live installation and approval delivery. It refuses to replace a different pending trial. The client releases the lease before requesting Guest shutdown and reboot through the existing activation service. Results go to the console and to `/run/fvca/host-data/os-update/os-update-status.json`. [systemd timer semantics](https://www.freedesktop.org/software/systemd/man/262/systemd.timer.html)
 
+### Authorize automatic promotion
+
+Compose both slots with the same independent `--boot-promotion-public-key`. The release publisher can authorize promotion before deployment by signing the exact trial, candidate EFI loader, release manifest and next channel sequence. Use the active record from the currently promoted slot and run the signer with `mcopy` available.
+
+```sh
+python3 tools/sign-hypervisor-promotion.py --trial signed-trial.bin \
+  --trial-key trial.pub --standing-active active-os-release.json \
+  --candidate boot.raw --candidate-manifest release.json --candidate-sequence 2 \
+  --sign-key promotion.key --output standing-promotion.bin
+```
+
+Publish the grant as `hypervisor-EPOCH-MANIFEST_SHA256-boot-promotion.bin` and list its exact `bytes` and `sha256` under `promotion_approval` in the qualified channel release. The scheduled client authenticates the grant and delivers it with the trial authorization. After recording local Guest health, the candidate drains the Guest and returns to the stable slot. The stable initrd checks the reviewed ESP geometry, the exact EFI loader bytes and all three candidate verity trees. It writes the promotion intent to Btrfs and commits the new EFI order before rebooting. The first normal boot verifies the intent and the scheduler records the promoted manifest as active. A later boot may use the confirmed release as the second EFI entry while its epoch remains eligible.
+
 ## Hypervisor runtime candidate
 
 The separate mkosi recipe builds `vm-runtime.raw`, a signed EROFS system extension. It contains QEMU, the modular libvirt QEMU, log and lock daemons, the selected OVMF firmware, restic, and `/usr/libexec/fvca/release-client`. The release client checks the hardened allocator before running. It uses a bundled IANA time-zone database and the native EFI helpers in the verified runtime. The VMM is built offline from the pinned upstream QEMU release and the build checks that KVM is its only accelerator. The development appliance uses private UNIX sockets for libvirt and requires SELinux confinement for QEMU processes. The build strips Fedora's automatic service hooks and management commands before signing, records the exact core root hash in the extension and checks the shared package versions. [QEMU release archive and signing key](https://www.qemu.org/download/)

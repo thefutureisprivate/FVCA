@@ -103,10 +103,10 @@ fn inbox(host: &File, id: u64) -> Result<Option<File>> {
     Ok(Some(inbox))
 }
 
-fn matching_pending(inbox: &File, envelope: &[u8]) -> Result<Option<File>> {
+fn matching_record(inbox: &File, name: &str, envelope: &[u8]) -> Result<Option<File>> {
     let flags =
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
-    match fs::openat(inbox, PENDING, flags, Mode::empty()) {
+    match fs::openat(inbox, name, flags, Mode::empty()) {
         Ok(existing) => {
             let existing = File::from(existing);
             private_file(&existing)?;
@@ -115,7 +115,12 @@ fn matching_pending(inbox: &File, envelope: &[u8]) -> Result<Option<File>> {
                 .take((APPROVAL_LIMIT + 1) as u64)
                 .read_to_end(&mut bytes)?;
             if bytes != envelope {
-                return Err(invalid("another trial already occupies the Host inbox").into());
+                return Err(invalid(if name == PENDING {
+                    "another trial already occupies the Host inbox"
+                } else {
+                    "a different signed promotion already occupies the Host inbox"
+                })
+                .into());
             }
             Ok(Some(existing))
         }
@@ -145,10 +150,14 @@ pub fn check_install(transaction: &str, envelope: &[u8]) -> Result<bool> {
         Err(Errno::NOENT) => (),
         Err(error) => return Err(error.into()),
     }
-    Ok(matching_pending(&inbox, envelope)?.is_some())
+    Ok(matching_record(&inbox, PENDING, envelope)?.is_some())
 }
 
-pub fn publish(envelope: &[u8], authorize: &dyn Fn() -> Result<()>) -> Result<()> {
+pub fn publish(
+    envelope: &[u8],
+    promotion: Option<(&str, &[u8])>,
+    authorize: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     let (host, id) = host_data()?;
     match fs::mkdirat(&host, "boot-trials", Mode::RUSR | Mode::WUSR | Mode::XUSR) {
         Ok(()) => host.sync_all()?,
@@ -156,25 +165,37 @@ pub fn publish(envelope: &[u8], authorize: &dyn Fn() -> Result<()>) -> Result<()
         Err(error) => return Err(error.into()),
     }
     let inbox = inbox(&host, id)?.ok_or_else(|| invalid("trial inbox disappeared"))?;
-    if let Some(existing) = matching_pending(&inbox, envelope)? {
+    let pending = matching_record(&inbox, PENDING, envelope)?;
+    if let Some((transaction, packet)) = promotion {
+        let name = format!("{transaction}.standing-promotion");
+        match matching_record(&inbox, &name, packet)? {
+            Some(existing) => existing.sync_all()?,
+            None => publish_record(&inbox, &name, packet, authorize)?,
+        }
+        inbox.sync_all()?;
+    }
+    if let Some(existing) = pending {
         authorize()?;
         existing.sync_all()?;
         inbox.sync_all()?;
         return Ok(());
     }
 
+    publish_record(&inbox, PENDING, envelope, authorize)
+}
+
+fn publish_record(
+    inbox: &File,
+    name: &str,
+    envelope: &[u8],
+    authorize: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     let pinned = PathBuf::from(format!("/proc/self/fd/{}", inbox.as_raw_fd()));
     let mut record = tempfile::NamedTempFile::new_in(&pinned)?;
     record.write_all(envelope)?;
     record.as_file().sync_all()?;
     authorize()?;
-    fs::renameat_with(
-        CWD,
-        record.path(),
-        &inbox,
-        PENDING,
-        fs::RenameFlags::NOREPLACE,
-    )?;
+    fs::renameat_with(CWD, record.path(), inbox, name, fs::RenameFlags::NOREPLACE)?;
     inbox.sync_all()?;
     Ok(())
 }

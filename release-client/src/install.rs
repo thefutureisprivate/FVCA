@@ -33,7 +33,7 @@ pub enum Operation<'a> {
     Prepare { slots: &'a Path, active: &'a Path },
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Slot {
     A,
