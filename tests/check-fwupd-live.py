@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Exercise the fwupd wire adapter on a disposable D-Bus instance."""
+
+import argparse
+from contextlib import contextmanager
+import os
+from pathlib import Path
+import select
+import subprocess
+import sys
+import tempfile
+from xml.sax.saxutils import escape
+
+
+def serve(address, mode):
+    import dbus
+    import dbus.service
+    from dbus.mainloop.glib import DBusGMainLoop
+    from gi.repository import GLib
+
+    interface = "org.freedesktop.fwupd"
+    device_id = "a" * 40
+
+    class Fwupd(dbus.service.Object):
+        @dbus.service.method("org.freedesktop.DBus.Properties", in_signature="ss", out_signature="v")
+        def Get(self, name, prop):
+            assert name == interface
+            setting = mode.read_text()
+            return {
+                "OnlyTrusted": dbus.Boolean(setting != "untrusted"),
+                "Tainted": dbus.Boolean(setting == "tainted"),
+                "DaemonVersion": dbus.String("2.0.20"),
+            }[prop]
+
+        @dbus.service.method(interface, in_signature="", out_signature="aa{sv}")
+        def GetDevices(self):
+            setting = mode.read_text()
+            device = {
+                "DeviceId": device_id,
+                "Guid": dbus.Array(["a1234567-d234-4031-a111-000000000000"], signature="s"),
+                "Plugin": "uefi_capsule",
+                "Name": "x" * 4097 if setting == "oversized" else "Fixture BIOS",
+                "Protocol": "org.uefi.capsule",
+                "VendorId": "DMI:Fixture|UEFI:Fixture",
+                "Flags": "wrong" if setting == "wrong-type" else dbus.UInt64(259),
+                "Problems": dbus.UInt64(0),
+                "Version": "1.42",
+                "VersionFormat": dbus.UInt32(3),
+                "VersionRaw": dbus.UInt64(65578),
+                "Created": dbus.UInt64(42),
+            }
+            return [device, device] if setting == "duplicate" else [device]
+
+        @dbus.service.method(interface, in_signature="s", out_signature="aa{sv}")
+        def GetUpgrades(self, device):
+            assert device == device_id
+            return [{
+                "Version": "1.51",
+                "RemoteId": "lvfs",
+                "Protocol": "org.uefi.capsule",
+                "Checksum": "8" * 40 + "," + "7" * 64,
+                "TrustFlags": dbus.UInt64(262),
+            }]
+
+    DBusGMainLoop(set_as_default=True)
+    connection = dbus.bus.BusConnection(address)
+    name = dbus.service.BusName(interface, bus=connection, do_not_queue=True)
+    service = Fwupd(name, "/")
+    print("ready", flush=True)
+    GLib.MainLoop().run()
+    service.remove_from_connection()
+
+
+@contextmanager
+def running(command):
+    process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE)
+    try:
+        if not select.select([process.stdout], [], [], 10)[0]:
+            raise TimeoutError(f"{command[0]} did not report readiness")
+        ready = process.stdout.readline().strip()
+        if not ready:
+            raise RuntimeError(f"{command[0]} exited before it was ready")
+        yield process, ready
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        process.stdout.close()
+
+
+def check(daemon, binary):
+    with tempfile.TemporaryDirectory(prefix="fvca-fwupd-") as path:
+        directory = Path(path)
+        config = directory / "bus.conf"
+        config.write_text(f"""<busconfig>
+  <type>session</type>
+  <listen>unix:path={escape(str(directory / 'bus'))}</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*"/>
+    <allow receive_sender="*"/>
+    <allow own="org.freedesktop.fwupd"/>
+  </policy>
+  <limit name="max_message_size">1048576</limit>
+</busconfig>""")
+        mode = directory / "mode"
+        mode.write_text("normal")
+        with running([daemon, f"--config-file={config}", "--nofork", "--print-address=1"]) as (_, address):
+            command = [sys.executable, __file__, "--serve", address, str(mode)]
+            with running(command) as (service, ready):
+                if ready != "ready":
+                    raise RuntimeError("unexpected fwupd fixture readiness message")
+                subprocess.run(
+                    [binary, "--ignored", "--exact", "firmware::live::tests::reads_only_the_pinned_fwupd_peer"],
+                    check=True,
+                    env={
+                        **os.environ,
+                        "FVCA_TEST_FWUPD_ADDRESS": address,
+                        "FVCA_TEST_FWUPD_EXECUTABLE": os.readlink(f"/proc/{service.pid}/exe"),
+                        "FVCA_TEST_FWUPD_MODE": str(mode),
+                    },
+                    timeout=45,
+                )
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["--serve"]:
+        serve(sys.argv[2], Path(sys.argv[3]))
+    else:
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument("--dbus-daemon", default="dbus-daemon")
+        parser.add_argument("--test-binary", required=True)
+        arguments = parser.parse_args()
+        check(arguments.dbus_daemon, arguments.test_binary)

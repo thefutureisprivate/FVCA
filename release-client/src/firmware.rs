@@ -1,5 +1,8 @@
 //! Authenticate an exact Host firmware offer and stage its cabinet for qualification.
 
+mod bus;
+mod live;
+
 use std::fs::{self, File, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -24,7 +27,7 @@ const OFFER: &str = "offer.json";
 const SIGNATURE: &str = "offer.sig";
 const ARCHIVE: &str = "firmware.cab";
 
-#[derive(Deserialize, Eq, PartialEq)]
+#[derive(Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Platform {
     system_uuid: String,
@@ -176,7 +179,7 @@ impl Policy {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Observation {
     schema: String,
@@ -188,13 +191,13 @@ struct Observation {
     esrt: Vec<Esrt>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Devices {
     #[serde(rename = "Devices")]
     devices: Vec<ObservedDevice>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Esrt {
     guid: String,
@@ -202,7 +205,7 @@ struct Esrt {
     fw_version: u32,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct ObservedDevice {
     device_id: String,
@@ -226,7 +229,7 @@ struct ObservedDevice {
     releases: Vec<ObservedRelease>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct ObservedRelease {
     version: Option<String>,
@@ -519,6 +522,11 @@ fn unique_device<'a>(devices: &'a Devices, id: &str) -> Result<&'a ObservedDevic
     )
 }
 
+pub enum ObservationSource<'a> {
+    File(&'a Path),
+    Live,
+}
+
 pub async fn stage(
     trusted_root: &Path,
     depot_config: &Path,
@@ -526,7 +534,7 @@ pub async fn stage(
     policy_path: &Path,
     policy_signature: &Path,
     owner_path: &Path,
-    observation: &Path,
+    source: ObservationSource<'_>,
 ) -> Result<()> {
     let _lease = state::lock(directory)?;
     let owner = state::read(owner_path, 32)?;
@@ -589,14 +597,28 @@ pub async fn stage(
     .into_iter()
     .min()
     .expect("fixed list of expiry dates");
-    let observation_bytes = state::read(observation, OBSERVATION_LIMIT)?;
-    let observed: Observation = serde_json::from_slice(&observation_bytes)?;
-    let observe = || {
+    let captured: Option<(Observation, String)> = match source {
+        ObservationSource::File(path) => {
+            let bytes = state::read(path, OBSERVATION_LIMIT)?;
+            Some((serde_json::from_slice(&bytes)?, digest(&bytes)))
+        }
+        ObservationSource::Live => None,
+    };
+    let check = |observed: &Observation| -> Result<()> {
         let now = Timestamp::now().as_second();
         if !(verified_at..expires).contains(&now) {
             return Err(invalid("firmware authorization expired or the clock regressed").into());
         }
-        offer.require_observation(&policy, &observed, now)
+        offer.require_observation(&policy, observed, now)
+    };
+    let observe = || {
+        if let Some((observed, sha256)) = &captured {
+            check(observed)?;
+            return Ok(sha256.clone());
+        }
+        let observed = live::read(&offer.device)?;
+        check(&observed)?;
+        Ok(digest(&serde_json::to_vec(&observed)?))
     };
     checkpoint(
         directory,
@@ -608,7 +630,7 @@ pub async fn stage(
     let parent = directory.join("staged");
     state::staged(&parent)?;
     let approval_sha256 = digest(&offer_bytes);
-    let staged = stage_archive(
+    let (staged, observation_sha256) = stage_archive(
         &repo,
         &parent,
         &offer,
@@ -631,7 +653,7 @@ pub async fn stage(
             disposition: "staged",
             offer_sha256: &approval_sha256,
             archive_sha256: &offer.archive.sha256,
-            observation_sha256: &digest(&observation_bytes),
+            observation_sha256: &observation_sha256,
             qualified_vendor_authentication: vendor_authentication,
             staged: &staged,
         })?
@@ -657,8 +679,8 @@ async fn stage_archive(
     document: &[u8],
     signature: &[u8],
     approval_sha256: &str,
-    observe: &dyn Fn() -> Result<()>,
-) -> Result<PathBuf> {
+    observe: &dyn Fn() -> Result<String>,
+) -> Result<(PathBuf, String)> {
     let target = TargetName::new(format!("fvca-firmware-{}.cab", offer.archive.sha256))?;
     if check_target(repo, &target, offer.archive.bytes, &offer.archive.sha256)?
         != offer.archive.bytes
@@ -681,8 +703,7 @@ async fn stage_archive(
                 state::open_regular(&destination.join(ARCHIVE))?,
                 &offer.archive,
             )?;
-            observe()?;
-            return Ok(destination);
+            return Ok((destination, observe()?));
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => (),
         Err(error) => return Err(error.into()),
@@ -700,7 +721,7 @@ async fn stage_archive(
         file.sync_all()?;
     }
     File::open(path)?.sync_all()?;
-    observe()?;
+    let observation_sha256 = observe()?;
     rustix::fs::renameat_with(
         rustix::fs::CWD,
         path,
@@ -709,5 +730,5 @@ async fn stage_archive(
         rustix::fs::RenameFlags::NOREPLACE,
     )?;
     File::open(parent)?.sync_all()?;
-    Ok(destination)
+    Ok((destination, observation_sha256))
 }

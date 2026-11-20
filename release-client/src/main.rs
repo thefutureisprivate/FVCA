@@ -522,14 +522,13 @@ fn run() -> Result<()> {
     ] = operands.as_slice()
         && option.as_os_str() == "--stage-host-firmware"
     {
+        let source = if observation.as_os_str() == "--live" {
+            firmware::ObservationSource::Live
+        } else {
+            firmware::ObservationSource::File(observation)
+        };
         return runtime()?.block_on(firmware::stage(
-            root,
-            depot,
-            state,
-            policy,
-            signature,
-            owner,
-            observation,
+            root, depot, state, policy, signature, owner, source,
         ));
     }
     if let [
@@ -662,7 +661,7 @@ fn runtime() -> io::Result<tokio::runtime::Runtime> {
 
 fn usage() -> io::Error {
     invalid(
-        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --discover-os-release TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE STANDING_POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY [--prepare-inactive-gpt | --deliver-prepared-trial | --activate-prepared-trial]\n       fvca-release-client --stage-host-firmware TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY OBSERVATION\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE\n       fvca-release-client --verify-hypervisor-floor-approval PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE\n       fvca-release-client --advance-hypervisor-floor PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE INCREMENT_TPM_PUBLIC POLICY_REFERENCE",
+        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --discover-os-release TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE STANDING_POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY [--prepare-inactive-gpt | --deliver-prepared-trial | --activate-prepared-trial]\n       fvca-release-client --stage-host-firmware TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY [OBSERVATION | --live]\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE\n       fvca-release-client --verify-hypervisor-floor-approval PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE\n       fvca-release-client --advance-hypervisor-floor PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE INCREMENT_TPM_PUBLIC POLICY_REFERENCE",
     )
 }
 
