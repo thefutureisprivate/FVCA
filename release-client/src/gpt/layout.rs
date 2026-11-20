@@ -13,6 +13,9 @@ use sha2::{Digest, Sha256};
 use crate::{Result, invalid};
 
 const GPT_LIMIT: u64 = 1024 * 1024;
+const DEVICE_FLAGS: OFlags = OFlags::NOFOLLOW
+    .union(OFlags::NONBLOCK)
+    .union(OFlags::NOCTTY);
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Extent {
@@ -98,21 +101,33 @@ fn sys_number(directory: &Path, name: &str) -> Result<u64> {
     Ok(fs::read_to_string(directory.join(name))?.trim().parse()?)
 }
 
+fn sys_block(number: u64) -> io::Result<PathBuf> {
+    fs::canonicalize(format!(
+        "/sys/dev/block/{}:{}",
+        unix::major(number),
+        unix::minor(number)
+    ))
+}
+
 impl Disk {
-    pub fn open(path: &Path, sector: u64, write: bool) -> Result<Self> {
-        Self::access(path, sector, write, true)
+    pub fn open(path: &Path, sector: u64) -> Result<Self> {
+        Self::access(path, sector, false, true)
     }
 
     pub(super) fn observe(path: &Path, sector: u64) -> Result<Self> {
         Self::access(path, sector, false, false)
     }
 
-    fn access(path: &Path, sector: u64, write: bool, exclusive: bool) -> Result<Self> {
+    pub(super) fn update_target(path: &Path, sector: u64) -> Result<Self> {
+        Self::access(path, sector, true, false)
+    }
+
+    fn access(path: &Path, sector: u64, write_image: bool, exclusive: bool) -> Result<Self> {
         check_sector(sector)?;
         let path = path.canonicalize()?;
         let before = path.metadata()?;
         let physical = before.file_type().is_block_device();
-        let mut flags = OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY;
+        let mut flags = DEVICE_FLAGS;
         if physical && path.starts_with("/dev") {
             // Claim the whole block device. Linux rejects this while a partition is in use.
             if exclusive {
@@ -126,7 +141,7 @@ impl Disk {
         }
         let file = OpenOptions::new()
             .read(true)
-            .write(write)
+            .write(write_image && !physical)
             .custom_flags(flags.bits() as i32)
             .open(path)?;
         let info = file.metadata()?;
@@ -139,12 +154,7 @@ impl Disk {
         }
         file.try_lock().map_err(io::Error::other)?;
         let bytes = if physical {
-            let number = info.rdev();
-            let device = fs::canonicalize(format!(
-                "/sys/dev/block/{}:{}",
-                unix::major(number),
-                unix::minor(number)
-            ))?;
+            let device = sys_block(info.rdev())?;
             if device.join("partition").exists()
                 || !device
                     .file_name()
@@ -174,6 +184,45 @@ impl Disk {
             bytes,
             physical,
         })
+    }
+
+    pub(super) fn claim_partitions<const N: usize>(
+        &self,
+        regions: &[Region; N],
+    ) -> Result<[File; N]> {
+        let disk = sys_block(self.file.metadata()?.rdev())?;
+        let mut partitions = Vec::with_capacity(N);
+        for region in regions {
+            let path = Path::new("/dev/disk/by-partuuid").join(&region.uuid);
+            let path = path.canonicalize()?;
+            let info = path.symlink_metadata()?;
+            if !path.starts_with("/dev") || !info.file_type().is_block_device() {
+                return Err(invalid("reviewed UUID does not identify a block partition").into());
+            }
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags((DEVICE_FLAGS | OFlags::EXCL).bits() as i32)
+                .open(path)?;
+            let opened = file.metadata()?;
+            if !opened.file_type().is_block_device() || opened.rdev() != info.rdev() {
+                return Err(invalid("inactive partition changed while acquiring its lease").into());
+            }
+            let partition = sys_block(opened.rdev())?;
+            if partition.parent() != Some(disk.as_path())
+                || sys_number(&partition, "partition")? == 0
+                || sys_number(&partition, "start")?.checked_mul(512) != Some(region.extent.start)
+                || sys_number(&partition, "size")?.checked_mul(512) != Some(region.extent.bytes)
+            {
+                return Err(
+                    invalid("kernel partition geometry differs from the reviewed GPT").into(),
+                );
+            }
+            partitions.push(file);
+        }
+        partitions
+            .try_into()
+            .map_err(|_| invalid("inactive Hypervisor partition set is incomplete").into())
     }
 }
 

@@ -275,8 +275,8 @@ pub fn verify_floor(
     let cert_path = scratch.path().join("secure-boot.pem");
     fs::write(&cert_path, &certificate)?;
     let cert = state::open_regular(&cert_path)?;
-    let primary = reviewed(&approved.primary.disk, approved.sector_size, false)?;
-    let recovery = reviewed(&approved.recovery.disk, approved.sector_size, false)?;
+    let primary = reviewed(&approved.primary.disk, approved.sector_size)?;
+    let recovery = reviewed(&approved.recovery.disk, approved.sector_size)?;
     require_distinct_disks((&primary.0, &primary.1), (&recovery.0, &recovery.1))?;
     if increment.is_some() && !cfg!(feature = "swtpm-test") && !primary.0.physical {
         return Err(

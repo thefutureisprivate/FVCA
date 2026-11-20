@@ -90,6 +90,49 @@ struct Artifact {
     digests: [[u8; 32]; 7],
 }
 
+struct WritableSlot<'a> {
+    disk: &'a Disk,
+    layout: &'a Layout<8>,
+    partitions: Option<[File; SLOT.len()]>,
+}
+
+impl<'a> WritableSlot<'a> {
+    fn claim(disk: &'a Disk, layout: &'a Layout<8>) -> Result<Self> {
+        // The eighth partition contains Host data. Never open it for writing.
+        let partitions = disk
+            .physical
+            .then(|| disk.claim_partitions(layout.regions.first_chunk().expect("payload regions")))
+            .transpose()?;
+        Ok(Self {
+            disk,
+            layout,
+            partitions,
+        })
+    }
+
+    fn region(&self, index: usize) -> (&File, Extent) {
+        let mut extent = self.layout.regions[index].extent;
+        let file = match &self.partitions {
+            Some(partitions) => {
+                extent.start = 0;
+                &partitions[index]
+            }
+            None => &self.disk.file,
+        };
+        (file, extent)
+    }
+
+    fn flush(&self) -> io::Result<()> {
+        let files = self
+            .partitions
+            .as_ref()
+            .map_or(std::slice::from_ref(&self.disk.file), |files| {
+                files.as_slice()
+            });
+        files.iter().try_for_each(flush_for_readback)
+    }
+}
+
 struct ReleaseEpoch<'a> {
     number: u64,
     policy: &'a str,
@@ -342,9 +385,8 @@ impl Artifact {
         Ok(())
     }
 
-    fn matches(&self, target: &Disk, layout: &Layout<8>, index: usize) -> io::Result<bool> {
+    fn matches(&self, target: &File, installed: Extent, index: usize) -> io::Result<bool> {
         let wanted = self.layout.regions[index].extent.bytes;
-        let installed = layout.regions[index].extent;
         let payload = Extent {
             bytes: wanted,
             ..installed
@@ -353,7 +395,7 @@ impl Artifact {
             start: payload.end(),
             bytes: installed.bytes - wanted,
         };
-        Ok(digest(&target.file, payload)? == self.digests[index] && zeroed(&target.file, tail)?)
+        Ok(digest(target, payload)? == self.digests[index] && zeroed(target, tail)?)
     }
 
     fn verify_installed(
@@ -373,8 +415,8 @@ impl Artifact {
             )
             .into());
         }
-        for index in 1..SLOT.len() {
-            if !self.matches(disk, layout, index)? {
+        for (index, region) in layout.regions.iter().take(SLOT.len()).enumerate().skip(1) {
+            if !self.matches(&disk.file, region.extent, index)? {
                 return Err(invalid(
                     "installed Hypervisor payload differs from its approved release",
                 )
@@ -384,12 +426,11 @@ impl Artifact {
         Ok(())
     }
 
-    fn write(&self, target: &Disk, layout: &Layout<8>, index: usize) -> io::Result<()> {
+    fn write(&self, target: &File, installed: Extent, index: usize) -> io::Result<()> {
         let extent = self.layout.regions[index].extent;
-        let installed = layout.regions[index].extent;
-        copy(&self.file, extent, &target.file, installed.start)?;
+        copy(&self.file, extent, target, installed.start)?;
         clear(
-            &target.file,
+            target,
             Extent {
                 start: installed.start + extent.bytes,
                 bytes: installed.bytes - extent.bytes,
@@ -399,7 +440,7 @@ impl Artifact {
 }
 
 pub fn inspect(path: &Path, sector: u64) -> Result<()> {
-    let disk = Disk::open(path, sector, false)?;
+    let disk = Disk::open(path, sector)?;
     let layout = Layout::read(&disk.file, disk.bytes, sector, HOST_DISK)?;
     println!(
         "{}",
@@ -411,8 +452,8 @@ pub fn inspect(path: &Path, sector: u64) -> Result<()> {
     Ok(())
 }
 
-fn reviewed(disk: &ReviewedDisk, sector: u64, write: bool) -> Result<(Disk, Layout<8>)> {
-    let device = Disk::open(&disk.path, sector, write)?;
+fn reviewed(disk: &ReviewedDisk, sector: u64) -> Result<(Disk, Layout<8>)> {
+    let device = Disk::open(&disk.path, sector)?;
     reviewed_layout(disk, sector, device)
 }
 
@@ -526,8 +567,8 @@ impl StandingSite {
             )
             .into());
         }
-        for index in 0..SLOT.len() {
-            if !candidate.matches(&inactive_disk, &inactive_layout, index)? {
+        for (index, region) in inactive_layout.regions.iter().take(SLOT.len()).enumerate() {
+            if !candidate.matches(&inactive_disk.file, region.extent, index)? {
                 return Err(invalid(
                     "installed inactive slot differs from the prepared trial release",
                 )
@@ -686,8 +727,12 @@ fn install_reviewed(
         trial_transaction: None,
         trial_key: None,
     };
-    let (active, active_layout) = reviewed(&plan.active, sector, false)?;
-    let (inactive, inactive_layout) = reviewed(&plan.inactive, sector, true)?;
+    let (active, active_layout) = reviewed(&plan.active, sector)?;
+    let (inactive, inactive_layout) = reviewed_layout(
+        &plan.inactive,
+        sector,
+        Disk::update_target(&plan.inactive.path, sector)?,
+    )?;
     require_distinct_disks((&active, &active_layout), (&inactive, &inactive_layout))?;
     candidate.fits(&inactive_layout)?;
     stable.verify_installed(
@@ -705,19 +750,24 @@ fn install_reviewed(
         &next_epoch,
     )?;
 
+    let target = WritableSlot::claim(&inactive, &inactive_layout)?;
+    if inactive_layout.fingerprint(&inactive, sector)? != plan.inactive.gpt_sha256 {
+        return Err(invalid("inactive GPT changed while claiming its partitions").into());
+    }
     let mut already_installed = true;
     for index in 0..SLOT.len() {
-        if !candidate.matches(&inactive, &inactive_layout, index)? {
+        let (file, region) = target.region(index);
+        if !candidate.matches(file, region, index)? {
             already_installed = false;
             break;
         }
     }
     authorize()?;
     if !already_installed {
-        let esp = inactive_layout.regions[0].extent;
-        clear(&inactive.file, esp)?;
-        flush_for_readback(&inactive.file)?;
-        if !zeroed(&inactive.file, esp)? {
+        let (esp, extent) = target.region(0);
+        clear(esp, extent)?;
+        flush_for_readback(esp)?;
+        if !zeroed(esp, extent)? {
             return Err(invalid("inactive EFI System Partition was not cleared").into());
         }
         writeln!(
@@ -728,19 +778,21 @@ fn install_reviewed(
         events.flush()?;
 
         for index in 1..SLOT.len() {
-            candidate.write(&inactive, &inactive_layout, index)?;
+            let (file, region) = target.region(index);
+            candidate.write(file, region, index)?;
         }
-        flush_for_readback(&inactive.file)?;
+        target.flush()?;
         for index in 1..SLOT.len() {
-            if !candidate.matches(&inactive, &inactive_layout, index)? {
+            let (file, region) = target.region(index);
+            if !candidate.matches(file, region, index)? {
                 return Err(invalid("inactive payload failed its post-write verification").into());
             }
         }
         authorize()?;
         let publish = (|| -> io::Result<()> {
-            candidate.write(&inactive, &inactive_layout, 0)?;
-            flush_for_readback(&inactive.file)?;
-            if !candidate.matches(&inactive, &inactive_layout, 0)?
+            candidate.write(esp, extent, 0)?;
+            flush_for_readback(esp)?;
+            if !candidate.matches(esp, extent, 0)?
                 || inactive_layout.fingerprint(&inactive, sector)? != plan.inactive.gpt_sha256
             {
                 return Err(invalid(
@@ -750,8 +802,7 @@ fn install_reviewed(
             Ok(())
         })();
         if let Err(error) = publish {
-            if let Err(cleanup) = clear(&inactive.file, esp).and_then(|()| inactive.file.sync_all())
-            {
+            if let Err(cleanup) = clear(esp, extent).and_then(|()| esp.sync_all()) {
                 return Err(io::Error::other(format!(
                     "inactive EFI publication failed ({error}) and clearing it failed ({cleanup})"
                 ))
@@ -760,7 +811,7 @@ fn install_reviewed(
             return Err(error.into());
         }
     } else {
-        inactive.file.sync_all()?;
+        target.flush()?;
     }
     writeln!(
         events,
