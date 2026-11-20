@@ -748,6 +748,19 @@ python3 tools/compose-hypervisor.py \
 
 After unlocking both Host members, the Hypervisor mounts the selected Guest boot disk read-only and checks its authorized bytes before creating the VM through private libvirt. The registered VM uses a single Btrfs subvolume at `/run/fvca/host-data/vms/service-guest` with one private writable `data.raw`. The launcher checks the Btrfs CoW and data-checksum flags on the directory and disk. It exposes one disk attachment and keeps the pool directory private. The runtime checks that the libvirt management domain and the QEMU sVirt domain are enforcing in the loaded SELinux policy.
 
+To configure CPU and RAM for the registered VM, pass `--guest-vm-settings PATH` when composing the Hypervisor. The file accepts this JSON object.
+
+```json
+{
+  "schema": "fvca-service-guest-vm-v1",
+  "guest": "e629aa43-af11-47c6-aedc-a2dc47f1cc3a",
+  "vcpus": 3,
+  "memory_mib": 2560
+}
+```
+
+The fixed direct-boot profile accepts one to four vCPUs and 1,024–4,096 MiB in increments of 256 MiB. Its default is two vCPUs and 2,048 MiB. The composer includes the settings in the signed Host UKI, so changes take effect after a Host boot. Guest release trials and ordinary Guest OS updates use the same Host settings. The launcher reconstructs the fixed machine definition and requires enough available Host CPUs and memory for the selected Guest plus a 1,024 MiB Host reserve and 512 MiB QEMU reserve.
+
 The Hypervisor verifies that the Guest agent answers a ping before reporting readiness. The agent runs in the Guest's SELinux policy on a fixed virtio-serial channel. Its verified configuration allows synchronization, ping, shutdown, freeze status, mount-list freeze, and thaw RPCs. SELinux confines freeze and thaw to the Btrfs mount at `/run/fvca/guest-data`. Shutdown requires a normal libvirt lifecycle event and confirmation that QEMU exited. The Hypervisor retains the disk attachment while the VM may still be using it. [QEMU Guest Agent configuration](https://www.qemu.org/docs/master/interop/qemu-ga.html) · [libvirt domain lifecycle events](https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainEventStoppedDetailType)
 
 `tests/storage-lab.sh` provisions that layout on disposable disks. On a KVM test machine that exposes Intel VMX to the outer Hypervisor VM, run the nested qualification with `--nested-guest`. The Host reports `FVCA_SERVICE_GUEST_READY` after the Guest reports its direct-boot policy, exact OCI runtime, and verified root readiness.

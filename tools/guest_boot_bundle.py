@@ -15,6 +15,7 @@ MACHINE = Path(__file__).resolve().parents[1] / "policy/guest-direct-boot.xml"
 ASSETS = ("boot.efi", "linux", "initrd", "cmdline", "domain.xml", "core.raw", "runtime.raw")
 BUNDLE_FILES = (*ASSETS, "release.json", "release.p7s")
 SCHEMA = "fvca-service-guest-direct-boot-1"
+SERVICE_GUEST_ID = "e629aa43-af11-47c6-aedc-a2dc47f1cc3a"
 
 
 def public_key(certificate):

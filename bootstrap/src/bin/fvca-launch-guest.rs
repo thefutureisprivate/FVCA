@@ -17,6 +17,8 @@ use fvca_trial_authorization::{GUEST_CAPTURE_LOCK as CAPTURE_LOCK, GUEST_OPERATI
 mod capture;
 #[path = "fvca-launch-guest/guest_trial.rs"]
 mod guest_trial;
+#[path = "fvca-launch-guest/machine.rs"]
+mod machine;
 
 #[global_allocator]
 static ALLOCATOR: System = System;
@@ -58,17 +60,7 @@ fn verified_definition(selection: &guest_boot::Selection<'_>) -> io::Result<CStr
         guest_trial::require_verity_mount(&boot)?;
     }
     verify_boot_files(&boot, selection)?;
-    let mut xml = fs::read_to_string(boot.join("domain.xml"))?;
-    if boot != Path::new(guest_boot::BOOT) {
-        // The signed machine names four boot files at the original mount. The
-        // only rebinding is to the same verified files at the selected mount.
-        let prefix = format!("{}/", guest_boot::BOOT);
-        if xml.matches(&prefix).count() != 4 {
-            return Err(invalid("the approved machine has an unexpected boot file layout"));
-        }
-        xml = xml.replace(&prefix, &format!("{}/", boot.display()));
-    }
-    CString::new(xml).map_err(io::Error::other)
+    machine::definition(&boot, selection.core)
 }
 
 fn verify_pool() -> io::Result<File> {

@@ -128,7 +128,9 @@ fn verify_mounted(root: &Path, trial: &Trial<'_>) -> io::Result<()> {
     if seen.len() != guest_boot::FILES.len() {
         return Err(invalid("incomplete staged Guest bundle"));
     }
-    super::verify_boot_files(root, &trial.selection)
+    super::verify_boot_files(root, &trial.selection)?;
+    super::machine::verify(root, trial.selection.core)?;
+    Ok(())
 }
 
 fn enrollment() -> io::Result<([u8; 32], u64)> {

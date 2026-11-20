@@ -70,6 +70,7 @@ pub fn activate_if_selected(
     )?;
     let bundle = selection.bundle.to_owned();
     fs::write(SELECTION, payload)?;
+    crate::guest_resources::publish()?;
     if matches!(startup, Startup::Disabled) {
         return Ok(Some(bundle));
     }

@@ -14,7 +14,7 @@ import oci_runtime
 import workload_oci
 from runtime_boot import (
     BASE_ROOT_OPTIONS, DIRECT_BOOT_FILES, DIRECT_ROOT_OPTIONS, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_LAUNCH_FILES,
-    WORKLOAD_TRUST_FILES,
+    GUEST_VM_SETTINGS, GUEST_VM_SUPPORT, WORKLOAD_TRUST_FILES,
     composition_archive, prepare_core, run, verify_initrd, write_disk,
 )
 DIRECT_BOOT_OPTIONS = ("module.sig_enforce=1", "lockdown=integrity")
@@ -40,7 +40,8 @@ ACTIVATION_FILES = (
 FORBIDDEN = tuple(f"usr/lib/fvca/{name}" for name in (
     "activate-runtime", "hypervisor.composition", "host-storage", "vm-runtime.p7s",
     "service-guest.composition", "oci-runtime.p7s", *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES,
-))
+    GUEST_VM_SETTINGS,
+)) + (str(GUEST_VM_SUPPORT),)
 
 
 def workload_trust(args, boot_public, runtime_public):

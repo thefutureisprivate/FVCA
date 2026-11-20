@@ -18,11 +18,13 @@ import guest_boot_bundle
 import host_storage
 import hypervisor_gpt
 from runtime_boot import (
-    DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_LAUNCH_FILES, WORKLOAD_TRUST_FILES,
+    DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_LAUNCH_FILES, GUEST_VM_SETTINGS,
+    GUEST_VM_SUPPORT, WORKLOAD_TRUST_FILES,
     composition_archive, prepare_core, run, verify_initrd, write_disk,
 )
 from runtime_image import verify as verify_runtime
 import vm_runtime
+from workload_oci import parse_json, read_bytes
 
 
 PCR_POLICY_REFS = {"tpm2-auto": "fvca-host-storage-auto-v1", "tpm2-pin": "fvca-host-storage"}
@@ -272,8 +274,28 @@ def epoch_selection(path, storage, tpm):
     return ((EPOCH_FILE, policy),), (argument,)
 
 
+def guest_vm_settings(path):
+    if path is None:
+        return ()
+    settings = parse_json(read_bytes(path, 1024))
+    if (
+        not isinstance(settings, dict)
+        or settings.keys() != {"schema", "guest", "vcpus", "memory_mib"}
+        or settings["schema"] != "fvca-service-guest-vm-v1"
+        or settings["guest"] != guest_boot_bundle.SERVICE_GUEST_ID
+    ):
+        raise ValueError("invalid Service Guest resource settings or Guest identity")
+    vcpus, memory = settings["vcpus"], settings["memory_mib"]
+    if (type(vcpus) is not int or not 1 <= vcpus <= 4
+            or type(memory) is not int or not 1024 <= memory <= 4096 or memory % 256):
+        raise ValueError("Service Guest resources exceed the approved machine profile")
+    record = f"FVCA-SERVICE-GUEST-VM-1\nguest={settings['guest']}\nvcpus={vcpus}\nmemory_mib={memory}\n"
+    return ((GUEST_VM_SETTINGS, record.encode("ascii")),)
+
+
 def assemble(args, work):
     storage = host_storage.selection(args.storage) if args.storage is not None else None
+    resources = guest_vm_settings(args.guest_vm_settings)
     if args.guest_trial_public_key is not None and (storage is None or storage.protection != host_storage.AUTHENTICATED):
         raise ValueError("Guest trial enrollment requires authenticated Host storage")
     auto = storage is not None and storage.unlock == "tpm2-auto"
@@ -318,9 +340,14 @@ def assemble(args, work):
         RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE, TRIAL_FILE,
         TRIAL_CANDIDATE_FILE, TRIAL_WATCHDOG_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY,
         GUEST_TRIAL_KEY, GUEST_BASE_EPOCH, EPOCH_FILE, *UPDATE_FILES, *GUEST_UPDATE_FILES,
-        *FIRMWARE_UPDATE_FILES, UPDATE_PEER,
+        *FIRMWARE_UPDATE_FILES, UPDATE_PEER, GUEST_VM_SETTINGS,
     ))
     required = ACTIVATION_FILES
+    if resources:
+        required += (str(GUEST_VM_SUPPORT),)
+        marker = runtime_work / "tree" / GUEST_VM_SUPPORT
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
+            raise ValueError("the signed VM runtime lacks Service Guest resource settings support")
     if storage is not None:
         required += ("usr/lib/fvca/host-storage-support-v4", "usr/bin/dmsetup",
                      "usr/lib/udev/rules.d/12-fvca-host-storage.rules")
@@ -411,7 +438,7 @@ def assemble(args, work):
                                 if name == STANDING_TRIAL_KEY)
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
-        extra=(*extra, *epoch, *guest, *backup, *backup_job_selection(args.backup_job, backup),
+        extra=(*extra, *epoch, *guest, *resources, *backup, *backup_job_selection(args.backup_job, backup),
                *restore_selection(args.restore_authorization, backup),
                *retention_selection(args.retention_policy, backup),
                *stable_trial, *candidate_trial, *watchdog, *guest_epoch,
@@ -452,6 +479,7 @@ def main():
     parser.add_argument("--storage", type=Path, help="host storage selection to embed in the signed UKI")
     parser.add_argument("--guest-boot", type=Path, help="verified Guest boot bundle disk to authorize")
     parser.add_argument("--guest-release-certificate", type=Path, help="trusted Guest release signer")
+    parser.add_argument("--guest-vm-settings", type=Path, help="typed Service Guest CPU and RAM settings for this Host UKI")
     parser.add_argument("--guest-trial-public-key", type=Path, help="pin the independent Service Guest trial signer")
     parser.add_argument("--guest-trial-epoch", type=int, help="initial epoch of the enrolled Service Guest release")
     parser.add_argument("--gpt-slot", type=UUID, help="assign one unique UUID to a self-contained Hypervisor GPT slot image")
@@ -501,6 +529,8 @@ def main():
         args.guest_boot is not None and args.storage is None
     ):
         parser.error("Guest boot requires its signed bundle disk, release certificate, and Host storage")
+    if args.guest_vm_settings is not None and args.guest_boot is None:
+        parser.error("Service Guest resource settings require a selected Guest boot bundle")
     if args.output.exists():
         parser.error("output disk already exists")
     if args.gpt_slot is not None and args.guest_boot is None:
