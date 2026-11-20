@@ -1,8 +1,8 @@
 # FVCA OpenTofu provider
 
-The off-node provider `registry.opentofu.org/thefutureisprivate/fvca` version `0.1.0` implements the `fvca_guest_configuration_plan` data source. The `fvca-appliance` module uses it to preflight typed CPU and memory settings for the registered Service Guest. The Host broker checks the current settings revision and returns the exact candidate digest and activation scope. Automatic Host release observations are computed separately from configuration intent.
+The off-node provider `registry.opentofu.org/thefutureisprivate/fvca` version `0.2.0` implements the `fvca_guest_configuration_plan` data source and the `fvca_guest_configuration` resource for an enrolled Service Guest. The `fvca-appliance` module preflights typed CPU and memory settings by default. Set `manage_guest = true` to track the settings in OpenTofu and submit them on apply. Automatic Host release observations remain separate from the desired configuration revision.
 
-The example uses OpenTofu `1.13.9`, a Linux amd64 runner and a locally built provider. The checked-in lock file pins the provider package. The Host endpoint must already be enrolled as described in the appliance README. Managed resources, mutation and production management service enablement are separate implementation work.
+The example uses OpenTofu `1.13.9`, a Linux amd64 runner and a locally built provider. The checked-in lock file pins the provider package. The Host endpoint and Guest must already be enrolled as described in the appliance README.
 
 ## Build and install the locked provider
 
@@ -35,4 +35,16 @@ The build uses the checked-in Go dependency checksums. OpenTofu verifies the ins
 tofu -chdir=opentofu/examples/plan plan -out=guest.tfplan
 ```
 
-The output identifies the Host and Guest, the boot-selected settings, the proposed settings, and the observed Host release. An already satisfied configuration reports activation `none`. Changed settings report `host-trial`. Applying this data-only example records its outputs in encrypted local state. The separate signed Host release and trial workflow applies CPU and memory changes on the appliance.
+The output identifies the Host and Guest, the boot-selected settings, the proposed settings, and the observed Host release. An already satisfied configuration reports activation `none`. Changed settings report `host-trial`.
+
+## Submit a managed configuration
+
+Enable `manage_guest` and enroll a dedicated configuration submitter key on the Host. Generate an encrypted saved plan with the read key. At apply, supply `FVCA_APPLY_OPERATOR_KEY_FILE` through the runner using the same private-file requirements as the read credential. Apply the saved plan within 15 minutes.
+
+```sh
+tofu -chdir=opentofu/examples/plan apply guest.tfplan
+```
+
+The broker validates the saved expected revision and returns a stable operation ID. A lost response or interrupted apply can be reconciled by reading that ID. The operation stays `pending-activation` until the Host receives the matching signed composition, trial and promotion approvals. A later refresh distinguishes `in-trial`, `active` and `superseded` and reports the boot-selected configuration separately. Independent OS release updates refresh observed release fields without replacing the resource or driving a settings submission.
+
+Keep the registered Guest and its Host identity in configuration. The provider refuses resource destroy and identity replacement. Boot-image signing, commissioning a new Guest, and retirement use their own authorities.

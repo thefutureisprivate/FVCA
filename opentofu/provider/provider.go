@@ -56,10 +56,13 @@ func (p *fvcaProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 		return
 	}
 	res.DataSourceData = c
+	res.ResourceData = c
 }
 
 func (p *fvcaProvider) DataSources(_ context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{func() datasource.DataSource { return &guestConfigurationPlan{} }}
 }
 
-func (p *fvcaProvider) Resources(_ context.Context) []func() resource.Resource { return nil }
+func (p *fvcaProvider) Resources(_ context.Context) []func() resource.Resource {
+	return []func() resource.Resource{func() resource.Resource { return &guestConfiguration{} }}
+}

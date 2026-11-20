@@ -4,7 +4,7 @@ terraform {
   required_providers {
     fvca = {
       source  = "registry.opentofu.org/thefutureisprivate/fvca"
-      version = "= 0.1.0"
+      version = "= 0.2.0"
     }
   }
 }
@@ -26,6 +26,11 @@ variable "guest" {
   })
 }
 
+variable "manage_guest" {
+  type    = bool
+  default = false
+}
+
 provider "fvca" {
   address                = var.host.address
   server_name            = var.host.server_name
@@ -35,8 +40,9 @@ provider "fvca" {
 module "appliance" {
   source = "../../modules/fvca-appliance"
 
-  host_id = var.host.id
-  guest   = var.guest
+  host_id      = var.host.id
+  guest        = var.guest
+  manage_guest = var.manage_guest
 }
 
 output "active_configuration" {
@@ -49,4 +55,8 @@ output "planned_configuration" {
 
 output "observed_release" {
   value = module.appliance.observed_release
+}
+
+output "configuration_operation" {
+  value = module.appliance.configuration_operation
 }

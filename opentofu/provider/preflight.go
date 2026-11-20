@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"math/big"
 	"regexp"
 
@@ -11,6 +12,11 @@ import (
 )
 
 var uuid = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+func enrolledIdentity(host, guest string) bool {
+	return uuid.MatchString(host) && host != "00000000-0000-0000-0000-000000000000" &&
+		host != guest && guest == serviceGuest
+}
 
 type guestConfigurationPlan struct {
 	client *client
@@ -28,6 +34,8 @@ func (p *guestConfigurationPlan) Schema(_ context.Context, _ datasource.SchemaRe
 			"guest_id":                       schema.StringAttribute{Required: true},
 			"vcpus":                          schema.Int64Attribute{Required: true},
 			"memory_mib":                     schema.Int64Attribute{Required: true},
+			"observe_trial":                  schema.BoolAttribute{Optional: true},
+			"proposal":                       schema.StringAttribute{Computed: true},
 			"active_configuration_revision":  schema.NumberAttribute{Computed: true},
 			"active_configuration_sha256":    schema.StringAttribute{Computed: true},
 			"active_vcpus":                   schema.Int64Attribute{Computed: true},
@@ -59,6 +67,8 @@ type preflightState struct {
 	GuestID         types.String `tfsdk:"guest_id"`
 	VCPUs           types.Int64  `tfsdk:"vcpus"`
 	MemoryMiB       types.Int64  `tfsdk:"memory_mib"`
+	ObserveTrial    types.Bool   `tfsdk:"observe_trial"`
+	Proposal        types.String `tfsdk:"proposal"`
 	ActiveRevision  types.Number `tfsdk:"active_configuration_revision"`
 	ActiveSHA256    types.String `tfsdk:"active_configuration_sha256"`
 	ActiveVCPUs     types.Int64  `tfsdk:"active_vcpus"`
@@ -90,8 +100,7 @@ func (p *guestConfigurationPlan) Read(ctx context.Context, req datasource.ReadRe
 	}
 	host, guest := state.HostID.ValueString(), state.GuestID.ValueString()
 	cpu, memory := state.VCPUs.ValueInt64(), state.MemoryMiB.ValueInt64()
-	if !uuid.MatchString(host) || host == "00000000-0000-0000-0000-000000000000" ||
-		host == guest || guest != serviceGuest {
+	if !enrolledIdentity(host, guest) {
 		res.Diagnostics.AddError("Invalid FVCA identity", "Supply the enrolled Host UUID and the registered Service Guest UUID.")
 		return
 	}
@@ -103,11 +112,17 @@ func (p *guestConfigurationPlan) Read(ctx context.Context, req datasource.ReadRe
 		res.Diagnostics.AddError("Missing FVCA client", "Configure the provider with the enrolled Host endpoint and runner credentials.")
 		return
 	}
-	planned, err := p.client.preflight(ctx, host, guest, cpu, memory)
+	planned, err := p.client.preflight(ctx, host, guest, cpu, memory, state.ObserveTrial.ValueBool())
 	if err != nil {
 		res.Diagnostics.AddError("FVCA preflight failed", err.Error())
 		return
 	}
+	payload, err := json.Marshal(captureProposal(host, guest, cpu, memory, planned))
+	if err != nil {
+		res.Diagnostics.AddError("FVCA proposal could not be encoded", err.Error())
+		return
+	}
+	state.Proposal = types.StringValue(string(payload))
 	state.ActiveRevision, state.ActiveSHA256 = bindingState(planned.Active)
 	state.PlannedRevision, state.PlannedSHA256 = bindingState(planned.Desired)
 	state.ActiveVCPUs = types.Int64Value(planned.Active.VCPUs)
