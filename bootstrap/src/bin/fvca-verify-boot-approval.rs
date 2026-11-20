@@ -9,6 +9,7 @@ use fvca_initrd_bootstrap::{
     hypervisor_trial::{APPROVAL_LIMIT, PROMOTION_KEY, TRIAL_KEY},
     invalid,
 };
+use fvca_trial_authorization::guest_config;
 
 #[global_allocator]
 static ALLOCATOR: System = System;
@@ -19,6 +20,7 @@ fn verify() -> io::Result<()> {
     let path = match args.as_slice() {
         [mode] if mode == "promotion" => PROMOTION_KEY,
         [mode] if mode == "trial" => TRIAL_KEY,
+        [mode] if mode == "guest-configuration" => guest_config::AUTHORITY_FILE,
         _ => return Err(invalid("expected a boot approval purpose")),
     };
     let mut key = Vec::new();

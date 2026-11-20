@@ -760,9 +760,32 @@ To configure CPU and RAM for the registered VM, pass `--guest-vm-settings PATH` 
 }
 ```
 
-The fixed direct-boot profile accepts one to four vCPUs and 1,024–4,096 MiB in increments of 256 MiB. Its default is two vCPUs and 2,048 MiB. The composer binds the revision and SHA-256 of the canonical settings record to the signed Host UKI. A Host configuration change requires a separately composed and approved UKI. An ordinary standing Host update must preserve the exact revision and digest. Its installer checks both signed slots before writing, and a standing boot trial must match the stable configuration recorded before arming. Guest release trials and ordinary Guest OS updates use the same Host settings. The launcher reconstructs the fixed machine definition and requires enough available Host CPUs and memory for the selected Guest plus a 1,024 MiB Host reserve and 512 MiB QEMU reserve.
+The fixed direct-boot profile accepts one to four vCPUs and 1,024–4,096 MiB in increments of 256 MiB. Its default is two vCPUs and 2,048 MiB. The composer binds the revision and SHA-256 of the canonical settings record to the signed Host UKI. An ordinary standing Host update must preserve the exact revision, digest and enrolled configuration authority. Guest release trials and ordinary Guest OS updates use the same Host settings. The launcher reconstructs the fixed machine definition and requires enough available Host CPUs and memory for the selected Guest plus a 1,024 MiB Host reserve and 512 MiB QEMU reserve.
 
 On the Hypervisor, `/usr/libexec/fvca/release-client --guest-configuration-status` reports the boot-selected revision, digest, and resource values. The default profile has null revision and digest. This read-only status reports the Host boot selection independently of Guest readiness and release generations.
+
+#### Change CPU and memory through a standing Host trial
+
+During provisioning, compose both slots with the same `--guest-configuration-public-key configuration.public.pem`, their respective `--os-update-peer-slot`, and the standing OS update, trial and promotion authorities. Keep the Ed25519 configuration signing key off the Host and separate from the boot, release, policy, trial and promotion keys.
+
+Compose an exact candidate with the new `--guest-vm-settings` and a revision one higher than the current revision. Use revision 1 when starting from the default profile. Generate the signed standing trial for the installed pair and the independent standing promotion approval. The configuration signer reviews the installed settings and candidate UKI binding, then signs this ASCII record with a final newline.
+
+```text
+FVCA-GUEST-CONFIGURATION-CHANGE-1
+guest=e629aa43-af11-47c6-aedc-a2dc47f1cc3a
+trial_sha256=SIGNED_TRIAL_SHA256
+previous=PREVIOUS_REVISION,PREVIOUS_SETTINGS_SHA256
+next=NEXT_REVISION,NEXT_SETTINGS_SHA256
+```
+
+Use the SHA-256 of the complete signed trial file, including its signature. Use the settings digests from the verified UKIs' `fvca.guest_config` bindings. Write `previous=default` when the installed Host selects the default profile.
+
+```sh
+openssl pkeyutl -sign -rawin -inkey configuration.key -in change.txt -out change.sig
+cat change.sig change.txt > guest-configuration-change.bin
+```
+
+Publish the approval as `hypervisor-EPOCH-MANIFEST_SHA256-guest-configuration-change.bin`. The independently qualified TUF channel release lists its exact `bytes` and `sha256` under `guest_configuration_change`, alongside `trial_approval` and `promotion_approval`. The scheduled updater checks the expected revision and exact signed UKIs before writing the peer slot. `accepted_guest_configuration_revision` reports acceptance into the trial inbox. The Host records the revision as committed only after the authorized trial passes local Guest health and the promoted boot verifies the same approval. A superseded slot cannot start the Guest with its old settings after commitment.
 
 The Hypervisor verifies that the Guest agent answers a ping before reporting readiness. The agent runs in the Guest's SELinux policy on a fixed virtio-serial channel. Its verified configuration allows synchronization, ping, shutdown, freeze status, mount-list freeze, and thaw RPCs. SELinux confines freeze and thaw to the Btrfs mount at `/run/fvca/guest-data`. Shutdown requires a normal libvirt lifecycle event and confirmation that QEMU exited. The Hypervisor retains the disk attachment while the VM may still be using it. [QEMU Guest Agent configuration](https://www.qemu.org/docs/master/interop/qemu-ga.html) · [libvirt domain lifecycle events](https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainEventStoppedDetailType)
 

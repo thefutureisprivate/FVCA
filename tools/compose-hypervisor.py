@@ -18,7 +18,8 @@ import guest_boot_bundle
 import host_storage
 import hypervisor_gpt
 from runtime_boot import (
-    DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_CONFIG_ARGUMENT, GUEST_LAUNCH_FILES, GUEST_VM_SETTINGS,
+    DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_CHANGE_SUPPORT,
+    GUEST_CONFIG_KEY, GUEST_CONFIG_KEY_ARGUMENT, GUEST_LAUNCH_FILES, GUEST_VM_SETTINGS,
     GUEST_VM_SUPPORT, WORKLOAD_TRUST_FILES,
     composition_archive, prepare_core, run, verify_initrd, write_disk,
 )
@@ -216,6 +217,7 @@ def approval_keys(args):
     authorities = [(name, source) for name, source in (
         (PROMOTION_KEY, args.boot_promotion_public_key), (STANDING_TRIAL_KEY, args.boot_trial_public_key),
         (GUEST_TRIAL_KEY, args.guest_trial_public_key),
+        (GUEST_CONFIG_KEY, args.guest_configuration_public_key),
     ) if source is not None]
     if not authorities:
         return ()
@@ -344,7 +346,7 @@ def assemble(args, work):
         RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE, TRIAL_FILE,
         TRIAL_CANDIDATE_FILE, TRIAL_WATCHDOG_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY,
         GUEST_TRIAL_KEY, GUEST_BASE_EPOCH, EPOCH_FILE, *UPDATE_FILES, *GUEST_UPDATE_FILES,
-        *FIRMWARE_UPDATE_FILES, UPDATE_PEER, GUEST_VM_SETTINGS,
+        *FIRMWARE_UPDATE_FILES, UPDATE_PEER, GUEST_VM_SETTINGS, GUEST_CONFIG_KEY,
     ))
     required = ACTIVATION_FILES
     if resources:
@@ -352,6 +354,11 @@ def assemble(args, work):
         marker = runtime_work / "tree" / GUEST_VM_SUPPORT
         if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
             raise ValueError("the signed VM runtime lacks Service Guest resource settings support")
+    if args.guest_configuration_public_key is not None:
+        required += (str(GUEST_CONFIG_CHANGE_SUPPORT), "usr/bin/sha256sum")
+        marker = runtime_work / "tree" / GUEST_CONFIG_CHANGE_SUPPORT
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
+            raise ValueError("the signed VM runtime lacks Guest configuration change support")
     if storage is not None:
         required += ("usr/lib/fvca/host-storage-support-v4", "usr/bin/dmsetup",
                      "usr/lib/udev/rules.d/12-fvca-host-storage.rules")
@@ -440,6 +447,8 @@ def assemble(args, work):
     guest_epoch = ((GUEST_BASE_EPOCH, f"{args.guest_trial_epoch}\n".encode("ascii")),) if args.guest_trial_epoch else ()
     trial_key_arguments = tuple(f"{TRIAL_KEY_ARGUMENT}={key.hex()}" for name, key in authorities
                                 if name == STANDING_TRIAL_KEY)
+    configuration_key_arguments = tuple(f"{GUEST_CONFIG_KEY_ARGUMENT}={key.hex()}" for name, key in authorities
+                                        if name == GUEST_CONFIG_KEY)
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
         extra=(*extra, *epoch, *guest, *resources, *backup, *backup_job_selection(args.backup_job, backup),
@@ -449,11 +458,11 @@ def assemble(args, work):
                *authorities, *update_selection(args, authorities)),
     )
     if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT, TRIAL_WATCHDOG_ARGUMENT,
-                                    GUEST_CONFIG_ARGUMENT)
+                                    GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_KEY_ARGUMENT)
            for arg in cmdline.split()):
         raise ValueError("shared core already configures a Hypervisor epoch, trial or Guest configuration")
     cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments,
-                        *trial_key_arguments, *watchdog_arguments, *resource_arguments))
+                        *trial_key_arguments, *watchdog_arguments, *resource_arguments, *configuration_key_arguments))
     immutable = None
     if ids is None:
         disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)
@@ -485,6 +494,8 @@ def main():
     parser.add_argument("--guest-boot", type=Path, help="verified Guest boot bundle disk to authorize")
     parser.add_argument("--guest-release-certificate", type=Path, help="trusted Guest release signer")
     parser.add_argument("--guest-vm-settings", type=Path, help="typed Service Guest CPU and RAM settings for this Host UKI")
+    parser.add_argument("--guest-configuration-public-key", type=Path,
+                        help="pin the independent Ed25519 signer for Guest configuration changes")
     parser.add_argument("--guest-trial-public-key", type=Path, help="pin the independent Service Guest trial signer")
     parser.add_argument("--guest-trial-epoch", type=int, help="initial epoch of the enrolled Service Guest release")
     parser.add_argument("--gpt-slot", type=UUID, help="assign one unique UUID to a self-contained Hypervisor GPT slot image")
@@ -536,6 +547,10 @@ def main():
         parser.error("Guest boot requires its signed bundle disk, release certificate, and Host storage")
     if args.guest_vm_settings is not None and args.guest_boot is None:
         parser.error("Service Guest resource settings require a selected Guest boot bundle")
+    if args.guest_configuration_public_key is not None and any(value is None for value in
+            (args.boot_trial_public_key, args.boot_promotion_public_key, args.os_update_owner,
+             args.os_update_peer_slot)):
+        parser.error("Guest configuration changes require standing Host trials, promotion and an enrolled OS updater peer")
     if args.output.exists():
         parser.error("output disk already exists")
     if args.gpt_slot is not None and args.guest_boot is None:

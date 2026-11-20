@@ -153,8 +153,7 @@ pub(super) fn authorize_boot(
     guest: Option<&str>,
     active: &runtime::Activation,
     ids: &[String; 6],
-    body: &str,
-    default: bool,
+    (body, default, cmdline): (&str, bool, &str),
 ) -> io::Result<()> {
     let promotion = Promotion::parse(body)?;
     let approved = &promotion.trial.authorization;
@@ -185,6 +184,7 @@ pub(super) fn authorize_boot(
         println!("FVCA_PROMOTION_STABLE_RECOVERY {tx}");
         return Ok(());
     }
+    super::guest_configuration::confirm(directory, tx, &attempt, cmdline)?;
     match publish(&confirmed, body.as_bytes()) {
         Err(error)
             if error.kind() == io::ErrorKind::AlreadyExists

@@ -80,6 +80,7 @@ fn activate() -> io::Result<()> {
     let slot = Slot::load()?;
     let protected_epoch = Path::new("/usr/lib/fvca/hypervisor-epoch").try_exists()?;
     hypervisor_trial::verify_standing_key(&cmdline)?;
+    hypervisor_trial::guest_configuration::verify_key(&cmdline)?;
     let mut epochs = cmdline
         .split_ascii_whitespace()
         .filter(|arg| arg.split('=').next() == Some(HYPERVISOR_EPOCH_ARGUMENT));
@@ -119,6 +120,7 @@ fn activate() -> io::Result<()> {
     };
     let firmware_pending = fvca_trial_authorization::firmware::activation_pending()?;
     if firmware_pending {
+        hypervisor_trial::guest_configuration::require_committed(&cmdline)?;
         hypervisor_trial::stop_candidate_watchdog_for_firmware(&cmdline)?;
         println!("FVCA_HOST_FIRMWARE_RECOVERY_REQUIRED");
         if !enroll_firmware(true)? {
@@ -140,7 +142,7 @@ fn activate() -> io::Result<()> {
     let guest =
         guest_boot::activate_if_selected(startup, slot.as_ref().map(|slot| &slot.guest), &cmdline)?;
     if !firmware_pending {
-        hypervisor_trial::start_candidate(
+        let standing_candidate = hypervisor_trial::start_candidate(
             &cmdline,
             slot.as_ref(),
             guest.as_deref(),
@@ -148,6 +150,9 @@ fn activate() -> io::Result<()> {
             recovering,
             epoch,
         )?;
+        if !standing_candidate {
+            hypervisor_trial::guest_configuration::require_committed(&cmdline)?;
+        }
         match hypervisor_trial::arm_if_authorized(
             esp,
             guest.as_deref(),

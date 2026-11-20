@@ -204,7 +204,7 @@ pub(super) fn authorize_promoted(
     guest: Option<&str>,
     active: &runtime::Activation,
     order: &[u16],
-    payload_ids: &[String; 6],
+    (payload_ids, cmdline): (&[String; 6], &str),
 ) -> io::Result<()> {
     let default = order.get(..2) == Some(&[trial.candidate.id, trial.stable.id]);
     if !default && order.get(..2) != Some(&[trial.stable.id, trial.candidate.id]) {
@@ -229,8 +229,7 @@ pub(super) fn authorize_promoted(
             guest,
             active,
             payload_ids,
-            body,
-            default,
+            (body, default, cmdline),
         );
     }
     if !default {

@@ -15,6 +15,7 @@ use fvca_trial_authorization::{
 use crate::{find_partition, identity, invalid, recovery, runtime, sys_block};
 
 mod attempts;
+pub mod guest_configuration;
 mod promotion;
 mod standing;
 mod standing_promotion;
@@ -601,7 +602,7 @@ pub fn arm_if_authorized(
     if let Some(standing) = &standing {
         standing::verify_candidate(standing)?;
         standing::require_fresh(standing)?;
-        standing::require_guest_configuration(&directory, tx, cmdline, last.0 == 0)?;
+        guest_configuration::reserve(&directory, tx, &raw, cmdline, last.0 == 0)?;
     }
 
     // Consume the signed authorization durably before asking firmware for the one-shot trial.
@@ -717,10 +718,10 @@ pub fn start_candidate(
     active: &runtime::Activation,
     recovering: bool,
     epoch: Option<&str>,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let mut raw = Vec::new();
     let Some(trial) = candidate(cmdline, &mut raw)? else {
-        return Ok(());
+        return Ok(false);
     };
     let slot = slot.ok_or_else(|| invalid("trial candidate requires its verified GPT slot"))?;
     if recovering
@@ -740,14 +741,15 @@ pub fn start_candidate(
             .join(format!("{}.promotion-confirmed", trial.transaction))
             .try_exists()?
     {
-        return promotion::authorize_promoted(
+        promotion::authorize_promoted(
             &directory,
             &trial,
             guest,
             active,
             &order,
-            &slot.payload_ids,
-        );
+            (&slot.payload_ids, cmdline),
+        )?;
+        return Ok(false);
     }
     if order.first() != Some(&trial.stable.id) {
         return Err(invalid(
@@ -783,7 +785,7 @@ pub fn start_candidate(
             }
             standing::require_epoch(standing, epoch, standing.candidate_epoch)?;
             standing::require_fresh(standing)?;
-            standing::require_guest_configuration(&directory, trial.transaction, cmdline, false)?;
+            guest_configuration::trial(&directory, trial.transaction, &attempt, cmdline)?;
             standing.attempt
         }
         None => std::str::from_utf8(&attempt).map_err(io::Error::other)?,
@@ -845,7 +847,7 @@ pub fn start_candidate(
         requires.join("fvca-trial-health.service"),
     )?;
     println!("FVCA_TRIAL_CANDIDATE_STARTED {} {boot}", trial.transaction);
-    Ok(())
+    Ok(standing.is_some())
 }
 
 fn evidence(receipt: &[u8]) -> io::Result<Evidence<'_>> {

@@ -7,7 +7,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use fvca_trial_authorization::{APPROVAL_LIMIT, GUEST_CAPTURE_LOCK, PENDING, guest};
+use fvca_trial_authorization::{APPROVAL_LIMIT, GUEST_CAPTURE_LOCK, PENDING, guest, guest_config};
 use rustix::fs::{self, AtFlags, CWD, Mode, OFlags, StatxFlags};
 use rustix::io::Errno;
 
@@ -124,7 +124,7 @@ fn matching_record(inbox: &File, name: &str, envelope: &[u8]) -> Result<Option<F
                 return Err(invalid(if name == PENDING {
                     "another trial already occupies the Host inbox"
                 } else {
-                    "a different signed promotion already occupies the Host inbox"
+                    "a different signed approval already occupies the Host inbox"
                 })
                 .into());
             }
@@ -174,7 +174,9 @@ pub fn require_idle() -> Result<()> {
 
 pub fn publish(
     envelope: &[u8],
-    promotion: Option<(&str, &[u8])>,
+    transaction: &str,
+    promotion: Option<&[u8]>,
+    configuration: Option<&[u8]>,
     authorize: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     let (host, id) = host_data()?;
@@ -185,13 +187,35 @@ pub fn publish(
     }
     let inbox = inbox(&host, id)?.ok_or_else(|| invalid("trial inbox disappeared"))?;
     let pending = matching_record(&inbox, PENDING, envelope)?;
-    if let Some((transaction, packet)) = promotion {
-        let name = format!("{transaction}.standing-promotion");
-        match matching_record(&inbox, &name, packet)? {
-            Some(existing) => existing.sync_all()?,
-            None => publish_record(&inbox, &name, packet, authorize)?,
+    for (suffix, packet) in [
+        (".standing-promotion", promotion),
+        (guest_config::CHANGE_SUFFIX, configuration),
+    ] {
+        let name = format!("{transaction}{suffix}");
+        if let Some(packet) = packet {
+            match matching_record(&inbox, &name, packet)? {
+                Some(existing) => existing.sync_all()?,
+                None if pending.is_none() || configuration.is_none() => {
+                    publish_record(&inbox, &name, packet, authorize)?
+                }
+                None => {
+                    return Err(
+                        invalid("published trial lacks its original signed approvals").into(),
+                    );
+                }
+            }
+        } else if suffix == guest_config::CHANGE_SUFFIX {
+            match fs::statat(&inbox, &name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => {
+                    return Err(invalid(
+                        "trial already has a signed approval for this transaction",
+                    )
+                    .into());
+                }
+                Err(Errno::NOENT) => (),
+                Err(error) => return Err(error.into()),
+            }
         }
-        inbox.sync_all()?;
     }
     if let Some(existing) = pending {
         authorize()?;
@@ -200,6 +224,7 @@ pub fn publish(
         return Ok(());
     }
 
+    inbox.sync_all()?;
     publish_record(&inbox, PENDING, envelope, authorize)
 }
 

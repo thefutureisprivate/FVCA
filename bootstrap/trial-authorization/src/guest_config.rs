@@ -5,8 +5,12 @@ use std::io;
 use super::{digest, guest::SERVICE_GUEST_UUID, invalid, number};
 
 pub const ARGUMENT: &str = "fvca.guest_config";
+pub const AUTHORITY_ARGUMENT: &str = "fvca.guest_config_key";
+pub const AUTHORITY_FILE: &str = "/usr/lib/fvca/guest-configuration-key";
+pub const CHANGE_SUFFIX: &str = ".guest-configuration-change";
 pub const ACTIVE: &str = "/run/fvca/guest-vm-settings";
 pub const LIMIT: usize = 192;
+pub const CHANGE_LIMIT: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Resources {
@@ -79,33 +83,173 @@ impl Configuration {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Binding {
     pub revision: u64,
     pub sha256: String,
 }
 
 pub fn binding(cmdline: &str) -> io::Result<Option<Binding>> {
+    argument(cmdline, ARGUMENT)?.map(parse_binding).transpose()
+}
+
+fn argument<'a>(cmdline: &'a str, name: &str) -> io::Result<Option<&'a str>> {
     let mut args = cmdline
         .split_ascii_whitespace()
-        .filter(|arg| arg.split('=').next() == Some(ARGUMENT));
+        .filter(|arg| arg.split('=').next() == Some(name));
     let Some(arg) = args.next() else {
         return Ok(None);
     };
-    let (revision, sha256) = arg
-        .split_once('=')
-        .and_then(|(_, value)| value.split_once(','))
+    arg.strip_prefix(name)
+        .and_then(|arg| arg.strip_prefix('='))
         .filter(|_| args.next().is_none())
-        .ok_or_else(|| invalid("invalid or duplicate Guest configuration UKI binding"))?;
-    Ok(Some(Binding {
+        .map(Some)
+        .ok_or_else(|| invalid("invalid or duplicate Guest configuration UKI argument"))
+}
+
+fn parse_binding(value: &str) -> io::Result<Binding> {
+    let (revision, sha256) = value
+        .split_once(',')
+        .ok_or_else(|| invalid("Guest configuration requires a revision and digest"))?;
+    Ok(Binding {
         revision: number(revision, "")?,
         sha256: digest(sha256, "")?.to_owned(),
-    }))
+    })
+}
+
+pub fn authority(cmdline: &str) -> io::Result<Option<[u8; 32]>> {
+    let Some(value) = argument(cmdline, AUTHORITY_ARGUMENT)? else {
+        return Ok(None);
+    };
+    let key = digest(value, "")?;
+    let mut raw = [0; 32];
+    for (index, output) in raw.iter_mut().enumerate() {
+        *output =
+            u8::from_str_radix(&key[index * 2..index * 2 + 2], 16).map_err(io::Error::other)?;
+    }
+    if raw == [0; 32] {
+        return Err(invalid("Guest configuration authority cannot be empty"));
+    }
+    Ok(Some(raw))
+}
+
+#[derive(PartialEq, Eq)]
+pub struct Policy {
+    pub binding: Option<Binding>,
+    pub authority: Option<[u8; 32]>,
+}
+
+impl Policy {
+    pub fn parse(cmdline: &str) -> io::Result<Self> {
+        Ok(Self {
+            binding: binding(cmdline)?,
+            authority: authority(cmdline)?,
+        })
+    }
+}
+
+pub struct Change {
+    pub trial_sha256: String,
+    pub previous: Option<Binding>,
+    pub next: Binding,
+}
+
+pub fn signed_change(packet: &[u8]) -> io::Result<(&[u8; 64], &[u8])> {
+    packet
+        .split_first_chunk::<64>()
+        .filter(|(_, body)| !body.is_empty() && packet.len() <= CHANGE_LIMIT)
+        .ok_or_else(|| invalid("invalid signed Guest configuration change size"))
+}
+
+impl Change {
+    pub fn parse(body: &[u8]) -> io::Result<Self> {
+        if body.len() > CHANGE_LIMIT - 64 {
+            return Err(invalid("Guest configuration change exceeds its size bound"));
+        }
+        let text = std::str::from_utf8(body).map_err(io::Error::other)?;
+        let fields: Vec<_> = text.split('\n').collect();
+        let [
+            "FVCA-GUEST-CONFIGURATION-CHANGE-1",
+            guest,
+            trial,
+            previous,
+            next,
+            "",
+        ] = fields.as_slice()
+        else {
+            return Err(invalid("invalid Guest configuration change"));
+        };
+        if guest.strip_prefix("guest=").map(str::as_bytes) != Some(SERVICE_GUEST_UUID.to_bytes()) {
+            return Err(invalid("configuration change targets a different Guest"));
+        }
+        let previous = match previous.strip_prefix("previous=") {
+            Some("default") => None,
+            Some(value) => Some(parse_binding(value)?),
+            None => return Err(invalid("configuration change lacks its previous revision")),
+        };
+        let next = parse_binding(
+            next.strip_prefix("next=")
+                .ok_or_else(|| invalid("configuration change lacks its next revision"))?,
+        )?;
+        if previous
+            .as_ref()
+            .map_or(0, |value| value.revision)
+            .checked_add(1)
+            != Some(next.revision)
+        {
+            return Err(invalid(
+                "Guest configuration change must advance exactly one revision",
+            ));
+        }
+        Ok(Self {
+            trial_sha256: digest(trial, "trial_sha256=")?.to_owned(),
+            previous,
+            next,
+        })
+    }
+
+    pub fn require_trial(&self, trial_sha256: &str) -> io::Result<()> {
+        if self.trial_sha256 != trial_sha256 {
+            return Err(invalid(
+                "Guest configuration change does not authorize this Host trial",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restricts_changes_to_the_registered_guest_and_consecutive_revisions() -> io::Result<()> {
+        let from = "a".repeat(64);
+        let to = "b".repeat(64);
+        let trial = "c".repeat(64);
+        let body = format!(
+            "FVCA-GUEST-CONFIGURATION-CHANGE-1\nguest={}\ntrial_sha256={trial}\nprevious=4,{from}\nnext=5,{to}\n",
+            SERVICE_GUEST_UUID.to_str().map_err(io::Error::other)?
+        );
+        let accepted = Change::parse(body.as_bytes())?;
+        assert_eq!(accepted.previous.unwrap().sha256, from);
+        assert_eq!(accepted.next.revision, 5);
+        for changed in [
+            body.replace("next=5", "next=4"),
+            body.replace("next=5", "next=6"),
+            body.replace(&format!("4,{from}"), "default"),
+            body.replace("e629aa43", "00000000"),
+            format!("{body}\n"),
+        ] {
+            assert!(Change::parse(changed.as_bytes()).is_err());
+        }
+        assert!(signed_change(&[0; CHANGE_LIMIT + 1]).is_err());
+        let selection = format!("ro {AUTHORITY_ARGUMENT}={to}");
+        assert_eq!(Policy::parse(&selection)?.authority, Some([0xbb; 32]));
+        assert!(Policy::parse(&format!("{selection} {selection}")).is_err());
+        assert!(Policy::parse(&format!("{AUTHORITY_ARGUMENT}={}", "0".repeat(64))).is_err());
+        Ok(())
+    }
 
     #[test]
     fn binds_the_exact_configuration_revision_and_digest() -> io::Result<()> {

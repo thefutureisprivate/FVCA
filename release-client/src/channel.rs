@@ -9,7 +9,7 @@ use std::path::Path;
 use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
 use fvca_trial_authorization::{
     APPROVAL_LIMIT, PROMOTED_RELEASE, PROMOTION_ENROLLMENT, Promotion, RUNNING_CONTEXT, Standing,
-    peer_partitions,
+    guest_config, peer_partitions,
 };
 use jiff::{
     Timestamp,
@@ -22,8 +22,8 @@ use tough::{IntoVec, Repository, TargetName};
 
 use crate::depot::{CONFIG_BYTES, Depot, EnrolledDepot, METADATA_BYTES};
 use crate::{
-    MANIFEST_BYTES, Member, Result, Role, Selection, check_target, gpt, handoff, install::Slot,
-    invalid, load_repository, stage, state, valid_digest,
+    MANIFEST_BYTES, Member, Result, Role, Selection, check_target, gpt, guest_configuration,
+    handoff, install::Slot, invalid, load_repository, stage, state, valid_digest,
 };
 
 pub enum Operation {
@@ -149,6 +149,8 @@ struct Candidate {
     trial_approval: Option<Member>,
     #[serde(skip_serializing_if = "Option::is_none")]
     promotion_approval: Option<Member>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guest_configuration_change: Option<Member>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -190,6 +192,8 @@ struct Status<'a> {
     staged: Option<String>,
     prepared_inactive_slot: Option<Slot>,
     delivered_trial: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accepted_guest_configuration_revision: Option<u64>,
     requested_trial: Option<String>,
     hold_until: Option<i64>,
     security_deadline_missed: bool,
@@ -266,6 +270,20 @@ impl Head {
             }) {
                 return Err(
                     invalid("channel promotion approval is outside standing policy scope").into(),
+                );
+            }
+            if release
+                .guest_configuration_change
+                .as_ref()
+                .is_some_and(|member| {
+                    policy.role != Role::Hypervisor
+                        || release.promotion_approval.is_none()
+                        || !(65..=guest_config::CHANGE_LIMIT as u64).contains(&member.bytes)
+                        || !valid_digest(&member.sha256)
+                })
+            {
+                return Err(
+                    invalid("configuration change is outside standing policy scope").into(),
                 );
             }
             let current = release.manifest_sha256 == active.manifest_sha256;
@@ -583,6 +601,7 @@ pub async fn discover(
         staged: None,
         prepared_inactive_slot: None,
         delivered_trial: None,
+        accepted_guest_configuration_revision: None,
         requested_trial: None,
         hold_until: None,
         security_deadline_missed: false,
@@ -773,7 +792,7 @@ pub async fn discover(
                             {
                                 return Err(invalid("standing promotion differs from the release channel transition").into());
                             }
-                            Some(packet)
+                            Some((packet, authority))
                         } else {
                             None
                         };
@@ -789,6 +808,42 @@ pub async fn discover(
                                 &state::read(Path::new(RUNNING_CONTEXT), APPROVAL_LIMIT as u64)?,
                             )?;
                             peer.as_deref().map(peer_partitions).transpose()?
+                        } else {
+                            None
+                        };
+                        let change = if let Some(member) = &candidate.guest_configuration_change {
+                            let (_, promotion_key) = promotion.as_ref().filter(|_| peer.is_some())
+                                .ok_or_else(|| invalid("Guest configuration changes require a scheduled trial on the enrolled peer and an independent promotion"))?;
+                            let (running, _) = guest_configuration::running()?;
+                            let authority = running.authority.ok_or_else(|| {
+                                invalid("the running Host has no Guest configuration authority")
+                            })?;
+                            if authority == owner.as_slice()
+                                || authority == qualification.as_slice()
+                                || authority == key
+                                || authority == promotion_key.as_slice()
+                                || repo.root().signed.keys.values().any(|entry| {
+                                    matches!(entry, Key::Ed25519 { keyval, .. } if keyval.public.as_ref() == authority)
+                                })
+                            {
+                                return Err(invalid("the Guest configuration authority must be independent").into());
+                            }
+                            let packet = boot_envelope(
+                                &repo,
+                                &selection,
+                                member,
+                                "guest-configuration-change.bin",
+                            )
+                            .await?;
+                            let grant =
+                                guest_configuration::authorize(packet, &envelope, authority)?;
+                            if running.binding != grant.change.previous {
+                                return Err(invalid(
+                                    "Guest configuration change has a stale expected revision",
+                                )
+                                .into());
+                            }
+                            Some(grant)
                         } else {
                             None
                         };
@@ -817,6 +872,7 @@ pub async fn discover(
                                     peer,
                                     approval: &approval,
                                     trial_key: key,
+                                    guest_change: change.as_ref(),
                                 }),
                             )?;
                         } else {
@@ -825,17 +881,21 @@ pub async fn discover(
                                 &selection,
                                 &staged,
                                 scratch.path(),
-                                (&approval, key),
+                                (&approval, key, change.as_ref()),
                                 matches!(delivery, Delivery::Scheduled { .. }),
                             )?;
                         }
                         handoff::publish(
                             &envelope,
-                            promotion.as_deref().map(|packet| (transaction, packet)),
+                            transaction,
+                            promotion.as_ref().map(|(packet, _)| packet.as_slice()),
+                            change.as_ref().map(|grant| grant.packet.as_slice()),
                             &authorize,
                         )?;
                         drop(lease);
                         status.delivered_trial = Some(transaction.into());
+                        status.accepted_guest_configuration_revision =
+                            change.as_ref().map(|grant| grant.change.next.revision);
                         if !matches!(delivery, Delivery::Inbox) {
                             request_result =
                                 authorize().and_then(|()| handoff::request_activation());
@@ -845,6 +905,12 @@ pub async fn discover(
                         }
                     }
                     Operation::PrepareGpt => {
+                        if candidate.guest_configuration_change.is_some() {
+                            return Err(invalid(
+                                "Guest configuration changes require scheduled installation",
+                            )
+                            .into());
+                        }
                         site.install(active_slot, &selection, &staged, directory, &eligible, None)?
                     }
                     Operation::Discover | Operation::ScheduleGuest(_) => {

@@ -5,9 +5,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fvca_trial_authorization::{Standing, guest_config};
+use fvca_trial_authorization::Standing;
 
-use super::{gpt_device, promotion, publish, read_record, verify_signature};
+use super::{gpt_device, promotion, verify_signature};
 use crate::{HYPERVISOR_EPOCH_ARGUMENT, invalid, runtime};
 
 pub(super) fn verify(envelope: &[u8]) -> io::Result<Standing<'_>> {
@@ -56,29 +56,6 @@ pub(super) fn require_fresh(approval: &Standing<'_>) -> io::Result<()> {
         .map_err(io::Error::other)?
         .as_secs();
     approval.require_fresh(now)
-}
-
-pub(super) fn require_guest_configuration(
-    directory: &Path,
-    transaction: &str,
-    cmdline: &str,
-    reserve: bool,
-) -> io::Result<()> {
-    let record = directory.join(format!("{transaction}.guest-configuration"));
-    let expected = match guest_config::binding(cmdline)? {
-        Some(binding) => format!("{},{}\n", binding.revision, binding.sha256),
-        None => "profile-default\n".to_owned(),
-    };
-    match read_record(&record) {
-        Ok(previous) if previous == expected.as_bytes() => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound && reserve => {
-            publish(&record, expected.as_bytes())
-        }
-        Ok(_) => Err(invalid(
-            "standing Host trial changes the stable Guest configuration",
-        )),
-        Err(error) => Err(error),
-    }
 }
 
 pub(super) fn verify_candidate(approval: &Standing<'_>) -> io::Result<()> {

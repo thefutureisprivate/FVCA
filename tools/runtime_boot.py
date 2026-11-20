@@ -23,6 +23,9 @@ GUEST_LAUNCH_FILES = ("guest-launch", "guest-launch.p7s")
 GUEST_VM_SETTINGS = "guest-vm-settings"
 GUEST_VM_SUPPORT = Path("usr/lib/fvca/guest-vm-settings-v2")
 GUEST_CONFIG_ARGUMENT = "fvca.guest_config"
+GUEST_CONFIG_KEY = "guest-configuration-key"
+GUEST_CONFIG_KEY_ARGUMENT = "fvca.guest_config_key"
+GUEST_CONFIG_CHANGE_SUPPORT = Path("usr/lib/fvca/guest-configuration-change-v1")
 
 
 def run(*args, **kwargs):
