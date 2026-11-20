@@ -70,10 +70,27 @@ def serve(address, mode):
                 assert content == b"exact cabinet" and archive == sha256(content).hexdigest()
             return dbus.UInt64(16_908_288), dbus.Boolean(mode.read_text() != "other-capsule-backend")
 
-        @dbus.service.method(interface, in_signature="hh", out_signature="")
-        def StageFvcaCapsule(self, cabinet, lease):
-            for descriptor in (cabinet, lease):
-                os.close(descriptor.take())
+        @dbus.service.method(interface, in_signature="ssssssssssuuhh", out_signature="")
+        def StageFvcaCapsule(self, selected, archive, payload, guid, protocol, before, after,
+                             version_format, transaction, offer_sha256, raw_before, raw_after,
+                             cabinet, lease):
+            with os.fdopen(lease.take(), "rb") as inherited:
+                if mode.read_text() == "policy":
+                    os.close(cabinet.take())
+                    return
+                assert transaction == "f1234567-d234-4031-a111-000000000000"
+                assert offer_sha256 == "b" * 64
+                self.VerifyFvcaCabinet(selected, archive, payload, guid, protocol, before, after,
+                                       version_format, raw_before, raw_after, cabinet)
+                with mode.with_suffix(".lease").open("rb") as independent:
+                    assert os.path.samestat(os.fstat(inherited.fileno()), os.fstat(independent.fileno()))
+                    try:
+                        fcntl.flock(independent, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        pass
+                    else:
+                        raise AssertionError("lifecycle lease was unlocked")
+                    fcntl.flock(inherited, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
         @dbus.service.method(interface, in_signature="", out_signature="aa{sv}")
         def GetDevices(self):
@@ -204,32 +221,38 @@ def check_packaged_policy(daemon, policies):
             config = directory / f"firmware-bus-{endpoint}.conf"
             config.write_bytes((policies / config.name).read_bytes())
             mode = directory / "mode"
-            mode.write_text("normal")
+            mode.write_text("policy")
             with running([daemon, f"--config-file={config}", "--nofork", "--print-address=1"]) as (_, address):
                 with running([sys.executable, __file__, "--serve", address, str(mode)]) as (_, ready):
                     assert ready == "ready"
                     peer = dbus.bus.BusConnection(address)
                     try:
                         owner = peer.get_name_owner(interface)
+                        device = "a" * 40
+                        operation = (device, "f1234567-d234-4031-a111-000000000000", "b" * 64)
+                        stage = ("",) * 8 + operation[1:] + (dbus.UInt32(0), dbus.UInt32(0))
+                        signature = "ssssssssssuu"
                         with open(os.devnull, "rb") as harmless:
                             fds = (UnixFd(harmless.fileno()), UnixFd(harmless.fileno()))
                             for destination in (interface, owner):
-                                for method, signature, args, allowed in (
-                                    ("StageFvcaCapsule", "hh", fds, endpoint == "writer"),
-                                    ("StageFvcaCapsule", "h", fds[:1], False),
-                                    ("StageFvcaCapsule", "", (), False),
-                                    ("GetDevices", "", (), endpoint == "inventory"),
+                                for method, wire, args, allowed in (
+                                    ("StageFvcaCapsule", signature + "hh", stage + fds, endpoint == "writer"),
+                                    ("StageFvcaCapsule", signature + "h", stage + fds[:1], False),
+                                    ("StageFvcaCapsule", signature, stage, False),
+                                    ("GetDevices", "", (), True),
+                                    ("GetUpgrades", "s", (device,), True),
+                                    ("GetFvcaResult", "sss", operation, endpoint == "inventory"),
                                     ("Install", "", (), False),
                                     ("Quit", "", (), False),
                                 ):
                                     message = MethodCallMessage(destination, "/", interface, method)
-                                    message.append(*args, signature=signature)
+                                    message.append(*args, signature=wire)
                                     try:
                                         peer.send_message_with_reply_and_block(message, 3)
                                     except dbus.DBusException as error:
                                         assert not allowed and error.get_dbus_name() == "org.freedesktop.DBus.Error.AccessDenied", error
                                     else:
-                                        assert allowed, (endpoint, destination, method, signature)
+                                        assert allowed, (endpoint, destination, method, wire)
                     finally:
                         peer.close()
     print("FVCA_FWUPD_INVENTORY_AND_WRITER_BUS_POLICIES_ARE_DISTINCT")

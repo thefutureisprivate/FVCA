@@ -42,7 +42,7 @@ FIRMWARE_UPDATE_UNITS = tuple(
         "fvca-fwupd-writer.service",
     )
 )
-FIRMWARE_UPDATE_SUPPORT = Path("usr/lib/fvca/firmware-update-support-v13")
+FIRMWARE_UPDATE_SUPPORT = Path("usr/lib/fvca/firmware-update-support-v14")
 BASE_BINDING = Path("usr/share/fvca/vm-runtime-base.roothash")
 EXTENSION_RELEASE = Path("usr/lib/extension-release.d/extension-release.vm-runtime")
 REQUIRED_FILES = {

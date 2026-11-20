@@ -12,7 +12,7 @@ use fvca_initrd_bootstrap::{
     run,
 };
 use fvca_libvirt_boundary::{Connection, RUNNING};
-use fvca_trial_authorization::firmware::{self, DRAIN_RECEIPT};
+use fvca_trial_authorization::firmware::{self, DRAIN_RECEIPT, RUN_DIRECTORY};
 
 use super::{
     ALIAS, ATTACHMENT, CAPTURE_LOCK, OPERATION_LOCK, PID, RECEIPT, UUID, VM_PARENT, capture,
@@ -102,12 +102,12 @@ fn require_drained(connection: Option<&Connection>) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn drain_firmware(transaction: &str, offer: &str) -> io::Result<()> {
+pub(super) fn verify_firmware_drain(transaction: &str, offer: &str) -> io::Result<()> {
     let lease = File::from(io::stdin().as_fd().try_clone_to_owned()?);
     capture::require_inherited_lifecycle_lease(&lease)?;
     let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
     let receipt = firmware::drain_receipt(boot.trim_end(), transaction, offer)?;
-    let _operation = capture::lease(Path::new(OPERATION_LOCK))?;
+    let _operation = capture::lock_existing_operation()?;
     require_idle()?;
     guest_trial::require_idle()?;
     capture::live::require_idle()?;
@@ -124,22 +124,12 @@ pub(super) fn drain_firmware(transaction: &str, offer: &str) -> io::Result<()> {
     } else {
         None
     };
-    if let Some(connection) = &connection
-        && running_guest(connection)?
-    {
-        if !selected {
-            return Err(invalid(
-                "the running Guest lacks its verified launch selection",
-            ));
-        }
-        shutdown()?;
-    }
     require_drained(connection.as_ref())?;
     if selected {
         require_clean_stop()?;
     }
     fvca_btrfs_boundary::sync(&pool)?;
-    let directory = Path::new(RUN);
+    let directory = Path::new(RUN_DIRECTORY);
     capture::replace_record(directory, DRAIN_RECEIPT, &receipt)?;
     run(Command::new("/usr/bin/chcon")
         .args([

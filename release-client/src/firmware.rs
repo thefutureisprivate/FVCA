@@ -4,6 +4,7 @@ mod activation;
 mod boot;
 mod bus;
 mod capsule;
+mod dispatch;
 mod live;
 mod qualification;
 mod result;
@@ -750,7 +751,11 @@ pub async fn stage(inputs: Intake<'_>, source: ObservationSource<'_>) -> Result<
 
 async fn stage_locked(inputs: Intake<'_>, source: ObservationSource<'_>) -> Result<()> {
     let directory = inputs.directory;
-    let scheduled = matches!(source, ObservationSource::Scheduled(..));
+    let pool = match source {
+        ObservationSource::Scheduled(_, pool) => Some(pool),
+        _ => None,
+    };
+    let scheduled = pool.is_some();
     let freshness = if scheduled {
         match state::read(&directory.join(STATUS), MANIFEST_BYTES) {
             Ok(previous) => serde_json::from_slice(&previous)?,
@@ -786,7 +791,12 @@ async fn stage_locked(inputs: Intake<'_>, source: ObservationSource<'_>) -> Resu
     if result.is_err() {
         status.disposition = "blocked";
     }
-    if scheduled {
+    if let Some(pool) = pool {
+        if let Some(active) = activation::pending(pool)? {
+            status.disposition = active.disposition();
+            status.activation = Some(active);
+            status.completion_blocker = result.as_ref().err().map(ToString::to_string);
+        }
         save(directory, STATUS, &status)?;
     }
     if scheduled || result.is_ok() {
@@ -917,7 +927,6 @@ async fn refresh(
             SnapshotSource::Live(live::Session::open(&policy, offer, &payloads)?)
         }
     };
-    drop(payloads);
     let observe = |cabinet| match &snapshot {
         SnapshotSource::File(observed, sha256) => {
             offer.require_observation(&policy, observed, require_current()?)?;
@@ -928,17 +937,7 @@ async fn refresh(
                 requires_ac: false,
             })
         }
-        SnapshotSource::Live(live) => {
-            let observed = live.read(&offer.device)?;
-            let esrt = offer.require_observation(&policy, &observed, require_current()?)?;
-            let device = unique_device(&observed.devices, &offer.device.device_id)?;
-            Ok(AdmittedObservation {
-                sha256: digest(&serde_json::to_vec(&observed)?),
-                esrt: esrt.cloned(),
-                cabinet,
-                requires_ac: has(&device.flags, "require-ac"),
-            })
-        }
+        SnapshotSource::Live(live) => admit_live(live, offer, &policy, cabinet, &require_current),
     };
     observe(None)?;
     let check_cabinet = |path: &Path| {
@@ -984,10 +983,7 @@ async fn refresh(
     }
     let (capsule_delivery, boot_transition, operational_preflight) =
         if let ObservationSource::Scheduled(_, pool) = source {
-            let preflight = || -> Result<_> {
-                let _lease = handoff::lock_install()?;
-                handoff::require_idle()?;
-                let current = check_cabinet(&staged.join(ARCHIVE))?;
+            let inspect = |current: &AdmittedObservation| -> Result<_> {
                 let capsule = current
                     .esrt
                     .clone()
@@ -1003,13 +999,66 @@ async fn refresh(
                     &policy.maintenance,
                     Timestamp::from_second(require_current()?)?,
                 )?;
+                Ok((capsule, boot, operational))
+            };
+            let activate = || -> Result<_> {
+                let lease = handoff::lock_install()?;
+                handoff::require_idle()?;
+                let archive = staged.join(ARCHIVE);
+                let current = check_cabinet(&archive)?;
+                let (capsule, boot, operational) = inspect(&current)?;
+                if matches!(operational, qualification::Status::ChecksSatisfied) {
+                    let esrt = current
+                        .esrt
+                        .as_ref()
+                        .ok_or_else(|| invalid("approved capsule lacks an ESRT baseline"))?;
+                    dispatch::activate(
+                        pool,
+                        &lease,
+                        (offer, &approval_sha256, esrt.clone()),
+                        || {
+                            require_current()?;
+                            let writer = live::Session::open_writer(&policy, offer, &payloads)?;
+                            let cabinet =
+                                live::seal_cabinet(state::open_regular(&archive)?, offer)?;
+                            let verified = writer.verify_sealed_cabinet(&cabinet, offer)?;
+                            let fresh = admit_live(
+                                &writer,
+                                offer,
+                                &policy,
+                                Some(verified),
+                                &require_current,
+                            )?;
+                            if fresh.esrt != current.esrt || fresh.cabinet != current.cabinet {
+                                return Err(invalid(
+                                    "capsule admission changed while draining the Guest",
+                                )
+                                .into());
+                            }
+                            if !matches!(inspect(&fresh)?.2, qualification::Status::ChecksSatisfied)
+                            {
+                                return Err(invalid(
+                                    "firmware prerequisites changed before dispatch",
+                                )
+                                .into());
+                            }
+                            Ok((
+                                writer,
+                                cabinet,
+                                qualified.reboot.mains_required(fresh.requires_ac),
+                            ))
+                        },
+                        &|| Ok(require_current().map(|_| ())?),
+                    )?;
+                }
                 Ok((current, capsule, boot, operational))
             };
-            match preflight() {
+            match activate() {
                 Ok((current, capsule, boot, operational)) => {
                     observed = current;
                     (capsule, Some(boot), Some(operational))
                 }
+                Err(error) if activation::pending(pool)?.is_some() => return Err(error),
                 Err(error) => (
                     None,
                     None,
@@ -1034,6 +1083,24 @@ async fn refresh(
         operational_preflight,
         staged,
     }))
+}
+
+fn admit_live(
+    session: &live::Session,
+    offer: &Offer,
+    policy: &Policy,
+    cabinet: Option<live::VerifiedCabinet>,
+    require_current: &impl Fn() -> io::Result<i64>,
+) -> Result<AdmittedObservation> {
+    let observed = session.read(&offer.device)?;
+    let esrt = offer.require_observation(policy, &observed, require_current()?)?;
+    let device = unique_device(&observed.devices, &offer.device.device_id)?;
+    Ok(AdmittedObservation {
+        sha256: digest(&serde_json::to_vec(&observed)?),
+        esrt: esrt.cloned(),
+        cabinet,
+        requires_ac: has(&device.flags, "require-ac"),
+    })
 }
 
 struct AdmittedObservation {

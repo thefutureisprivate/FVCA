@@ -6,7 +6,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
-use fvca_trial_authorization::firmware::{DRAIN_RECEIPT, drain_receipt};
+use fvca_trial_authorization::firmware::{DRAIN_RECEIPT, RUN_DIRECTORY, drain_receipt};
 use rustix::mount::{MountPropagationFlags, mount_change};
 use rustix::thread::{
     CapabilitySet, CapabilitySets, UnshareFlags, capabilities, clear_ambient_capability_set,
@@ -24,7 +24,7 @@ pub(crate) fn serve() -> Result<()> {
         .ok_or_else(|| invalid("firmware writer requires its supervised service"))?;
     require_setup_privileges()?;
     boot::require_enforced_boot()?;
-    let (boot, _, pool) = enrolled_host()?;
+    let (_, _, pool) = enrolled_host()?;
     match handoff::install_lease()?.try_lock() {
         Err(TryLockError::WouldBlock) => (),
         Err(error) => return Err(error.into()),
@@ -33,7 +33,7 @@ pub(crate) fn serve() -> Result<()> {
         }
     }
     let operation = Activation::writer_operation(&pool, &boot_id()?)?;
-    let receipt = state::open_regular(&boot.join(DRAIN_RECEIPT))?;
+    let receipt = state::open_regular(&Path::new(RUN_DIRECTORY).join(DRAIN_RECEIPT))?;
     handoff::private_file(&receipt)?;
     let expected = drain_receipt(
         &operation.boot_id,

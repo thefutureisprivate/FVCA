@@ -231,6 +231,10 @@ pub(super) enum Status {
 }
 
 impl Reboot {
+    pub(super) fn mains_required(&self, device_requires_ac: bool) -> bool {
+        device_requires_ac || self.power == Power::MainsRequired
+    }
+
     pub(super) fn require_capsule_reboot(bytes: &[u8], offer: &Offer) -> Result<()> {
         let reboot: Self = decode(
             bytes,
@@ -299,7 +303,7 @@ impl Reboot {
                 "qualified power-continuity telemetry is unavailable",
             ));
         }
-        if requires_ac || self.power == Power::MainsRequired {
+        if self.mains_required(requires_ac) {
             match mains() {
                 Ok(true) => (),
                 Ok(false) => return Ok(Status::blocked("required mains power is not online")),
@@ -325,7 +329,7 @@ impl Status {
     }
 }
 
-fn live_mains() -> Result<bool> {
+pub(super) fn live_mains() -> Result<bool> {
     let supplies = Path::new("/sys/class/power_supply");
     const SYSFS_MAGIC: u64 = 0x62656572;
     if rustix::fs::fstatfs(File::open(supplies)?)?.f_type as u64 != SYSFS_MAGIC {

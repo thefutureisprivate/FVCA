@@ -19,6 +19,7 @@ use super::{
 use crate::{Result, invalid, state};
 
 const ADDRESS: &CStr = c"unix:path=/run/fvca/firmware-bus-inventory";
+const WRITER_ADDRESS: &CStr = c"unix:path=/run/fvca/firmware-bus-writer";
 const DAEMON: &str = "/usr/libexec/fwupd/fwupd";
 const FWUPD: &CStr = c"org.freedesktop.fwupd";
 const DBUS: &CStr = c"org.freedesktop.DBus";
@@ -361,7 +362,7 @@ pub(super) struct Session {
     catalog: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) struct VerifiedCabinet {
     pub(super) bytes: u64,
     pub(super) capsule_on_disk: bool,
@@ -369,11 +370,28 @@ pub(super) struct VerifiedCabinet {
 
 impl Session {
     pub(super) fn open(policy: &Policy, offer: &Offer, payloads: &[Vec<u8>; 2]) -> Result<Self> {
+        Self::open_at(ADDRESS, policy, offer, payloads)
+    }
+
+    pub(super) fn open_writer(
+        policy: &Policy,
+        offer: &Offer,
+        payloads: &[Vec<u8>; 2],
+    ) -> Result<Self> {
+        Self::open_at(WRITER_ADDRESS, policy, offer, payloads)
+    }
+
+    fn open_at(
+        address: &CStr,
+        policy: &Policy,
+        offer: &Offer,
+        payloads: &[Vec<u8>; 2],
+    ) -> Result<Self> {
         require_platform(policy)?;
         if offer.remote != "lvfs" {
             return Err(invalid("live catalog import requires the LVFS remote").into());
         }
-        let peer = Peer::connect(ADDRESS, 0, Path::new(DAEMON))?;
+        let peer = Peer::connect(address, 0, Path::new(DAEMON))?;
         if peer.version()? != policy.fwupd_version {
             return Err(
                 invalid("live fwupd version differs from the signed firmware policy").into(),
@@ -415,18 +433,17 @@ impl Session {
     }
 
     pub(super) fn verify_cabinet(&self, file: File, offer: &Offer) -> Result<VerifiedCabinet> {
-        let identity = [
-            CString::new(offer.device.device_id.as_str())?,
-            CString::new(offer.archive.sha256.as_str())?,
-            CString::new(offer.payload_sha256.as_str())?,
-            CString::new(offer.device.guid.as_str())?,
-            CString::new(offer.device.component.protocol())?,
-            CString::new(offer.from.text.as_str())?,
-            CString::new(offer.to.text.as_str())?,
-            CString::new(offer.device.version_format.as_str())?,
-        ];
+        self.verify_sealed_cabinet(&seal_cabinet(file, offer)?, offer)
+    }
+
+    pub(super) fn verify_sealed_cabinet(
+        &self,
+        archive: &File,
+        offer: &Offer,
+    ) -> Result<VerifiedCabinet> {
+        let identity = cabinet_identity(offer)?;
         self.require_catalog()?;
-        let archive = sealed(c"fvca-firmware-cabinet", file, offer.archive.bytes)?;
+        (&*archive).rewind()?;
         let (bytes, capsule_on_disk) = self.peer.bus.verify_cabinet(
             &self.peer.owner,
             identity.each_ref().map(CString::as_c_str),
@@ -443,6 +460,40 @@ impl Session {
         })
     }
 
+    pub(super) fn stage_capsule(
+        &self,
+        archive: &File,
+        offer: &Offer,
+        operation: &Activation,
+        lease: &File,
+    ) -> Result<()> {
+        let identity = cabinet_identity(offer)?;
+        let tag = [
+            CString::new(operation.transaction.as_str())?,
+            CString::new(operation.offer_sha256.as_str())?,
+        ];
+        let versions = [
+            offer
+                .from
+                .raw
+                .ok_or_else(|| invalid("firmware capsule has no raw starting version"))?,
+            offer
+                .to
+                .raw
+                .ok_or_else(|| invalid("firmware capsule has no raw target version"))?,
+        ];
+        self.require_catalog()?;
+        (&*archive).rewind()?;
+        self.peer.bus.stage_capsule(
+            &self.peer.owner,
+            identity.each_ref().map(CString::as_c_str),
+            tag.each_ref().map(CString::as_c_str),
+            versions,
+            archive.as_fd(),
+            lease.as_fd(),
+        )
+    }
+
     pub(super) fn read(&self, identity: &DeviceIdentity) -> Result<Observation> {
         self.require_catalog()?;
         let observed = snapshot(
@@ -454,6 +505,23 @@ impl Session {
         self.require_catalog()?;
         Ok(observed)
     }
+}
+
+pub(super) fn seal_cabinet(file: File, offer: &Offer) -> Result<File> {
+    sealed(c"fvca-firmware-cabinet", file, offer.archive.bytes)
+}
+
+fn cabinet_identity(offer: &Offer) -> Result<[CString; 8]> {
+    Ok([
+        CString::new(offer.device.device_id.as_str())?,
+        CString::new(offer.archive.sha256.as_str())?,
+        CString::new(offer.payload_sha256.as_str())?,
+        CString::new(offer.device.guid.as_str())?,
+        CString::new(offer.device.component.protocol())?,
+        CString::new(offer.from.text.as_str())?,
+        CString::new(offer.to.text.as_str())?,
+        CString::new(offer.device.version_format.as_str())?,
+    ])
 }
 
 pub(super) fn read_result(
@@ -639,7 +707,7 @@ mod tests {
         );
 
         let head: super::super::Head = serde_json::from_value(super::super::result::test_offer())?;
-        let offer = head.offer.unwrap();
+        let mut offer = head.offer.unwrap();
         let digest = "b".repeat(64);
         let operation = ("f1234567-d234-4031-a111-000000000000", digest.as_str());
         fs::write(&mode, "post-update")?;
@@ -770,6 +838,25 @@ mod tests {
         assert_eq!(receipt()?, (16_908_288, true));
         fs::write(&mode, "other-capsule-backend")?;
         assert_eq!(receipt()?, (16_908_288, false));
+        fs::write(&mode, "stage")?;
+        offer.archive.sha256 = crate::channel::digest(cabinet);
+        offer.archive.bytes = cabinet.len() as u64;
+        offer.payload_sha256 = "7".repeat(64);
+        let lease_path = Path::new(&mode).with_extension("lease");
+        let lease = File::create(&lease_path)?;
+        lease.try_lock()?;
+        let activation: Activation = serde_json::from_value(serde_json::json!({
+            "schema": "fvca-firmware-activation-v2",
+            "transaction": operation.0,
+            "boot_id": super::super::boot_id()?,
+            "offer_sha256": operation.1,
+            "device_id": id,
+            "phase": "flashing",
+            "guest_was_active": true,
+            "mains_required": true
+        }))?;
+        assert!(session.verify_sealed_cabinet(&fd, &offer)?.capsule_on_disk);
+        session.stage_capsule(&fd, &offer, &activation, &lease)?;
         fs::write(&mode, "catalog-replaced")?;
         let error = session.require_catalog().err().unwrap();
         assert!(error.to_string().contains("catalog changed during intake"));

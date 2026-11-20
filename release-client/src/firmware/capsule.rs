@@ -10,10 +10,11 @@ use fvca_trial_authorization::efi;
 use rustix::fs::{self, CWD, Dir, Mode, OFlags, ResolveFlags, StatFs, StatVfsMountFlags};
 use rustix::io::Errno;
 use rustix::mount::{MountFlags, mount_remount};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use super::{Esrt, boot_id, live::VerifiedCabinet};
-use crate::{Result, channel::digest, handoff, invalid, state};
+use super::{ARCHIVE_LIMIT, Esrt, boot_id, live::VerifiedCabinet};
+use crate::{Result, channel::digest, handoff, invalid, state, valid_digest};
 
 const EFIVARS: &str = "/sys/firmware/efi/efivars";
 const EFIVARFS_MAGIC: u64 = 0xde5e81e4;
@@ -33,6 +34,20 @@ const DIRECTORY: OFlags = OFlags::RDONLY
 const BOOT_RUNTIME: u32 = 6;
 const NON_VOLATILE: u32 = 7;
 const FILE_CAPSULE: u64 = 0x4;
+const QUEUED_LIMIT: u64 = ARCHIVE_LIMIT + 1024 * 1024;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct QueuedCapsule {
+    file: String,
+    sha256: String,
+}
+
+impl QueuedCapsule {
+    pub(super) fn valid(&self) -> bool {
+        capsule_name(&self.file) && valid_digest(&self.sha256)
+    }
+}
 
 #[derive(Serialize)]
 pub(super) struct Delivery {
@@ -145,6 +160,87 @@ pub(super) fn require_clear_queue() -> Result<()> {
     let (device_id, _) = esp_binding(&binding)?;
     esp_space(Path::new(efi::FIRMWARE_ESP), device_id)?;
     Ok(())
+}
+
+pub(super) fn pending_capsule() -> Result<QueuedCapsule> {
+    super::boot::require_enforced_boot()?;
+    let binding = read_binding()?;
+    let (device, expected) = esp_binding(&binding)?;
+    let variables = File::from(fs::openat(CWD, EFIVARS, DIRECTORY, Mode::empty())?);
+    require_efivarfs(&fs::fstatfs(&variables)?)?;
+    require_secure_boot(&variables)?;
+    require_capsule_on_disk(&variables)?;
+    if mask(&read(&variables, "OsIndications")?, NON_VOLATILE)? != FILE_CAPSULE {
+        return Err(invalid("EFI does not have the exact capsule indication pending").into());
+    }
+    boot_target(&variables, expected)?;
+    let esp = verified_esp(Path::new(efi::FIRMWARE_ESP), device, false)?;
+    let queue = fs::openat2(
+        &esp,
+        "EFI/UpdateCapsule",
+        DIRECTORY,
+        Mode::empty(),
+        WITHIN_MOUNT,
+    )?;
+    let queued = queued_identity(&File::from(queue))?;
+    // Persist the file and its directory entry before recording reboot readiness.
+    fs::syncfs(&esp)?;
+    Ok(queued)
+}
+
+fn capsule_name(name: &str) -> bool {
+    !name.starts_with('.')
+        && name.len() <= 128
+        && (name.ends_with(".cap") || name.ends_with(".bin"))
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+}
+
+fn queued_identity(queue: &File) -> Result<QueuedCapsule> {
+    let mut directory = Dir::read_from(queue)?;
+    let mut names = (&mut directory).filter_map(|entry| match entry {
+        Ok(entry) if matches!(entry.file_name().to_bytes(), b"." | b"..") => None,
+        entry => Some(entry),
+    });
+    let entry = names
+        .next()
+        .ok_or_else(|| invalid("no firmware capsule is queued"))??;
+    let file = entry.file_name().to_str()?;
+    if names.next().is_some() || !capsule_name(file) {
+        return Err(invalid("expected one native firmware capsule in the ESP queue").into());
+    }
+    let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY;
+    let input = File::from(fs::openat2(
+        queue,
+        file,
+        flags,
+        Mode::empty(),
+        WITHIN_MOUNT,
+    )?);
+    let metadata = input.metadata()?;
+    if !metadata.is_file() || !(1..=QUEUED_LIMIT).contains(&metadata.len()) {
+        return Err(invalid("queued firmware capsule is outside its size bound").into());
+    }
+    let mut sha = Sha256::new();
+    let mut input = input.take(QUEUED_LIMIT + 1);
+    let mut buffer = [0; 64 * 1024];
+    let mut seen = 0;
+    loop {
+        let count = input.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        sha.update(&buffer[..count]);
+        seen += count as u64;
+    }
+    if seen != metadata.len() {
+        return Err(invalid("queued firmware capsule changed while reading").into());
+    }
+    Ok(QueuedCapsule {
+        file: file.into(),
+        sha256: hex::encode(sha.finalize()),
+    })
 }
 
 pub(super) fn prepare_writer_mount() -> Result<()> {
@@ -351,6 +447,10 @@ fn ordinary_boot(variables: &File, expected: &[u8]) -> Result<u16> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => (),
         Err(error) => return Err(error.into()),
     }
+    boot_target(variables, expected)
+}
+
+fn boot_target(variables: &File, expected: &[u8]) -> Result<u16> {
     match read(variables, "BootNext") {
         Ok(_) => return Err(invalid("a one-shot EFI boot override is pending").into()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => (),
@@ -420,6 +520,27 @@ mod tests {
             result.route,
             Route::Blocked { reason } if reason.contains("different capsule backend")
         ));
+    }
+
+    #[test]
+    fn pending_queue_pins_the_only_native_capsule() -> Result<()> {
+        let work = tempfile::tempdir()?;
+        let queue = File::open(work.path())?;
+        assert!(queued_identity(&queue).is_err());
+        let name = work.path().join("CapsuleUpdateFile0000.bin");
+        fs::write(&name, b"first capsule")?;
+        let approved = queued_identity(&queue)?;
+        assert_eq!(approved.sha256, digest(b"first capsule"));
+        fs::write(&name, b"other capsule")?;
+        assert_ne!(approved, queued_identity(&queue)?);
+        let extra = work.path().join("extra.cap");
+        fs::write(&extra, b"x")?;
+        assert!(queued_identity(&queue).is_err());
+        fs::remove_file(extra)?;
+        fs::remove_file(&name)?;
+        std::os::unix::fs::symlink("/dev/null", name)?;
+        assert!(queued_identity(&queue).is_err());
+        Ok(())
     }
 
     fn variables(dir: &Path, expected: &[u8]) -> io::Result<()> {

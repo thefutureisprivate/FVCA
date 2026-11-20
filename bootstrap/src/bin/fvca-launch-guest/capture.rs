@@ -18,6 +18,7 @@ const CAPTURE_HEADER: &str = "FVCA-STOPPED-CAPTURE-1";
 const UUID_GROUPS: &[usize] = &[8, 4, 4, 4, 12];
 const GUEST_UNIT: &str = "fvca-service-guest.service";
 const O_NOFOLLOW: i32 = 0o400000;
+const O_NONBLOCK: i32 = 0o4000;
 
 #[path = "live.rs"]
 pub(super) mod live;
@@ -93,6 +94,15 @@ impl Store {
 fn lock_file(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new().read(true).write(true).create(true).truncate(false)
         .custom_flags(O_NOFOLLOW).mode(0o600).open(path)?;
+    verify_lease_file(file)
+}
+
+fn read_lease_file(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new().read(true).custom_flags(O_NOFOLLOW | O_NONBLOCK).open(path)?;
+    verify_lease_file(file)
+}
+
+fn verify_lease_file(file: File) -> io::Result<File> {
     let stat = file.metadata()?;
     if !stat.is_file() || stat.nlink() != 1 || stat.uid() != 0 || stat.gid() != 0 || stat.mode() & 0o7777 != 0o600 {
         return Err(invalid("invalid FVCA lease file"));
@@ -121,7 +131,13 @@ pub(super) fn lease_for_activation_recovery() -> io::Result<File> {
 }
 
 pub(super) fn require_inherited_lifecycle_lease(passed: &File) -> io::Result<()> {
-    check_locked_description(&lock_file(Path::new(CAPTURE_LOCK))?, passed)
+    check_locked_description(&read_lease_file(Path::new(CAPTURE_LOCK))?, passed)
+}
+
+pub(super) fn lock_existing_operation() -> io::Result<File> {
+    let file = read_lease_file(Path::new(OPERATION_LOCK))?;
+    file.try_lock()?;
+    Ok(file)
 }
 
 fn check_locked_description(expected: &File, passed: &File) -> io::Result<()> {

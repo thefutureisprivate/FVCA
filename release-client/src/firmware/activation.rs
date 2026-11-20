@@ -3,15 +3,17 @@
 use std::fs::File;
 use std::io::Read;
 
-use fvca_trial_authorization::firmware::{ACTIVATION, activation_pending};
+use fvca_trial_authorization::firmware::{
+    ACTIVATION, DRAIN_RECEIPT, RUN_DIRECTORY, activation_pending,
+};
 use rustix::fs::{self, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 
-use super::{ARCHIVE, Esrt, lower_hex, result, uuid};
-use crate::{Result, handoff, invalid, valid_digest};
+use super::{ARCHIVE, Esrt, boot_id, capsule, dispatch, lower_hex, result, uuid};
+use crate::{Result, handoff, invalid, state, valid_digest};
 
-const SCHEMA: &str = "fvca-firmware-activation-v1";
+const SCHEMA: &str = "fvca-firmware-activation-v2";
 const LIMIT: u64 = 1024;
 const RESULT_SCHEMA: &str = "fvca-firmware-activation-result-v1";
 const RESULT_LIMIT: u64 = 8192;
@@ -34,7 +36,7 @@ enum Phase {
     OutcomeUnknown,
 }
 
-#[derive(Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Activation {
     schema: String,
@@ -43,6 +45,10 @@ pub(super) struct Activation {
     pub(super) offer_sha256: String,
     pub(super) device_id: String,
     phase: Phase,
+    guest_was_active: bool,
+    pub(super) mains_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) queued: Option<capsule::QueuedCapsule>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) esrt_before: Option<Esrt>,
 }
@@ -60,6 +66,8 @@ impl Activation {
             || !uuid(&record.boot_id)
             || !valid_digest(&record.offer_sha256)
             || !lower_hex(&record.device_id, 40)
+            || (record.phase == Phase::RebootPending) != record.queued.is_some()
+            || record.queued.as_ref().is_some_and(|queued| !queued.valid())
         {
             return Err(invalid("invalid firmware activation identity").into());
         }
@@ -87,15 +95,7 @@ impl Activation {
     }
 
     pub(super) fn writer_operation(pool: &File, current_boot: &str) -> Result<Self> {
-        let file = File::from(fs::openat2(
-            pool,
-            ACTIVATION,
-            PRIVATE_READ,
-            Mode::empty(),
-            WITHIN_POOL,
-        )?);
-        handoff::private_file(&file)?;
-        let record = Self::read(file)?;
+        let record = pending(pool)?.ok_or_else(|| invalid("firmware activation is missing"))?;
         record.require_writer_boot(current_boot)?;
         Ok(record)
     }
@@ -109,6 +109,128 @@ impl Activation {
         }
         Ok(())
     }
+
+    pub(super) fn begin(
+        pool: &File,
+        offer_sha256: &str,
+        device_id: &str,
+        esrt: Esrt,
+        guest_was_active: bool,
+    ) -> Result<Self> {
+        let raw = state::read(std::path::Path::new("/proc/sys/kernel/random/uuid"), 37)?;
+        let transaction = std::str::from_utf8(&raw)?
+            .strip_suffix('\n')
+            .filter(|id| uuid(id))
+            .ok_or_else(|| invalid("invalid Linux firmware transaction ID"))?;
+        let record = Self {
+            schema: SCHEMA.into(),
+            transaction: transaction.into(),
+            boot_id: boot_id()?,
+            offer_sha256: offer_sha256.into(),
+            device_id: device_id.into(),
+            phase: Phase::Draining,
+            guest_was_active,
+            mains_required: false,
+            queued: None,
+            esrt_before: Some(esrt),
+        };
+        handoff::publish_record(pool, ACTIVATION, &serde_json::to_vec(&record)?, &|| Ok(()))?;
+        Ok(record)
+    }
+
+    pub(super) fn flash(
+        &mut self,
+        pool: &File,
+        mains_required: bool,
+        authorize: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        let flashing = Self {
+            phase: Phase::Flashing,
+            mains_required,
+            ..self.clone()
+        };
+        handoff::replace_record(pool, ACTIVATION, &serde_json::to_vec(&flashing)?, authorize)?;
+        *self = flashing;
+        Ok(())
+    }
+
+    pub(super) fn mark_queued(
+        &mut self,
+        pool: &File,
+        queued: capsule::QueuedCapsule,
+    ) -> Result<()> {
+        self.phase = Phase::RebootPending;
+        self.queued = Some(queued);
+        handoff::replace_record(pool, ACTIVATION, &serde_json::to_vec(self)?, &|| Ok(()))
+    }
+
+    pub(super) fn mark_uncertain(&mut self, pool: &File) -> Result<()> {
+        self.phase = Phase::OutcomeUnknown;
+        handoff::replace_record(pool, ACTIVATION, &serde_json::to_vec(self)?, &|| Ok(()))
+    }
+
+    pub(super) fn is_draining(&self) -> bool {
+        self.phase == Phase::Draining
+    }
+
+    pub(super) fn cancel_drain(&self, pool: &File) -> Result<()> {
+        if self.phase != Phase::Draining || pending(pool)?.as_ref() != Some(self) {
+            return Err(invalid("firmware drain lost custody of its activation record").into());
+        }
+        super::boot::require_enforced_boot()?;
+        let current_boot = boot_id()?;
+        if current_boot == self.boot_id {
+            dispatch::restore_inventory()?;
+        }
+        capsule::verify_ordinary_boot()?;
+        capsule::require_clear_queue()?;
+        if current_boot == self.boot_id {
+            let receipt = std::path::Path::new(RUN_DIRECTORY).join(DRAIN_RECEIPT);
+            match std::fs::remove_file(receipt) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let name = format!("activation-aborted-{}.json", self.transaction);
+        let bytes = serde_json::to_vec(&self)?;
+        match fs::openat2(
+            pool,
+            name.as_str(),
+            PRIVATE_READ,
+            Mode::empty(),
+            WITHIN_POOL,
+        ) {
+            Ok(fd) => {
+                let file = File::from(fd);
+                handoff::private_file(&file)?;
+                if Self::read(file)? != *self {
+                    return Err(invalid(
+                        "aborted firmware drain receipt differs from its operation",
+                    )
+                    .into());
+                }
+            }
+            Err(Errno::NOENT) => handoff::publish_record(pool, &name, &bytes, &|| Ok(()))?,
+            Err(error) => return Err(error.into()),
+        }
+        if self.guest_was_active && current_boot == self.boot_id {
+            dispatch::resume_guest()?;
+        }
+        fs::unlinkat(pool, ACTIVATION, fs::AtFlags::empty())?;
+        pool.sync_all()?;
+        Ok(())
+    }
+}
+
+pub(super) fn pending(pool: &File) -> Result<Option<Activation>> {
+    let file = match fs::openat2(pool, ACTIVATION, PRIVATE_READ, Mode::empty(), WITHIN_POOL) {
+        Ok(fd) => File::from(fd),
+        Err(Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    handoff::private_file(&file)?;
+    Ok(Some(Activation::read(file)?))
 }
 
 pub(super) struct Recovery {
@@ -120,7 +242,10 @@ pub(super) struct Recovery {
 impl Recovery {
     pub(super) fn disposition(&self) -> &'static str {
         if self.completion_blocker.is_none() {
-            VERIFIED_SUCCESS
+            match self.activation.phase {
+                Phase::Draining => "failed",
+                _ => VERIFIED_SUCCESS,
+            }
         } else {
             self.activation.disposition()
         }
@@ -132,27 +257,30 @@ pub(super) fn recover(pool: &File) -> Result<Option<Recovery>> {
         return Ok(None);
     }
     let _lease = handoff::lock_install()?;
-    let file = match fs::openat2(pool, ACTIVATION, PRIVATE_READ, Mode::empty(), WITHIN_POOL) {
-        Ok(fd) => File::from(fd),
-        Err(Errno::NOENT) => {
-            return Err(
-                invalid("firmware activation disappeared while acquiring its lease").into(),
-            );
-        }
-        Err(error) => return Err(error.into()),
-    };
-    handoff::private_file(&file)?;
-    let activation = Activation::read(file)?.reconcile(pool)?;
+    let activation = pending(pool)?
+        .ok_or_else(|| invalid("firmware activation disappeared while acquiring its lease"))?
+        .reconcile(pool)?;
     let evidence = result::inspect(pool, &activation);
     let completion_blocker = if activation.phase == Phase::Draining {
-        Some("Guest drain was interrupted before firmware dispatch".into())
+        activation
+            .cancel_drain(pool)
+            .err()
+            .map(|error| error.to_string())
     } else if activation.phase == Phase::RebootPending {
-        match evidence.verify_completion(pool, &activation) {
-            Ok(()) => {
-                commit_verified(pool, &activation, &serde_json::to_value(&evidence)?)?;
-                None
+        if matches!(&evidence, result::Evidence::SameBoot { .. }) {
+            let request = dispatch::queue_reboot(&activation);
+            Some(match request {
+                Ok(()) => "the requested firmware reboot has not completed".into(),
+                Err(error) => error.to_string(),
+            })
+        } else {
+            match evidence.verify_completion(pool, &activation) {
+                Ok(()) => {
+                    commit_verified(pool, &activation, &serde_json::to_value(&evidence)?)?;
+                    None
+                }
+                Err(error) => Some(error.to_string()),
             }
-            Err(error) => Some(error.to_string()),
         }
     } else {
         Some("the recorded activation phase requires device-specific recovery".into())
@@ -285,6 +413,14 @@ mod tests {
             offer_sha256: "1".repeat(64),
             device_id: "2".repeat(40),
             phase,
+            guest_was_active: true,
+            mains_required: false,
+            queued: (phase == Phase::RebootPending).then(|| {
+                serde_json::from_value(
+                    serde_json::json!({"file": "firmware.cap", "sha256": "3".repeat(64)}),
+                )
+                .unwrap()
+            }),
             esrt_before: None,
         }
     }

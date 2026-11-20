@@ -427,7 +427,7 @@ index 0000000..14d0cd2
 +#define FU_FVCA_POOL FU_FVCA_RUN "/host-data"
 +#define FU_FVCA_HISTORY FU_FVCA_POOL "/firmware-update/history"
 +#define FU_FVCA_ESP_BINDING "firmware-esp-binding"
-+#define FU_FVCA_DRAIN_RECEIPT "firmware-guest-drained"
++#define FU_FVCA_DRAIN_RECEIPT "firmware-activation/guest-drained"
 +#define FU_FVCA_LEASE "guest-capture.lock"
 +#define FU_FVCA_FILE_FLAGS (O_RDONLY | O_NOCTTY | O_NONBLOCK | O_CLOEXEC)
 +#define FU_FVCA_DIR_FLAGS (O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)
@@ -736,7 +736,7 @@ index 0000000..14d0cd2
 +		return fu_fvca_deny(error, "FVCA firmware writer cannot determine the current boot");
 +	boot_id[36] = '\0';
 +	if (!g_uuid_string_is_valid(boot_id) ||
-+	    !fu_fvca_match(record, "schema", "fvca-firmware-activation-v1") ||
++	    !fu_fvca_match(record, "schema", "fvca-firmware-activation-v2") ||
 +	    !fu_fvca_match(record, "phase", "flashing") ||
 +	    !fu_fvca_match(record, "boot_id", boot_id) ||
 +	    !fu_fvca_match(record, "transaction", transaction) ||

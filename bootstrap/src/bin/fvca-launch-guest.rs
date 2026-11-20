@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use fvca_initrd_bootstrap::{guest_boot::{self, SERVICE_GUEST_UUID as UUID}, invalid, run, vm_confinement};
 use fvca_libvirt_boundary::{Connection, Domain, EventLoop, PAUSED, RUNNING};
-use fvca_trial_authorization::GUEST_CAPTURE_LOCK as CAPTURE_LOCK;
+use fvca_trial_authorization::{GUEST_CAPTURE_LOCK as CAPTURE_LOCK, GUEST_OPERATION_LOCK as OPERATION_LOCK};
 
 #[path = "fvca-launch-guest/capture.rs"]
 mod capture;
@@ -28,7 +28,6 @@ const DISK: &str = "/run/fvca/host-data/vms/service-guest/data.raw";
 const ALIAS: &str = "/run/fvca/guest-state.raw";
 const PID: &str = "/run/libvirt/qemu/fvca-service-guest.pid";
 const RECEIPT: &str = "/run/fvca/guest-clean-stop";
-const OPERATION_LOCK: &str = "/run/fvca/guest-operation.lock";
 const ATTACHMENT: &str = "data-attachment";
 
 #[path = "fvca-launch-guest/update.rs"]
@@ -338,8 +337,8 @@ fn activate() -> io::Result<()> {
         [option] if option == "--activate-hypervisor-trial" => update::activate(false),
         [option] if option == "--return-healthy-hypervisor" => update::activate(true),
         [option] if option == "--recover-hypervisor-activation" => update::recover(),
-        [option, transaction, offer] if option == "--drain-for-firmware" => {
-            update::drain_firmware(transaction, offer)
+        [option, transaction, offer] if option == "--verify-firmware-drain" => {
+            update::verify_firmware_drain(transaction, offer)
         }
         [option] if option == "--activate-guest-trial" => guest_trial::activate(),
         [option] if option == "--boot-guest-trial" => guest_trial::boot_attempt(),

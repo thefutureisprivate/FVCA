@@ -9,7 +9,8 @@ use std::path::Path;
 use std::process::Command;
 
 use fvca_trial_authorization::{
-    GUEST_CAPTURE_LOCK, PEER_ENROLLMENT, PROMOTION_ENROLLMENT, peer_partitions,
+    GUEST_CAPTURE_LOCK, GUEST_OPERATION_LOCK, PEER_ENROLLMENT, PROMOTION_ENROLLMENT,
+    peer_partitions,
 };
 
 use crate::{invalid, run};
@@ -161,8 +162,21 @@ fn enable_unit(unit: &str) -> io::Result<()> {
     symlink(format!("/usr/lib/systemd/system/{unit}"), wants.join(unit))
 }
 
-fn prepare_firmware_lease() -> io::Result<()> {
-    let lock = Path::new(GUEST_CAPTURE_LOCK);
+fn prepare_firmware_control() -> io::Result<()> {
+    prepare_lock(Path::new(GUEST_CAPTURE_LOCK))?;
+    prepare_lock(Path::new(GUEST_OPERATION_LOCK))?;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(fvca_trial_authorization::firmware::RUN_DIRECTORY)?;
+    run(Command::new("/usr/bin/chcon")
+        .args([
+            "--no-dereference",
+            "system_u:object_r:fvca_firmware_boot_input_t:s0",
+        ])
+        .arg(GUEST_CAPTURE_LOCK))
+}
+
+fn prepare_lock(lock: &Path) -> io::Result<()> {
     match fs::OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -182,12 +196,7 @@ fn prepare_firmware_lease() -> io::Result<()> {
     {
         return Err(invalid("invalid Host lifecycle lease file"));
     }
-    run(Command::new("/usr/bin/chcon")
-        .args([
-            "--no-dereference",
-            "system_u:object_r:fvca_firmware_boot_input_t:s0",
-        ])
-        .arg(lock))
+    Ok(())
 }
 
 pub fn activate_if_selected() -> io::Result<()> {
@@ -265,7 +274,7 @@ pub fn activate_firmware_if_selected(
     };
     if let Err(error) = prepare_staging(FIRMWARE_STATE)
         .and_then(|()| prepare_firmware_history())
-        .and_then(|()| prepare_firmware_lease())
+        .and_then(|()| prepare_firmware_control())
     {
         eprintln!("FVCA_HOST_FIRMWARE_ENROLLMENT_BLOCKED {error}");
         return Ok(false);

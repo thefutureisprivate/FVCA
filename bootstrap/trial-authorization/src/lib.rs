@@ -14,6 +14,7 @@ pub const PENDING: &str = "pending-trial";
 pub const KEY_ARGUMENT: &str = "fvca.trial_key";
 pub const RUNNING_CONTEXT: &str = "/run/fvca/running-trial-context";
 pub const GUEST_CAPTURE_LOCK: &str = "/run/fvca/guest-capture.lock";
+pub const GUEST_OPERATION_LOCK: &str = "/run/fvca/guest-operation.lock";
 pub const PEER_PARTITIONS: usize = 7;
 pub const PEER_ENROLLMENT: &str = "os-update-peer";
 pub const PEER_BYTES: usize = PEER_PARTITIONS * 37;

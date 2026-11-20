@@ -160,6 +160,27 @@ impl Bus {
         Ok((bytes, capsule_on_disk))
     }
 
+    pub(super) fn stage_capsule(
+        &self,
+        owner: &CStr,
+        identity: [&CStr; 8],
+        operation: [&CStr; 2],
+        versions_raw: [u32; 2],
+        cabinet: BorrowedFd<'_>,
+        lease: BorrowedFd<'_>,
+    ) -> Result<()> {
+        let call = self.prepare(owner, c"/", c"org.freedesktop.fwupd", c"StageFvcaCapsule")?;
+        for value in identity.into_iter().chain(operation) {
+            call.append(b's', value.as_ptr().cast())?;
+        }
+        for value in &versions_raw {
+            call.append(b'u', std::ptr::from_ref(value).cast())?;
+        }
+        call.append_fd(cabinet)?;
+        call.append_fd(lease)?;
+        self.send(&call, CABINET_TIMEOUT)?.finish()
+    }
+
     fn prepare(
         &self,
         destination: &CStr,

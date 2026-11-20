@@ -1,5 +1,5 @@
 [Unit]
-Description=Discover and stage qualified Host firmware
+Description=Discover and activate qualified Host firmware
 Wants=fvca-fwupd.service
 After=fvca-base-ready.service fvca-fwupd.service
 AssertSecurity=uefi-secureboot
@@ -19,7 +19,7 @@ Restart=on-failure
 RestartSec=5min
 UMask=0077
 CapabilityBoundingSet=
-InaccessiblePaths=-/run/dbus -/run/systemd/private
+InaccessiblePaths=-/run/dbus
 MemoryDenyWriteExecute=yes
 NoNewPrivileges=yes
 PrivateDevices=yes
@@ -29,7 +29,7 @@ ProtectHome=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectSystem=strict
-ReadWritePaths=/run/fvca/host-data
+ReadWritePaths=/run/fvca/host-data /run/fvca/firmware-activation
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 IPAddressDeny=any
 StandardOutput=journal+console
