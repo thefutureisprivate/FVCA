@@ -7,6 +7,9 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+pub use fvca_trial_authorization::APPROVAL_LIMIT;
+use fvca_trial_authorization::{Authorization, Entry, PENDING, Trial, authorization, trial};
+
 use crate::{find_partition, identity, invalid, recovery, runtime, sys_block};
 
 mod promotion;
@@ -14,7 +17,6 @@ mod standing;
 
 pub const PROMOTION_KEY: &str = "/usr/lib/fvca/hypervisor-promotion-key";
 pub const TRIAL_KEY: &str = "/usr/lib/fvca/hypervisor-trial-key";
-pub const APPROVAL_LIMIT: usize = 2048;
 const AUTHORIZATION: &str = "/usr/lib/fvca/hypervisor-trial";
 const CANDIDATE: &str = "/usr/lib/fvca/hypervisor-trial-candidate";
 const CANDIDATE_ARGUMENT: &str = "fvca.hypervisor_trial";
@@ -38,28 +40,6 @@ const HEALTH_UNIT: &str = concat!(
     "StandardOutput=journal+console\nStandardError=journal+console\n",
 );
 
-#[derive(PartialEq, Eq)]
-struct Entry<'a> {
-    id: u16,
-    esp: &'a str,
-}
-
-#[derive(PartialEq, Eq)]
-struct Trial<'a> {
-    transaction: &'a str,
-    stable: Entry<'a>,
-    candidate: Entry<'a>,
-}
-
-struct Authorization<'a> {
-    trial: Trial<'a>,
-    digest: &'a str,
-    bytes: u64,
-    core: &'a str,
-    runtime: &'a str,
-    guest: &'a str,
-}
-
 struct Evidence<'a> {
     transaction: &'a str,
     boot: &'a str,
@@ -70,33 +50,22 @@ struct Evidence<'a> {
     runtime: &'a str,
 }
 
-fn entry<'a>(line: &'a str, field: &str) -> io::Result<Entry<'a>> {
-    let (id, esp) = line
-        .strip_prefix(field)
-        .and_then(|value| value.split_once(','))
-        .ok_or_else(|| invalid("invalid trial boot entry"))?;
-    identity(id, "", &[4], '-')?;
-    let id = u16::from_str_radix(id, 16).map_err(io::Error::other)?;
-    Ok(Entry {
-        id,
-        esp: recovery::uuid(esp)?,
-    })
-}
-
-fn trial<'a>(transaction: &'a str, stable: &'a str, candidate: &'a str) -> io::Result<Trial<'a>> {
-    let transaction = identity(transaction, "transaction=", &[8, 4, 4, 4, 12], '-')?;
-    let stable = entry(stable, "stable=")?;
-    let candidate = entry(candidate, "candidate=")?;
-    if stable.id == candidate.id || stable.esp == candidate.esp {
+pub fn verify_standing_key(cmdline: &str) -> io::Result<()> {
+    use fvca_trial_authorization::{KEY_ARGUMENT, key_marker};
+    let mut markers = cmdline
+        .split_ascii_whitespace()
+        .filter(|arg| arg.split('=').next() == Some(KEY_ARGUMENT));
+    let marker = markers.next();
+    let key = match read(Path::new(TRIAL_KEY), 32) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound && marker.is_none() => return Ok(()),
+        result => result?,
+    };
+    if key.len() != 32 || marker != Some(key_marker(&key).as_str()) || markers.next().is_some() {
         return Err(invalid(
-            "stable and candidate boot entries must be distinct",
+            "UKI trial key marker differs from the signed initramfs authority",
         ));
     }
-    Ok(Trial {
-        transaction,
-        stable,
-        candidate,
-    })
+    Ok(())
 }
 
 fn digest<'a>(line: &'a str, field: &str) -> io::Result<&'a str> {
@@ -104,45 +73,6 @@ fn digest<'a>(line: &'a str, field: &str) -> io::Result<&'a str> {
         line.strip_prefix(field)
             .ok_or_else(|| invalid("missing trial digest"))?,
     )
-}
-
-fn authorization(text: &str) -> io::Result<Authorization<'_>> {
-    let fields: Vec<_> = text.split('\n').collect();
-    let [
-        "FVCA-HYPERVISOR-TRIAL-2",
-        transaction,
-        stable,
-        candidate,
-        esp,
-        bytes,
-        core,
-        vm_runtime,
-        guest,
-        "",
-    ] = fields.as_slice()
-    else {
-        return Err(invalid("invalid Hypervisor trial authorization"));
-    };
-    let bytes = bytes
-        .strip_prefix("candidate_esp_bytes=")
-        .and_then(|value| {
-            value
-                .parse::<u64>()
-                .ok()
-                .filter(|bytes| bytes.to_string() == value)
-        })
-        .filter(|bytes| {
-            (4096..=4 * 1024 * 1024 * 1024).contains(bytes) && bytes.is_multiple_of(4096)
-        })
-        .ok_or_else(|| invalid("invalid candidate ESP size"))?;
-    Ok(Authorization {
-        trial: trial(transaction, stable, candidate)?,
-        digest: digest(esp, "candidate_esp_sha256=")?,
-        bytes,
-        core: digest(core, "candidate_core=")?,
-        runtime: digest(vm_runtime, "candidate_runtime=")?,
-        guest: digest(guest, "guest_bundle=")?,
-    })
 }
 
 fn candidate_selection(text: &str) -> io::Result<Trial<'_>> {
@@ -512,7 +442,7 @@ pub fn arm_if_authorized(
             ));
         }
         directory = record_directory()?;
-        match read_record(&directory.join(standing::PENDING)) {
+        match read_record(&directory.join(PENDING)) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             result => result?,
         }
@@ -533,7 +463,7 @@ pub fn arm_if_authorized(
         if current_esp == Some(trial.candidate.esp) {
             return Ok(());
         }
-        standing.require_stable(active, guest, epoch)?;
+        standing::require_stable(standing, active, guest, epoch)?;
     } else if guest != Some(approved.guest) {
         return Err(invalid(
             "stable boot must use the approved trial Guest bundle",
@@ -587,7 +517,7 @@ pub fn arm_if_authorized(
     }
     verify_candidate_esp(&approved)?;
     if let Some(standing) = standing {
-        standing.require_fresh()?;
+        standing::require_fresh(&standing)?;
     }
 
     // Consume the signed authorization durably before asking firmware for the one-shot trial.
@@ -683,8 +613,8 @@ pub fn start_candidate(
         .transpose()?;
     let text = match &standing {
         Some(standing) => {
-            standing.require_candidate(epoch)?;
-            standing.require_fresh()?;
+            standing::require_epoch(standing, epoch, standing.candidate_epoch)?;
+            standing::require_fresh(standing)?;
             standing.attempt
         }
         None => std::str::from_utf8(&attempt).map_err(io::Error::other)?,

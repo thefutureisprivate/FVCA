@@ -373,6 +373,7 @@ dependencies = [
  "aws-lc-rs",
  "cc",
  "futures-util",
+ "fvca-trial-authorization",
  "hex",
  "jiff",
  "pkg-config",
@@ -387,6 +388,10 @@ dependencies = [
  "tough",
  "url",
 ]
+
+[[package]]
+name = "fvca-trial-authorization"
+version = "0.1.0"
 
 [[package]]
 name = "getrandom"

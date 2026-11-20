@@ -227,6 +227,21 @@ For an eligible release, the installer rechecks both boot signatures, the signed
 
 `tests/check-standing-hypervisor-install.py` uses the release client built with `swtpm-test`. Its fixture directory contains PIN-less integrated `installed-a.raw` and `installed-b.raw` images at epochs 1 and 2, their exact immutable `boot-a.raw` and `boot-b.raw` images, common `vm-runtime.raw` and `guest-boot.raw` artifacts, and the enrollment hashes in `epoch-policy-fingerprint` and `storage-pcr-fingerprint`. Supply separate software TPM states at each floor and use an output directory on the same filesystem as the fixture.
 
+### Deliver a prepared Hypervisor trial from the release channel
+
+Set `trial_key_ed25519` in the signed standing policy to the lowercase hex of the 32-byte Ed25519 trial public key. Compose both slots with this key using `--boot-trial-public-key`. The signed UKI command lines identify the key and the initramfs verifies that identity against its pinned authority. Use a trial key distinct from the owner, qualification, TUF, and image signing keys.
+
+In the qualified channel announcement's `release` object, include `trial_approval` with the exact envelope's `bytes` and `sha256`. Publish the independently signed envelope as `hypervisor-EPOCH-MANIFEST_SHA256-boot-trial.bin` in the same TUF repository. The envelope uses the standing trial format below.
+
+```sh
+fvca-release-client --discover-os-release trusted-root.json depot.json intake-state \
+  policy.json policy.sig owner.public --deliver-prepared-trial
+```
+
+Run delivery with the authenticated Btrfs Host data mounted at `/run/fvca/host-data`. The client refreshes the channel, checks the maintenance window and holds, and verifies the trial signature and validity. It opens both reviewed disks read-only and verifies the installed inactive slot against the staged release before checking both Secure Boot signatures, the enrolled TPM floor, the trial keys, and the candidate transaction. A complete approval is durably published to the Host inbox and reported as `delivered_trial`. An identical retry confirms the existing file. A different pending envelope requires reconciliation before another delivery. Scheduling, guest drain, and reboot orchestration remain release gates.
+
+`tests/check-standing-hypervisor-install.py --trial-key KEY` adds the delivery checks. Compose the fixture pair with the matching trial authority. Include the candidate selection in `candidate.txt` and the common verity roots as `core`, `runtime`, and `guest` in `roots.json`. Use a disposable Btrfs mount at the fixed Host data path.
+
 ## Hypervisor runtime candidate
 
 The separate mkosi recipe builds `vm-runtime.raw`, a signed EROFS system extension. It contains QEMU, the modular libvirt QEMU, log and lock daemons, the selected OVMF firmware and restic. The VMM is built offline from the pinned upstream QEMU release and the build checks that KVM is its only accelerator. The development appliance uses private UNIX sockets for libvirt and requires SELinux confinement for QEMU processes. The build strips Fedora's automatic service hooks and management commands before signing, records the exact core root hash in the extension and checks the shared package versions. [QEMU release archive and signing key](https://www.qemu.org/download/)
@@ -350,7 +365,7 @@ stable_guest_bundle=STABLE_GUEST_BUNDLE_VERITY_ROOT
 
 Sign the complete bytes with Ed25519 and prefix the body with the 64-byte detached signature. The envelope is at most 2048 bytes. Publish it as `boot-trials/pending-trial` through the authorized maintenance path. The directory is root-owned with mode `0700`. Publish a regular root-owned file with mode `0600` via atomic rename and flush the file and directory. [OpenSSL Ed25519 signing](https://docs.openssl.org/3.5/man1/openssl-pkeyutl/)
 
-On the stable boot, the verifier checks the signature, running roots, epoch, TPM policy, EFI entry order and candidate ESP. It persists the exact signed envelope before arming the one-shot boot. The candidate verifies that durable envelope with its pinned key, checks its own epoch and roots, and records health after Guest readiness. Returning to the stable slot consumes the existing transaction record and reports any matching health receipt. An independently authorized promotion can use the original inner trial and health records. Automatic inbox delivery, reboot coordination, and watchdog-backed retries remain release gates.
+On the stable boot, the verifier checks the signature, running roots, epoch, TPM policy, EFI entry order and candidate ESP. It persists the exact signed envelope before arming the one-shot boot. The candidate verifies that durable envelope with its pinned key, checks its own epoch and roots, and records health after Guest readiness. Returning to the stable slot consumes the existing transaction record and reports any matching health receipt. An independently authorized promotion can use the original inner trial and health records. Reboot coordination and watchdog-backed retries remain release gates.
 
 `tests/check-hypervisor-standing-trial.py` uses a disposable enrolled software TPM, two signed 4Kn boot images and matching authenticated Btrfs members. It exercises signature and expiry refusal, a PIN-less candidate boot through Guest readiness, and replay of the consumed trial.
 

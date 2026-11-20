@@ -45,6 +45,32 @@ def software_tpm(source):
                 emulator.wait(timeout=10)
 
 
+def trial_target(root, original, candidate, key, stamp):
+    stable, trial = (original / f"boot-{side}.raw" for side in ("a", "b"))
+    roots = json.loads((original / "roots.json").read_text())
+    epoch_policy = (original / "epoch-policy-fingerprint").read_text().strip()
+    trial_record = (original / "candidate.txt").read_text().splitlines()
+    transaction = trial_record[1].removeprefix("transaction=")
+    assert len(trial_record) == 4
+    esp = gpt["partitions"](trial)["fvca-esp"]
+    payload = root / "trial-message"
+    payload.write_text(
+        f"FVCA-HYPERVISOR-STANDING-TRIAL-1\nnot_before={stamp-30}\nexpires={stamp+1800}\n"
+        f"stable_epoch=1\ncandidate_epoch=2\nepoch_policy_sha256={epoch_policy}\n"
+        f"stable_core={roots['core']}\nstable_runtime={roots['runtime']}\nstable_guest_bundle={roots['guest']}\n"
+        "FVCA-HYPERVISOR-TRIAL-2\n" + "\n".join(trial_record[1:]) + "\n"
+        f"candidate_esp_sha256={gpt['digest'](trial, esp).hex()}\ncandidate_esp_bytes={esp[1]}\n"
+        f"candidate_core={roots['core']}\ncandidate_runtime={roots['runtime']}\nguest_bundle={roots['guest']}\n",
+        encoding="ascii",
+    )
+    signature = subprocess.check_output(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", key, "-in", payload])
+    envelope = root / f"{tuf['target_prefix'](candidate)}-boot-trial.bin"
+    envelope.write_bytes(signature + payload.read_bytes())
+    authority = subprocess.check_output(["openssl", "pkey", "-in", key, "-pubout", "-outform", "DER"])
+    assert len(signature) == 64 and len(authority) == 44 and stable.is_file()
+    return envelope, transaction, authority[-32:].hex()
+
+
 def qualify(args):
     root = args.output
     root.mkdir(mode=0o700)
@@ -87,12 +113,19 @@ def qualify(args):
         resolutions[label] = choice
         sources.update(contents)
     candidate = resolutions["b"]["manifest_sha256"]
+    approval_target = None
+    candidate_release = {"epoch": 2, "manifest_sha256": candidate,
+                         "activation": {"urgency": "security", "activate_by": stamp + 900}}
+    if args.trial_key is not None:
+        approval_target, transaction, trial_authority = trial_target(root, original, resolutions["b"], args.trial_key, stamp)
+        sources[approval_target.name] = approval_target
+        candidate_release["trial_approval"] = {"bytes": approval_target.stat().st_size,
+                                               "sha256": tuf["sha256"](approval_target)}
     pointer = root / "fvca-os-hypervisor-stable.json"
     sig = channel["signed"](pointer, {
         "schema": "fvca-os-channel-v1", "role": "hypervisor", "channel": "stable", "sequence": 2,
         "valid_from": stamp - 60, "expires": stamp + 1800, "compatibility_sha256": compatibility,
-        "release": {"epoch": 2, "manifest_sha256": candidate,
-                    "activation": {"urgency": "security", "activate_by": stamp + 900}},
+        "release": candidate_release,
     }, approval)
     sources |= {pointer.name: pointer, sig.name: sig}
     targets = {}
@@ -129,15 +162,17 @@ def qualify(args):
         "max_release_bytes": max(item["max_release_bytes"] for item in resolutions.values()), "max_staged_bytes": budget,
         "hypervisor_gpt": disk_policy,
     }
+    if approval_target is not None:
+        policy["trial_key_ed25519"] = trial_authority
     policy_file = root / "policy.json"
 
-    def command(settings):
+    def command(settings, operation="--prepare-inactive-gpt"):
         proof = channel["signed"](policy_file, settings, owner)
         return [args.client, "--discover-os-release", trusted, config, cache, policy_file, proof, public,
-                "--prepare-inactive-gpt"]
+                operation]
 
-    def run(label, settings, env, *, refusal=None):
-        result = subprocess.run(command(settings), env=env, capture_output=True, timeout=130, check=False)
+    def run(label, settings, env, *, refusal=None, operation="--prepare-inactive-gpt"):
+        result = subprocess.run(command(settings, operation), env=env, capture_output=True, timeout=130, check=False)
         log = result.stderr + result.stdout
         (root / f"{label}.log").write_bytes(log)
         if refusal is not None:
@@ -149,7 +184,18 @@ def qualify(args):
     hold = {"manifest_sha256": candidate, "until": stamp + 600}
     status = run("hold", policy | {"hold": hold}, os.environ)
     assert status["disposition"] == "hold" and status["prepared_inactive_slot"] is None
+    inbox = Path("/run/fvca/host-data/boot-trials/pending-trial")
+    deliver = "--deliver-prepared-trial"
+    if approval_target is not None:
+        assert not inbox.exists()
+        status = run("hold-delivery", policy | {"hold": hold}, os.environ, operation=deliver)
+        assert status["disposition"] == "hold" and status["delivered_trial"] is None and not inbox.exists()
     live = policy | {"revision": 2}
+    if approval_target is not None:
+        with software_tpm(args.floor_one) as env:
+            run("unprepared-delivery-refused", live, env, operation=deliver,
+                refusal=b"installed inactive slot differs from the prepared trial release")
+        assert not inbox.exists()
     with software_tpm(args.floor_two) as env:
         run("floor-refusal", live, env, refusal=b"below the live TPM floor")
     assert gpt["sparse_fingerprint"](inactive) == original_inactive
@@ -197,10 +243,41 @@ def qualify(args):
     assert inspect(inactive) == disk_policy["b"]
     print("standing policy prepared only the inactive slot and verified a write-free retry", flush=True)
 
+    if approval_target is not None:
+        disk_before_delivery = gpt["sparse_fingerprint"](inactive)
+        with software_tpm(args.floor_two) as env:
+            run("delivery-floor-refusal", live, env, operation=deliver, refusal=b"below the live TPM floor")
+        assert not inbox.exists()
+        with software_tpm(args.floor_one) as env:
+            other = CryptoSigner.generate_ed25519().public_key.keyval["public"]
+            run("delivery-signature-refusal", live | {"revision": 5, "trial_key_ed25519": other}, env,
+                operation=deliver, refusal=b"invalid independent standing trial signature")
+            assert not inbox.exists()
+            live = live | {"revision": 6}
+            inbox.parent.mkdir(mode=0o700)
+            occupied = b"disposable competing inbox record"
+            inbox.write_bytes(occupied)
+            run("delivery-conflict", live, env, operation=deliver,
+                refusal=b"another trial already occupies the Host inbox")
+            assert inbox.read_bytes() == occupied
+            inbox.unlink()
+            receipt = run("delivered", live, env, operation=deliver)
+            assert receipt["delivered_trial"] == transaction
+            assert inbox.read_bytes() == approval_target.read_bytes()
+            assert inbox.stat().st_mode & 0o777 == 0o600
+            received = inbox.stat()
+            assert run("identical-delivery", live, env, operation=deliver)["delivered_trial"] == transaction
+            assert inbox.stat().st_ino == received.st_ino
+        assert gpt["sparse_fingerprint"](inactive) == disk_before_delivery
+        assert gpt["sparse_fingerprint"](active) == stable
+        print("installed bytes and the live TPM floor authorized exactly one durable inbox publication", flush=True)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("client", "fixture", "certificate", "floor-one", "floor-two", "output"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute(), required=True)
+    parser.add_argument("--trial-key", type=lambda value: Path(value).absolute(),
+                        help="also test delivery against a disposable mounted /run/fvca/host-data")
     os.umask(0o077)
     qualify(parser.parse_args())

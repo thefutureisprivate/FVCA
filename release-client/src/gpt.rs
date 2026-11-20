@@ -12,6 +12,7 @@ use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use fvca_trial_authorization::{KEY_ARGUMENT, Standing, key_marker};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -93,6 +94,8 @@ struct ReleaseEpoch<'a> {
     policy: &'a str,
     auto_pcr_key: Option<&'a str>,
     require_trial: bool,
+    trial_transaction: Option<&'a str>,
+    trial_key: Option<&'a [u8]>,
 }
 
 #[derive(Deserialize)]
@@ -222,11 +225,26 @@ fn verify_epoch(efi: &Path, expected: &ReleaseEpoch<'_>) -> Result<()> {
         let transaction = markers
             .next()
             .and_then(|arg| arg.split_once('=').map(|(_, id)| id));
-        if !transaction.is_some_and(layout::valid_uuid) || markers.next().is_some() {
+        if !transaction.is_some_and(layout::valid_uuid)
+            || markers.next().is_some()
+            || expected
+                .trial_transaction
+                .is_some_and(|wanted| transaction != Some(wanted))
+        {
             return Err(invalid(
                 "inactive Hypervisor UKI requires a signed candidate trial marker",
             )
             .into());
+        }
+    }
+    if let Some(key) = expected.trial_key {
+        let mut markers = cmdline
+            .split_ascii_whitespace()
+            .filter(|arg| arg.split('=').next() == Some(KEY_ARGUMENT));
+        if markers.next() != Some(key_marker(key).as_str()) || markers.next().is_some() {
+            return Err(
+                invalid("Hypervisor UKI does not pin the qualified trial authority").into(),
+            );
         }
     }
     Ok(())
@@ -408,6 +426,10 @@ pub fn inspect(path: &Path, sector: u64) -> Result<()> {
 
 fn reviewed(disk: &ReviewedDisk, sector: u64, write: bool) -> Result<(Disk, Layout<8>)> {
     let device = Disk::open(&disk.path, sector, write)?;
+    reviewed_layout(disk, sector, device)
+}
+
+fn reviewed_layout(disk: &ReviewedDisk, sector: u64, device: Disk) -> Result<(Disk, Layout<8>)> {
     let layout = Layout::read(&device.file, device.bytes, sector, HOST_DISK)?;
     if layout.fingerprint(&device, sector)? != disk.gpt_sha256 {
         return Err(invalid("installed GPT differs from the reviewed disk fingerprint").into());
@@ -449,6 +471,124 @@ pub fn install(plan: &Path, selected: &Selection, incoming: &Path, state_dir: &P
 }
 
 impl StandingSite {
+    fn slots(&self, active: install::Slot) -> (&ReviewedDisk, &ReviewedDisk) {
+        match active {
+            install::Slot::A => (&self.a, &self.b),
+            install::Slot::B => (&self.b, &self.a),
+        }
+    }
+
+    fn certificate(&self, scratch: &Path) -> Result<File> {
+        if !self.boot_certificate.is_absolute() {
+            return Err(invalid("reviewed Secure Boot certificate path must be absolute").into());
+        }
+        let bytes = state::read(&self.boot_certificate, MANIFEST_BYTES)?;
+        if hex::encode(Sha256::digest(&bytes)) != self.boot_certificate_sha256 {
+            return Err(invalid(
+                "Secure Boot certificate differs from standing installation policy",
+            )
+            .into());
+        }
+        let certificate = scratch.join("secure-boot.pem");
+        fs::write(&certificate, bytes)?;
+        Ok(state::open_regular(&certificate)?)
+    }
+
+    pub(crate) fn verify_prepared(
+        &self,
+        active: (install::Slot, u64, &str),
+        selected: &Selection,
+        incoming: &Path,
+        scratch: &Path,
+        approval: &Standing<'_>,
+        trial_key: &[u8],
+    ) -> Result<()> {
+        selected.require_update_from(active.1, active.2)?;
+        if approval.stable_epoch != active.1
+            || approval.candidate_epoch != selected.epoch
+            || approval.epoch_policy != self.epoch_policy_sha256
+        {
+            return Err(invalid(
+                "trial approval differs from the selected releases or TPM enrollment",
+            )
+            .into());
+        }
+        let (stable, inactive) = self.slots(active.0);
+        if !stable.path.is_absolute() || !inactive.path.is_absolute() {
+            return Err(invalid("reviewed Hypervisor disk paths must be absolute").into());
+        }
+        let sector = self.sector_size;
+        let (stable_disk, stable_layout) =
+            reviewed_layout(stable, sector, Disk::observe(&stable.path, sector)?)?;
+        let (inactive_disk, inactive_layout) =
+            reviewed_layout(inactive, sector, Disk::observe(&inactive.path, sector)?)?;
+        require_distinct_disks(
+            (&stable_disk, &stable_layout),
+            (&inactive_disk, &inactive_layout),
+        )?;
+        let candidate = Artifact::open(incoming, sector)?;
+        candidate.fits(&inactive_layout)?;
+        let authorized = &approval.authorization;
+        if authorized.trial.stable.esp != stable_layout.regions[0].uuid
+            || authorized.trial.candidate.esp != inactive_layout.regions[0].uuid
+            || authorized.bytes != inactive_layout.regions[0].extent.bytes
+            || authorized.digest != hex::encode(candidate.digests[0])
+        {
+            return Err(invalid(
+                "trial approval differs from the reviewed EFI partitions or selected ESP bytes",
+            )
+            .into());
+        }
+        for index in 0..SLOT.len() {
+            if !candidate.matches(&inactive_disk, &inactive_layout, index)? {
+                return Err(invalid(
+                    "installed inactive slot differs from the prepared trial release",
+                )
+                .into());
+            }
+        }
+        let cert = self.certificate(scratch)?;
+        loader(
+            &stable_disk.file,
+            stable_layout.regions[0].extent,
+            &cert,
+            scratch,
+            &ReleaseEpoch {
+                number: active.1,
+                policy: &self.epoch_policy_sha256,
+                auto_pcr_key: Some(&self.storage_pcr_key_fingerprint),
+                require_trial: false,
+                trial_transaction: None,
+                trial_key: Some(trial_key),
+            },
+        )?;
+        loader(
+            &inactive_disk.file,
+            inactive_layout.regions[0].extent,
+            &cert,
+            scratch,
+            &ReleaseEpoch {
+                number: selected.epoch,
+                policy: &self.epoch_policy_sha256,
+                auto_pcr_key: Some(&self.storage_pcr_key_fingerprint),
+                require_trial: true,
+                trial_transaction: Some(authorized.trial.transaction),
+                trial_key: Some(trial_key),
+            },
+        )?;
+        self.require_floor(active.1, selected.epoch)
+    }
+
+    fn require_floor(&self, active: u64, candidate: u64) -> Result<()> {
+        let current = floor::read_current(&self.epoch_policy_sha256)?;
+        if current == 0 || active < current || candidate < current {
+            return Err(
+                invalid("installed recovery or candidate is below the live TPM floor").into(),
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) fn install(
         &self,
         active: (install::Slot, u64, &str),
@@ -457,10 +597,7 @@ impl StandingSite {
         state_dir: &Path,
         authorize: &dyn Fn() -> Result<()>,
     ) -> Result<()> {
-        let (stable, recovery) = match active.0 {
-            install::Slot::A => (&self.a, &self.b),
-            install::Slot::B => (&self.b, &self.a),
-        };
+        let (stable, recovery) = self.slots(active.0);
         if !valid_digest(&self.boot_certificate_sha256)
             || !valid_digest(&self.storage_pcr_key_fingerprint)
         {
@@ -532,27 +669,13 @@ fn install_reviewed(
         .tempdir_in(state_dir)?;
     let cert = match &standing {
         None => state::open_regular(&plan.boot_certificate)?,
-        Some(standing) => {
-            let bytes = state::read(&plan.boot_certificate, MANIFEST_BYTES)?;
-            if hex::encode(Sha256::digest(&bytes)) != standing.site.boot_certificate_sha256 {
-                return Err(invalid(
-                    "Secure Boot certificate differs from standing installation policy",
-                )
-                .into());
-            }
-            let certificate = scratch.path().join("secure-boot.pem");
-            fs::write(&certificate, bytes)?;
-            state::open_regular(&certificate)?
-        }
+        Some(standing) => standing.site.certificate(scratch.path())?,
     };
     let authorize = || -> Result<()> {
         if let Some(standing) = &standing {
-            let current = floor::read_current(&plan.epoch_policy_sha256)?;
-            if current == 0 || plan.active_epoch < current || selected.epoch < current {
-                return Err(
-                    invalid("installed recovery or candidate is below the live TPM floor").into(),
-                );
-            }
+            standing
+                .site
+                .require_floor(plan.active_epoch, selected.epoch)?;
             (standing.authorize)()?;
         }
         Ok(())
@@ -565,12 +688,16 @@ fn install_reviewed(
         policy: &plan.epoch_policy_sha256,
         auto_pcr_key,
         require_trial: false,
+        trial_transaction: None,
+        trial_key: None,
     };
     let next_epoch = ReleaseEpoch {
         number: selected.epoch,
         policy: &plan.epoch_policy_sha256,
         auto_pcr_key,
         require_trial: standing.is_some(),
+        trial_transaction: None,
+        trial_key: None,
     };
     let (active, active_layout) = reviewed(&plan.active, sector, false)?;
     let (inactive, inactive_layout) = reviewed(&plan.inactive, sector, true)?;

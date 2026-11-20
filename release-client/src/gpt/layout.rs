@@ -100,6 +100,14 @@ fn sys_number(directory: &Path, name: &str) -> Result<u64> {
 
 impl Disk {
     pub fn open(path: &Path, sector: u64, write: bool) -> Result<Self> {
+        Self::access(path, sector, write, true)
+    }
+
+    pub(super) fn observe(path: &Path, sector: u64) -> Result<Self> {
+        Self::access(path, sector, false, false)
+    }
+
+    fn access(path: &Path, sector: u64, write: bool, exclusive: bool) -> Result<Self> {
         check_sector(sector)?;
         let path = path.canonicalize()?;
         let before = path.metadata()?;
@@ -107,7 +115,9 @@ impl Disk {
         let mut flags = OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY;
         if physical && path.starts_with("/dev") {
             // Claim the whole block device. Linux rejects this while a partition is in use.
-            flags |= OFlags::EXCL;
+            if exclusive {
+                flags |= OFlags::EXCL;
+            }
         } else if !before.is_file() {
             return Err(invalid(
                 "expected a whole NVMe namespace or a private disposable disk image",

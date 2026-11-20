@@ -33,6 +33,7 @@ fn activate() -> io::Result<()> {
     let slot = Slot::load()?;
     let protected_epoch = Path::new("/usr/lib/fvca/hypervisor-epoch").try_exists()?;
     let cmdline = fs::read_to_string("/proc/cmdline")?;
+    hypervisor_trial::verify_standing_key(&cmdline)?;
     let mut epochs = cmdline
         .split_ascii_whitespace()
         .filter(|arg| arg.split('=').next() == Some(HYPERVISOR_EPOCH_ARGUMENT));

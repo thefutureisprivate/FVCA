@@ -25,7 +25,7 @@ Path=/installed
 MatchPattern=@v
 InstancesMax=2
 ";
-const BTRFS_SUPER_MAGIC: u64 = 0x9123_683e;
+pub(crate) const BTRFS_SUPER_MAGIC: u64 = 0x9123_683e;
 
 #[derive(Clone, Copy)]
 pub enum Operation<'a> {

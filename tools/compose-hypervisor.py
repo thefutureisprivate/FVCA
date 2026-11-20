@@ -174,7 +174,8 @@ EPOCH_ARGUMENT = "fvca.hypervisor_epoch"
 PROMOTION_KEY = "hypervisor-promotion-key"
 PROMOTION_SUPPORT = "hypervisor-promotion-support-v2"
 STANDING_TRIAL_KEY = "hypervisor-trial-key"
-STANDING_TRIAL_SUPPORT = "hypervisor-standing-trial-support-v1"
+STANDING_TRIAL_SUPPORT = "hypervisor-standing-trial-support-v2"
+TRIAL_KEY_ARGUMENT = "fvca.trial_key"
 
 
 def approval_keys(args):
@@ -313,17 +314,20 @@ def assemble(args, work):
     stable_trial, _ = trial_selection(args.boot_trial, ids, guest_hash, candidate=False)
     candidate_trial, trial_arguments = trial_selection(args.boot_trial_candidate, ids, guest_hash,
                                                         candidate=True)
+    authorities = approval_keys(args)
+    trial_key_arguments = tuple(f"{TRIAL_KEY_ARGUMENT}={key.hex()}" for name, key in authorities
+                                if name == STANDING_TRIAL_KEY)
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
         extra=(*extra, *epoch, *guest, *backup, *backup_job_selection(args.backup_job, backup),
                *restore_selection(args.restore_authorization, backup),
                *retention_selection(args.retention_policy, backup),
                *stable_trial, *candidate_trial,
-               *approval_keys(args)),
+               *authorities),
     )
-    if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT) for arg in cmdline.split()):
+    if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT) for arg in cmdline.split()):
         raise ValueError("shared core already configures a Hypervisor epoch or trial")
-    cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments))
+    cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments, *trial_key_arguments))
     immutable = None
     if ids is None:
         disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)

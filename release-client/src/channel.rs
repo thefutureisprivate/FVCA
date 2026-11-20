@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
+use fvca_trial_authorization::{APPROVAL_LIMIT, Standing};
 use jiff::{Timestamp, tz::TimeZone};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,13 +14,14 @@ use tough::{IntoVec, Repository, TargetName};
 
 use crate::depot::{CONFIG_BYTES, Depot, METADATA_BYTES};
 use crate::{
-    MANIFEST_BYTES, Result, Role, Selection, gpt, install::Slot, invalid, load_repository, stage,
-    state, valid_digest,
+    MANIFEST_BYTES, Member, Result, Role, Selection, check_target, gpt, handoff, install::Slot,
+    invalid, load_repository, stage, state, valid_digest,
 };
 
 pub enum Operation {
     Discover,
     PrepareGpt,
+    DeliverTrial,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +45,7 @@ struct Policy {
     maintenance: Window,
     hold: Option<Hold>,
     hypervisor_gpt: Option<gpt::StandingSite>,
+    trial_key_ed25519: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -122,6 +125,8 @@ struct Candidate {
     epoch: u64,
     manifest_sha256: String,
     activation: Activation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trial_approval: Option<Member>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -161,6 +166,7 @@ struct Status<'a> {
     candidate: Option<&'a Candidate>,
     staged: Option<String>,
     prepared_inactive_slot: Option<Slot>,
+    delivered_trial: Option<String>,
     hold_until: Option<i64>,
     security_deadline_missed: bool,
 }
@@ -184,6 +190,10 @@ impl Policy {
             || !valid_digest(&self.qualification_key_ed25519)
             || self.minimum_epoch == 0
             || (self.role != Role::Hypervisor && self.hypervisor_gpt.is_some())
+            || self
+                .trial_key_ed25519
+                .as_ref()
+                .is_some_and(|key| self.hypervisor_gpt.is_none() || !valid_digest(key))
             || !(1..u64::MAX).contains(&self.max_release_bytes)
             || self.max_staged_bytes < self.max_release_bytes
             || self.hold.as_ref().is_some_and(|hold| {
@@ -215,6 +225,15 @@ impl Head {
             return Err(invalid("channel sequence is older than the active release").into());
         }
         if let Some(release) = &self.release {
+            if release.trial_approval.as_ref().is_some_and(|member| {
+                policy.trial_key_ed25519.is_none()
+                    || !(65..=APPROVAL_LIMIT as u64).contains(&member.bytes)
+                    || !valid_digest(&member.sha256)
+            }) {
+                return Err(
+                    invalid("channel trial approval is outside standing policy scope").into(),
+                );
+            }
             let current = release.manifest_sha256 == active.manifest_sha256;
             if !valid_digest(&release.manifest_sha256)
                 || release.epoch < active.epoch
@@ -245,6 +264,27 @@ fn verify(key: &[u8], bytes: &[u8], signature: &[u8], message: &str) -> Result<(
     UnparsedPublicKey::new(&ED25519, key)
         .verify(bytes, signature)
         .map_err(|_| invalid(message).into())
+}
+
+async fn trial_envelope(
+    repo: &Repository,
+    selected: &Selection,
+    member: &Member,
+) -> Result<Vec<u8>> {
+    let name = selected.name("boot-trial.bin")?;
+    if check_target(repo, &name, APPROVAL_LIMIT as u64, &member.sha256)? != member.bytes {
+        return Err(invalid("trial envelope length differs from the qualified channel").into());
+    }
+    let bytes = repo
+        .read_target(&name)
+        .await?
+        .ok_or_else(|| invalid("qualified trial envelope disappeared"))?
+        .into_vec()
+        .await?;
+    if bytes.len() as u64 != member.bytes {
+        return Err(invalid("trial envelope is incomplete").into());
+    }
+    Ok(bytes)
 }
 
 fn save(path: &Path, name: &str, value: &impl Serialize) -> Result<()> {
@@ -376,8 +416,19 @@ pub async fn discover(
     let policy: Policy = serde_json::from_slice(&file)?;
     let zone = policy.validate(Timestamp::now())?;
     let qualification = hex::decode(&policy.qualification_key_ed25519)?;
-    if qualification == owner {
-        return Err(invalid("owner and qualification authorities must use distinct keys").into());
+    let trial_key = policy
+        .trial_key_ed25519
+        .as_ref()
+        .map(hex::decode)
+        .transpose()?;
+    if qualification == owner
+        || trial_key
+            .as_ref()
+            .is_some_and(|key| *key == owner || *key == qualification)
+    {
+        return Err(
+            invalid("owner, qualification and trial authorities must use distinct keys").into(),
+        );
     }
     let initial_root = state::read(trusted_root, METADATA_BYTES)?;
     let config = state::read(config, CONFIG_BYTES)?;
@@ -399,12 +450,15 @@ pub async fn discover(
     }
     let installation = match operation {
         Operation::Discover => None,
-        Operation::PrepareGpt => Some(
+        Operation::PrepareGpt | Operation::DeliverTrial => Some(
             policy.hypervisor_gpt.as_ref().zip(active.slot).ok_or_else(|| {
                 invalid("offline preparation requires a signed Hypervisor disk policy and the active slot")
             })?,
         ),
     };
+    if matches!(operation, Operation::DeliverTrial) && trial_key.is_none() {
+        return Err(invalid("trial delivery requires a pinned standing trial authority").into());
+    }
     checkpoint(
         directory,
         "os-policy-checkpoint.json",
@@ -422,6 +476,7 @@ pub async fn discover(
         candidate: None,
         staged: None,
         prepared_inactive_slot: None,
+        delivered_trial: None,
         hold_until: None,
         security_deadline_missed: false,
     };
@@ -435,7 +490,8 @@ pub async fn discover(
     let depot = Depot::from_config(&config, policy.max_release_bytes.max(MANIFEST_BYTES))?;
     let repo = load_repository(depot, directory, initial_root, scratch.path()).await?;
     if repo.root().signed.keys.values().any(|key| {
-        matches!(key, Key::Ed25519 { keyval, .. } if keyval.public.as_ref() == qualification || keyval.public.as_ref() == owner)
+        matches!(key, Key::Ed25519 { keyval, .. } if keyval.public.as_ref() == qualification
+            || keyval.public.as_ref() == owner || trial_key.as_deref() == Some(keyval.public.as_ref()))
     }) {
         return Err(invalid("TUF and OS policy authorities must use distinct keys").into());
     }
@@ -510,26 +566,60 @@ pub async fn discover(
             if let Some((site, slot)) = installation
                 && matches!(disposition, Disposition::Ready)
             {
-                site.install(
-                    (slot, active.epoch, &active.manifest_sha256),
-                    &selection,
-                    &staged,
-                    directory,
-                    &|| {
-                        let now = Timestamp::now();
-                        require_fresh(now)?;
-                        if !matches!(
-                            eligibility(&policy, candidate, now, zone.clone()).0,
-                            Disposition::Ready
-                        ) {
-                            return Err(invalid(
-                                "Hypervisor release is no longer eligible for offline preparation",
-                            )
-                            .into());
-                        }
-                        Ok(())
-                    },
-                )?;
+                let eligible = || {
+                    let now = Timestamp::now();
+                    require_fresh(now)?;
+                    if !matches!(
+                        eligibility(&policy, candidate, now, zone.clone()).0,
+                        Disposition::Ready
+                    ) {
+                        return Err(invalid("Hypervisor release is no longer eligible for preparation or trial delivery").into());
+                    }
+                    Ok(())
+                };
+                let active = (slot, active.epoch, active.manifest_sha256.as_str());
+                match operation {
+                    Operation::DeliverTrial => {
+                        let member = candidate.trial_approval.as_ref().ok_or_else(|| {
+                            invalid("qualified channel does not authorize a trial envelope")
+                        })?;
+                        let envelope = trial_envelope(&repo, &selection, member).await?;
+                        let (proof, body) = envelope
+                            .split_first_chunk::<64>()
+                            .ok_or_else(|| invalid("truncated standing trial envelope"))?;
+                        let key = trial_key
+                            .as_deref()
+                            .ok_or_else(|| invalid("missing pinned trial authority"))?;
+                        verify(
+                            key,
+                            body,
+                            proof,
+                            "invalid independent standing trial signature",
+                        )?;
+                        let approval = Standing::parse(std::str::from_utf8(body)?)?;
+                        let authorize = || {
+                            eligible()?;
+                            approval.require_fresh(Timestamp::now().as_second().try_into()?)?;
+                            Ok(())
+                        };
+                        authorize()?;
+                        site.verify_prepared(
+                            active,
+                            &selection,
+                            &staged,
+                            scratch.path(),
+                            &approval,
+                            key,
+                        )?;
+                        handoff::publish(&envelope, &authorize)?;
+                        status.delivered_trial =
+                            Some(approval.authorization.trial.transaction.into());
+                    }
+                    Operation::PrepareGpt => {
+                        site.install(active, &selection, &staged, directory, &eligible)?
+                    }
+                    Operation::Discover => unreachable!("discovery has no installation policy"),
+                }
                 status.prepared_inactive_slot = Some(slot.other());
             }
             status.hold_until = hold;

@@ -125,10 +125,12 @@ def qualify(args):
                 encoding="ascii",
             )
             signature = subprocess.check_output(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", key, "-in", body])
+            envelope = (args.delivered_envelope.read_bytes() if refusal is None and args.delivered_envelope is not None
+                        else signature + body.read_bytes())
             members = [work / f"member-{side}.raw" for side in ("a", "b")]
             for member in members:
                 subprocess.run(["cp", "--reflink=auto", "--sparse=always", args.members / member.name, member], check=True)
-            install(args, output / "install.log", members, signature + body.read_bytes(),
+            install(args, output / "install.log", members, envelope,
                     args.seed if refusal is None else None)
             options = SimpleNamespace(disk=stable, runtime=candidate, guest=False, output=output, variables=variables,
                                       nvme_boot=True, persistent_boot=True, boot_sector_size=4096,
@@ -178,5 +180,7 @@ if __name__ == "__main__":
     for value in ("epoch-policy", "core", "runtime", "guest"):
         parser.add_argument(f"--{value}", required=True)
     parser.add_argument("--transaction", type=UUID, required=True)
+    parser.add_argument("--delivered-envelope", type=lambda path: Path(path).absolute(),
+                        help="use the delivered packet for the approved boot case")
     os.umask(0o077)
     qualify(parser.parse_args())
