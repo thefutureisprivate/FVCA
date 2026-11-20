@@ -13,3 +13,11 @@
 
 ; Permit PID 1 to mask its private control socket in the fwupd mount namespace.
 (allow init_t init_var_run_t (sock_file (mounton)))
+
+; The broker labels the boot-local Guest drain receipt after the Btrfs barrier.
+(type fvca_firmware_drain_t)
+(typeattributeset file_type (fvca_firmware_drain_t))
+(roletype object_r fvca_firmware_drain_t)
+(allow fvca_firmware_drain_t tmpfs_t (filesystem (associate)))
+(allow init_t fvca_firmware_drain_t (file (getattr open read relabelfrom relabelto rename unlink)))
+(allow fwupd_t fvca_firmware_drain_t (file (getattr open read)))

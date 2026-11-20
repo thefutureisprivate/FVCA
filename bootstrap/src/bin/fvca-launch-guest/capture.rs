@@ -120,6 +120,29 @@ pub(super) fn lease_for_activation_recovery() -> io::Result<File> {
     exclusive_lease(Path::new(CAPTURE_LOCK))
 }
 
+pub(super) fn require_inherited_lifecycle_lease(passed: &File) -> io::Result<()> {
+    check_locked_description(&lock_file(Path::new(CAPTURE_LOCK))?, passed)
+}
+
+fn check_locked_description(expected: &File, passed: &File) -> io::Result<()> {
+    let actual = passed.metadata()?;
+    let canonical = expected.metadata()?;
+    if (actual.dev(), actual.ino()) != (canonical.dev(), canonical.ino()) {
+        return Err(invalid("firmware drain received a different lease file"));
+    }
+    match expected.try_lock() {
+        Err(std::fs::TryLockError::WouldBlock) => (),
+        Err(error) => return Err(error.into()),
+        Ok(()) => {
+            expected.unlock()?;
+            return Err(invalid("firmware drain requires an already held lifecycle lease"));
+        }
+    }
+    passed
+        .try_lock()
+        .map_err(|_| invalid("firmware drain received the wrong lease file description"))
+}
+
 pub(super) fn wait_for_lease(path: &Path) -> io::Result<File> {
     let file = lock_file(path)?;
     file.lock()?;
@@ -517,4 +540,36 @@ pub(super) fn stopped(id: &str, restart: bool) -> io::Result<()> {
     }
     finalize(&store, id)?;
     recovered
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    #[test]
+    fn requires_the_same_open_description_and_an_existing_lock() -> io::Result<()> {
+        let work = Path::new("/tmp").join(format!("fvca-lease-test-{}", std::process::id()));
+        fs::DirBuilder::new().mode(0o700).create(&work)?;
+        let check = || -> io::Result<()> {
+            let path = work.join("lease");
+            let holder = File::create_new(&path)?;
+            let expected = File::open(&path)?;
+            let duplicate = holder.try_clone()?;
+            assert!(check_locked_description(&expected, &duplicate).is_err());
+            holder.try_lock()?;
+            assert!(check_locked_description(&expected, &File::open(&path)?).is_err());
+            let other = File::create_new(work.join("other"))?;
+            assert!(check_locked_description(&expected, &other).is_err());
+            check_locked_description(&expected, &duplicate)?;
+            drop(duplicate);
+            assert!(matches!(
+                expected.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+            Ok(())
+        };
+        let outcome = check();
+        fs::remove_dir_all(work)?;
+        outcome
+    }
 }

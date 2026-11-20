@@ -219,6 +219,14 @@ fn check() -> io::Result<()> {
     Ok(())
 }
 
+fn main() -> ExitCode {
+    if let Err(error) = check() {
+        eprintln!("FVCA_HYPERVISOR_EPOCH_REFUSED {error}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,12 +246,4 @@ mod tests {
         assert!(pcr7_digest(&report).is_err());
         Ok(())
     }
-}
-
-fn main() -> ExitCode {
-    if let Err(error) = check() {
-        eprintln!("FVCA_HYPERVISOR_EPOCH_REFUSED {error}");
-        return ExitCode::FAILURE;
-    }
-    ExitCode::SUCCESS
 }

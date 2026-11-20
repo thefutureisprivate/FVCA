@@ -27,6 +27,7 @@ const WITHIN_POOL: ResolveFlags = ResolveFlags::BENEATH
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum Phase {
+    Draining,
     Flashing,
     RebootPending,
     PowerTransitionPending,
@@ -77,6 +78,7 @@ impl Activation {
 
     pub(super) fn disposition(&self) -> &'static str {
         match self.phase {
+            Phase::Draining => "draining",
             Phase::Flashing => "flashing",
             Phase::RebootPending => "reboot-pending",
             Phase::PowerTransitionPending => "power-transition-pending",
@@ -118,7 +120,9 @@ pub(super) fn recover(pool: &File) -> Result<Option<Recovery>> {
     handoff::private_file(&file)?;
     let activation = Activation::read(file)?.reconcile(pool)?;
     let evidence = result::inspect(pool, &activation);
-    let completion_blocker = if activation.phase == Phase::RebootPending {
+    let completion_blocker = if activation.phase == Phase::Draining {
+        Some("Guest drain was interrupted before firmware dispatch".into())
+    } else if activation.phase == Phase::RebootPending {
         match evidence.verify_completion(pool, &activation) {
             Ok(()) => {
                 commit_verified(pool, &activation, &serde_json::to_value(&evidence)?)?;
@@ -259,6 +263,20 @@ mod tests {
             phase,
             esrt_before: None,
         }
+    }
+
+    #[test]
+    fn preserves_an_interrupted_drain_without_treating_it_as_flashing() -> Result<()> {
+        let work = tempfile::tempdir()?;
+        let pool = File::open(work.path())?;
+        let pending = record(Phase::Draining);
+        let path = work.path().join(ACTIVATION);
+        save(work.path(), ACTIVATION, &pending)?;
+        let before = std::fs::read(&path)?;
+        let recovered = Activation::read(File::open(&path)?)?.reconcile(&pool)?;
+        assert_eq!(recovered.disposition(), "draining");
+        assert_eq!(std::fs::read(&path)?, before);
+        Ok(())
     }
 
     #[test]

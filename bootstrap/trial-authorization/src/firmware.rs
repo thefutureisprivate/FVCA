@@ -8,7 +8,17 @@ pub const STATE_DIRECTORY: &str = "firmware-update";
 pub const ACTIVATION: &str = "activation.json";
 pub const VERIFIED_BOOT: &str = "/run/fvca/firmware-verified-boot";
 pub const VERIFIED_BOOT_LIMIT: u64 = 640;
+pub const DRAIN_RECEIPT: &str = "firmware-guest-drained";
 const HOST_DATA: &str = "/run/fvca/host-data";
+
+pub fn drain_receipt(boot: &str, transaction: &str, offer: &str) -> io::Result<String> {
+    let boot = crate::uuid(boot)?;
+    let transaction = crate::uuid(transaction)?;
+    let offer = crate::digest(offer, "")?;
+    Ok(format!(
+        "FVCA-FIRMWARE-DRAIN-1\nboot_id={boot}\ntransaction={transaction}\noffer_sha256={offer}\n"
+    ))
+}
 
 pub struct VerifiedBoot<'a> {
     pub boot_id: &'a str,

@@ -398,7 +398,7 @@ new file mode 100644
 index 0000000..14d0cd2
 --- /dev/null
 +++ b/src/fu-fvca-capsule.c
-@@ -0,0 +1,375 @@
+@@ -0,0 +1,387 @@
 +/*
 + * SPDX-License-Identifier: LGPL-2.1-or-later
 + */
@@ -425,6 +425,7 @@ index 0000000..14d0cd2
 +#define FU_FVCA_RUN "/run/fvca"
 +#define FU_FVCA_POOL FU_FVCA_RUN "/host-data"
 +#define FU_FVCA_ESP_BINDING "firmware-esp-binding"
++#define FU_FVCA_DRAIN_RECEIPT "firmware-guest-drained"
 +#define FU_FVCA_LEASE "guest-capture.lock"
 +#define FU_FVCA_FILE_FLAGS (O_RDONLY | O_NOCTTY | O_NONBLOCK | O_CLOEXEC)
 +#define FU_FVCA_DIR_FLAGS (O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)
@@ -658,9 +659,11 @@ index 0000000..14d0cd2
 +	g_autofd gint pool = -1;
 +	g_autofd gint directory = -1;
 +	g_autoptr(GBytes) activation = NULL;
++	g_autoptr(GBytes) drained = NULL;
 +	g_autoptr(GBytes) offer = NULL;
 +	g_autoptr(FwupdJsonObject) record = NULL;
 +	g_autofree gchar *boot_id = NULL;
++	g_autofree gchar *expected_drain = NULL;
 +	g_autofree gchar *offer_path = NULL;
 +	struct stat lock_stat;
 +	struct stat lease_stat;
@@ -709,6 +712,15 @@ index 0000000..14d0cd2
 +	    !fu_fvca_match(record, "offer_sha256", offer_sha256) ||
 +	    !fu_fvca_match(record, "device_id", identity->device_id))
 +		return fu_fvca_deny(error, "FVCA firmware request differs from the durable flashing operation");
++
++	drained = fu_fvca_record(run, FU_FVCA_DRAIN_RECEIPT, 0600, 256, FALSE, error);
++	if (drained == NULL)
++		return FALSE;
++	expected_drain = g_strdup_printf("FVCA-FIRMWARE-DRAIN-1\nboot_id=%s\ntransaction=%s\noffer_sha256=%s\n",
++					 boot_id, transaction, offer_sha256);
++	if (g_bytes_get_size(drained) != strlen(expected_drain) ||
++	    memcmp(g_bytes_get_data(drained, NULL), expected_drain, strlen(expected_drain)) != 0)
++		return fu_fvca_deny(error, "FVCA firmware writer requires the matching Guest drain receipt");
 +
 +	offer_path = g_build_filename("staged", offer_sha256, "offer.json", NULL);
 +	offer = fu_fvca_record(directory, offer_path, 0400, 64 * FU_KB, FALSE, error);

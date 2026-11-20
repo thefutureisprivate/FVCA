@@ -1,18 +1,22 @@
 //! Keep the Guest and its writable attachment fenced across a planned Host reboot.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io;
+use std::os::fd::AsFd;
 use std::path::Path;
 use std::process::Command;
 
-use fvca_initrd_bootstrap::hypervisor_trial::{
-    healthy_return, online::PendingTrial, queue_host_reboot,
+use fvca_initrd_bootstrap::{
+    guest_boot,
+    hypervisor_trial::{healthy_return, online::PendingTrial, queue_host_reboot},
+    run,
 };
 use fvca_libvirt_boundary::{Connection, RUNNING};
+use fvca_trial_authorization::firmware::{self, DRAIN_RECEIPT};
 
 use super::{
     ALIAS, ATTACHMENT, CAPTURE_LOCK, OPERATION_LOCK, PID, RECEIPT, UUID, VM_PARENT, capture,
-    invalid, release, run, shutdown, verify_data, verify_pool,
+    guest_trial, invalid, release, shutdown, verify_data, verify_pool,
 };
 
 const RUN: &str = "/run/fvca";
@@ -40,15 +44,7 @@ pub(super) fn activate(returning: bool) -> io::Result<()> {
         None => healthy_return()?,
     };
     let connection = Connection::connect()?;
-    let running = match connection.lookup(UUID)? {
-        Some(guest) if guest.state()? == RUNNING && !guest.guest_frozen()? => true,
-        Some(_) => {
-            return Err(invalid(
-                "Hypervisor activation requires a running and thawed Guest",
-            ));
-        }
-        None => false,
-    };
+    let running = running_guest(&connection)?;
     capture::publish(
         Path::new(RUN),
         FENCE,
@@ -56,22 +52,9 @@ pub(super) fn activate(returning: bool) -> io::Result<()> {
     )?;
     if running {
         shutdown()?;
-        let (root, disk) = verify_data()?;
-        if capture::optional_record(Path::new(RECEIPT))?
-            != Some(capture::stop_receipt(&root, &disk)?)
-        {
-            return Err(invalid(
-                "the Guest disk has no matching orderly shutdown receipt",
-            ));
-        }
+        require_clean_stop()?;
     }
-    if connection.lookup(UUID)?.is_some()
-        || Path::new(PID).try_exists()?
-        || Path::new(ALIAS).try_exists()?
-        || Path::new(VM_PARENT).join(ATTACHMENT).try_exists()?
-    {
-        return Err(invalid("the Guest or its disk attachment is still active"));
-    }
+    require_drained(Some(&connection))?;
     if let Some(pending) = pending {
         pending.recheck()?;
         println!("FVCA_HYPERVISOR_TRIAL_DRAINED {transaction}");
@@ -82,6 +65,90 @@ pub(super) fn activate(returning: bool) -> io::Result<()> {
         println!("FVCA_HYPERVISOR_PROMOTION_DRAINED {transaction}");
     }
     queue_host_reboot()
+}
+
+fn running_guest(connection: &Connection) -> io::Result<bool> {
+    match connection.lookup(UUID)? {
+        Some(guest) if guest.state()? == RUNNING && !guest.guest_frozen()? => Ok(true),
+        Some(_) => Err(invalid(
+            "Host activation requires a running and thawed Guest",
+        )),
+        None => Ok(false),
+    }
+}
+
+fn require_clean_stop() -> io::Result<()> {
+    let (root, disk) = verify_data()?;
+    if capture::optional_record(Path::new(RECEIPT))? != Some(capture::stop_receipt(&root, &disk)?) {
+        return Err(invalid(
+            "the Guest disk has no matching orderly shutdown receipt",
+        ));
+    }
+    Ok(())
+}
+
+fn require_drained(connection: Option<&Connection>) -> io::Result<()> {
+    if let Some(connection) = connection
+        && connection.lookup(UUID)?.is_some()
+    {
+        return Err(invalid("the Guest is still active"));
+    }
+    if Path::new(PID).try_exists()?
+        || Path::new(ALIAS).try_exists()?
+        || Path::new(VM_PARENT).join(ATTACHMENT).try_exists()?
+    {
+        return Err(invalid("the Guest disk attachment is still active"));
+    }
+    Ok(())
+}
+
+pub(super) fn drain_firmware(transaction: &str, offer: &str) -> io::Result<()> {
+    let lease = File::from(io::stdin().as_fd().try_clone_to_owned()?);
+    capture::require_inherited_lifecycle_lease(&lease)?;
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    let receipt = firmware::drain_receipt(boot.trim_end(), transaction, offer)?;
+    let _operation = capture::lease(Path::new(OPERATION_LOCK))?;
+    require_idle()?;
+    guest_trial::require_idle()?;
+    capture::live::require_idle()?;
+    capture::restore::require_idle()?;
+    if !firmware::activation_pending()? {
+        return Err(invalid(
+            "firmware drain requires a durable activation fence",
+        ));
+    }
+    let pool = verify_pool()?;
+    let selected = Path::new(guest_boot::SELECTION).try_exists()?;
+    let connection = if selected || Path::new(fvca_libvirt_boundary::LOCAL_SOCKET).try_exists()? {
+        Some(Connection::connect()?)
+    } else {
+        None
+    };
+    if let Some(connection) = &connection
+        && running_guest(connection)?
+    {
+        if !selected {
+            return Err(invalid(
+                "the running Guest lacks its verified launch selection",
+            ));
+        }
+        shutdown()?;
+    }
+    require_drained(connection.as_ref())?;
+    if selected {
+        require_clean_stop()?;
+    }
+    fvca_btrfs_boundary::sync(&pool)?;
+    let directory = Path::new(RUN);
+    capture::replace_record(directory, DRAIN_RECEIPT, &receipt)?;
+    run(Command::new("/usr/bin/chcon")
+        .args([
+            "--no-dereference",
+            "system_u:object_r:fvca_firmware_drain_t:s0",
+        ])
+        .arg(directory.join(DRAIN_RECEIPT)))?;
+    println!("FVCA_FIRMWARE_GUEST_DRAINED {transaction}");
+    Ok(())
 }
 
 pub(super) fn recover() -> io::Result<()> {

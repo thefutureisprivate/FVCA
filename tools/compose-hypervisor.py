@@ -355,7 +355,7 @@ def assemble(args, work):
             if path.is_symlink() or not path.is_file():
                 raise ValueError("the VM runtime lacks scheduled Service Guest updates")
     if args.firmware_update_owner is not None:
-        required += ("usr/lib/fvca/firmware-update-enrollment-v8", "usr/bin/chcon", "usr/bin/mount", "usr/bin/sha256sum")
+        required += ("usr/lib/fvca/firmware-update-enrollment-v9", "usr/bin/chcon", "usr/bin/mount", "usr/bin/sha256sum")
         for tree, members in (
             (prepared / "root", (Path("usr/libexec/fwupd/fwupd"), Path("usr/lib/systemd/system/fvca-fwupd.service"),
                                  Path("usr/share/fvca/firmware-build.txt"))),
@@ -374,7 +374,7 @@ def assemble(args, work):
                 or "device_preflight=v1" not in provenance.splitlines()):
             raise ValueError("scheduled Host firmware requires exact native device preflight")
         if (not re.search(r"^capsule_writer_patch_sha256=[0-9a-f]{64}$", provenance, re.MULTILINE)
-                or "capsule_writer=v1" not in provenance.splitlines()):
+                or "capsule_writer=v2" not in provenance.splitlines()):
             raise ValueError("scheduled Host firmware requires the confined native capsule writer")
     if args.boot_trial_candidate is not None:
         recorder = runtime_work / "tree" / vm_runtime.TRIAL_HEALTH

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 mod block_nodes;
 
 const LOCAL_QEMU: &CStr = c"qemu+unix:///system?socket=/run/libvirt/virtqemud-sock";
+pub const LOCAL_SOCKET: &str = "/run/libvirt/virtqemud-sock";
 const START_AUTODESTROY: c_uint = 2;
 const START_PAUSED: c_uint = 1;
 const START_VALIDATE: c_uint = 16;

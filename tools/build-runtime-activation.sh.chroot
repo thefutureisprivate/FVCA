@@ -32,7 +32,7 @@ if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-trial-watchdog-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/guest-trial-enrollment-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/guest-os-update-enrollment-v1"
-    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/firmware-update-enrollment-v8"
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/firmware-update-enrollment-v9"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-promotion-support-v2"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-standing-trial-support-v5"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-update-support-v2"

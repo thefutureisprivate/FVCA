@@ -338,6 +338,9 @@ fn activate() -> io::Result<()> {
         [option] if option == "--activate-hypervisor-trial" => update::activate(false),
         [option] if option == "--return-healthy-hypervisor" => update::activate(true),
         [option] if option == "--recover-hypervisor-activation" => update::recover(),
+        [option, transaction, offer] if option == "--drain-for-firmware" => {
+            update::drain_firmware(transaction, offer)
+        }
         [option] if option == "--activate-guest-trial" => guest_trial::activate(),
         [option] if option == "--boot-guest-trial" => guest_trial::boot_attempt(),
         [option] if option == "--recover-guest-trial" => guest_trial::recover(),
