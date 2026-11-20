@@ -1,0 +1,14 @@
+[Unit]
+Description=Retrieve the synthetic Stalwart message through authenticated loopback IMAP
+Requires=fvca-workload-start.service
+After=fvca-workload-start.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=20s
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+ExecStart=/usr/bin/podman --remote=false exec --interactive fvca-workload-payload /usr/bin/curl --silent --show-error --fail --retry 3 --retry-connrefused --max-time 10 --config -
+StandardInput=file:/run/fvca/stalwart-mail/imap.curl
+StandardOutput=truncate:/run/fvca/stalwart-mail/mail.eml
+StandardError=journal+console

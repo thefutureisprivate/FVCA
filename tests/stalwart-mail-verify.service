@@ -1,0 +1,16 @@
+[Unit]
+Description=Require the exact retained Stalwart message before Guest readiness
+Requires=stalwart-mail-fetch.service
+After=stalwart-mail-fetch.service
+Before=fvca-base-ready.service
+OnFailure=emergency.target
+
+[Service]
+Type=oneshot
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+WorkingDirectory=/run/fvca/stalwart-mail
+ExecStart=/usr/bin/sha256sum --check --strict --status mail.sha256
+ExecStart=/usr/bin/echo FVCA_STALWART_MAIL_VERIFIED
+StandardOutput=journal+console
+StandardError=journal+console

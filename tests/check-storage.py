@@ -353,6 +353,8 @@ def check_guest_workload(args):
                 raise ValueError("the authorized workload did not mount and start in the signed Guest")
             if args.stalwart_lifecycle:
                 check_stalwart_lifecycle(output)
+            if args.stalwart_mail and not 0 <= output.find(b"FVCA_STALWART_MAIL_VERIFIED") < output.find(READY):
+                raise ValueError("the configured Stalwart mailbox was not verified before Guest readiness")
         elif failure not in output or FAIL not in output or READY in output or active in output:
             raise ValueError("the tampered workload did not fail before activation")
         print(f"workload-{name} passed")
@@ -466,7 +468,9 @@ if __name__ == "__main__":
                                help="require cold restore from live and stopped captures")
     parser.add_argument("--wrong-runtime", type=Path, help="unselected runtime for a Guest rejection test")
     parser.add_argument("--workload", action="store_true", help="qualify workload activation with approved.raw and tampered.raw")
-    parser.add_argument("--stalwart-lifecycle", action="store_true", help="check the disposable Stalwart lifecycle fixture")
+    stalwart = parser.add_mutually_exclusive_group()
+    stalwart.add_argument("--stalwart-lifecycle", action="store_true", help="check the disposable Stalwart lifecycle fixture")
+    stalwart.add_argument("--stalwart-mail", action="store_true", help="require the authenticated Stalwart mailbox check")
     for option in ("tpm-state", "pin-file", "firmware"):
         parser.add_argument(f"--{option}", type=Path)
     args = parser.parse_args()
@@ -490,6 +494,8 @@ if __name__ == "__main__":
         parser.error("--workload requires --oci-runtime and its own Btrfs fixtures")
     if args.stalwart_lifecycle and not args.workload:
         parser.error("--stalwart-lifecycle requires --workload")
+    if args.stalwart_mail and not args.workload:
+        parser.error("--stalwart-mail requires --workload")
     if args.oci_runtime is not None:
         args.guest = True
         args.runtime = args.oci_runtime
