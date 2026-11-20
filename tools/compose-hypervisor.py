@@ -112,6 +112,7 @@ def guest_selection(args, work):
 
 
 BACKUP_FILES = ("vm-backup-policy", "vm-backup-ca.pem")
+BACKUP_JOB_FILE = "vm-backup-job"
 RESTORE_FILE = "vm-restore-authorization"
 RETENTION_FILE = "vm-retention-policy"
 
@@ -123,6 +124,25 @@ def backup_selection(args):
     ca = args.backup_ca.read_bytes()
     backup_destination.parse(policy, ca)
     return tuple(zip(BACKUP_FILES, (policy, ca), strict=True))
+
+
+def backup_job_selection(path, backup):
+    if path is None:
+        return ()
+    policy = path.read_bytes()
+    number = r"([1-9][0-9]{0,7})"
+    selected = re.fullmatch(
+        rf"FVCA-BACKUP-JOB-1\nrepository=([0-9a-f]{{64}})\ninterval_seconds={number}\nretry_seconds={number}\n"
+        rf"max_data_loss_seconds={number}\nmax_quiesce_seconds={number}\nrestore_objective_seconds={number}\n",
+        policy.decode("ascii"),
+    )
+    if selected is None or len(policy) > 2048 or backup[0][1].splitlines()[-1] != f"repository={selected[1]}".encode("ascii"):
+        raise ValueError("invalid scheduled backup job or repository scope")
+    interval, retry, max_loss, quiesce, restore = map(int, selected.groups()[1:])
+    if not (5 <= retry <= 3600 and retry <= interval <= max_loss <= 31_536_000
+            and 1 <= quiesce <= 20 and 1 <= restore <= 31_536_000):
+        raise ValueError("invalid scheduled backup interval or objectives")
+    return ((BACKUP_JOB_FILE, policy),)
 
 
 def restore_selection(path, backup):
@@ -190,14 +210,16 @@ def assemble(args, work):
     runtime_hash = verify_runtime(args.runtime, args.runtime_certificate, prepared, runtime_work, vm_runtime)
     forbidden = tuple(f"usr/lib/fvca/{name}" for name in (
         "hypervisor.composition", "vm-runtime.p7s", "host-storage",
-        *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, *BACKUP_FILES, RESTORE_FILE, RETENTION_FILE,
+        *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, *BACKUP_FILES, BACKUP_JOB_FILE,
+        RESTORE_FILE, RETENTION_FILE,
     ))
     verify_initrd(args.initrd, uname, ACTIVATION_FILES, forbidden, "Hypervisor")
     extra = (("host-storage", storage),) if storage is not None else ()
     backup = backup_selection(args)
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
-        extra=(*extra, *guest_selection(args, work), *backup, *restore_selection(args.restore_authorization, backup),
+        extra=(*extra, *guest_selection(args, work), *backup, *backup_job_selection(args.backup_job, backup),
+               *restore_selection(args.restore_authorization, backup),
                *retention_selection(args.retention_policy, backup)),
     )
     cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS))
@@ -215,6 +237,7 @@ def main():
     parser.add_argument("--guest-release-certificate", type=Path, help="trusted Guest release signer")
     parser.add_argument("--backup-policy", type=Path, help="S3 destination and repository ID to authorize in this UKI")
     parser.add_argument("--backup-ca", type=Path, help="PEM trust bundle for the selected S3 endpoint")
+    parser.add_argument("--backup-job", type=Path, help="authorize the periodic live Service Guest backup job")
     parser.add_argument("--restore-authorization", type=Path, help="exact S3 recovery set to authorize in a recovery UKI")
     parser.add_argument("--retention-policy", type=Path, help="authorize local capture expiry against the selected repository")
     parser.add_argument("--pcr-key", type=Path, help="separate RSA private key for the initrd PCR policy")
@@ -233,6 +256,10 @@ def main():
         parser.error("VM backup requires an authorized Guest, destination policy, and endpoint CA")
     if args.restore_authorization is not None and args.backup_policy is None:
         parser.error("S3 recovery requires an authorized repository and Guest")
+    if args.backup_job is not None and (
+        args.backup_policy is None or args.retention_policy is None or args.restore_authorization is not None
+    ):
+        parser.error("the scheduled backup job requires an ordinary Hypervisor, authorized repository and local retention")
     if args.retention_policy is not None and args.backup_policy is None:
         parser.error("local capture expiry requires the authorized backup repository")
     try:

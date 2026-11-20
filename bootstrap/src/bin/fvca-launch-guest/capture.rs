@@ -25,6 +25,8 @@ pub(super) mod live;
 pub(super) mod restore;
 #[path = "backup.rs"]
 pub(super) mod backup;
+#[path = "backup_job.rs"]
+pub(super) mod backup_job;
 #[path = "retention.rs"]
 pub(super) mod retention;
 
@@ -81,6 +83,9 @@ impl Store {
         if self.path.join("expire-intent").try_exists()? || self.path.join("expired").try_exists()? {
             return Err(invalid("the capture has been retired from local storage"));
         }
+        if self.path.join("scheduled-abandoned").try_exists()? {
+            return Err(invalid("the interrupted scheduled capture has been abandoned"));
+        }
         Ok(())
     }
 }
@@ -130,6 +135,14 @@ fn read_record(path: &Path) -> io::Result<String> {
     Ok(text)
 }
 
+pub(super) fn optional_record(path: &Path) -> io::Result<Option<String>> {
+    match read_record(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn remove_stale_stage(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -145,12 +158,16 @@ pub(super) fn publish(dir: &Path, name: &str, text: &str) -> io::Result<()> {
         }
         return File::open(dir)?.sync_all();
     }
+    replace_record(dir, name, text)
+}
+
+fn replace_record(dir: &Path, name: &str, text: &str) -> io::Result<()> {
     let staged = dir.join(format!(".{name}.tmp"));
     remove_stale_stage(&staged)?;
     let mut file = OpenOptions::new().create_new(true).write(true).mode(0o600).open(&staged)?;
     file.write_all(text.as_bytes())?;
     file.sync_all()?;
-    fs::rename(staged, path)?;
+    fs::rename(staged, dir.join(name))?;
     File::open(dir)?.sync_all()
 }
 
@@ -323,6 +340,38 @@ fn snapshot_at(path: &Path, consistency: Consistency, plan: &Plan<'_>) -> io::Re
 
 fn snapshot_record(snapshot: &Subvolume) -> String {
     format!("snapshot_uuid={}\nsnapshot_id={}\n", snapshot.uuid, snapshot.id)
+}
+
+struct RecordedCapture<'a> {
+    consistency: Consistency,
+    plan: Plan<'a>,
+    volume: &'a str,
+    sequence: u64,
+    digest: &'a str,
+}
+
+fn recorded_capture<'a>(path: &Path, id: &str, fsid: &str, manifest: &'a str) -> io::Result<RecordedCapture<'a>> {
+    let mut lines = manifest.splitn(5, '\n');
+    if lines.next() != Some("CAPTURE_COMPLETE") {
+        return Err(invalid("unexpected finalized capture manifest"));
+    }
+    let mut take = |field| lines.next().and_then(|line| line.strip_prefix(field))
+        .ok_or_else(|| invalid("incomplete finalized capture manifest"));
+    let volume = uuid(take("snapshot_uuid=")?)?;
+    let sequence = take("snapshot_id=")?.parse::<u64>().map_err(io::Error::other)?;
+    let digest = runtime::hash(take("disk_sha256=")?)?;
+    let text = lines.next().ok_or_else(|| invalid("the capture has no embedded plan"))?;
+    let consistency = if text.starts_with(Consistency::Filesystem.header()) { Consistency::Filesystem }
+                      else { Consistency::CleanStopped };
+    let plan = parse_plan_fields(text, id, consistency, Some(fsid))?;
+    let sealed = format!("CAPTURE_SEALED_PENDING_VALIDATION\nsnapshot_uuid={volume}\nsnapshot_id={sequence}\n{text}");
+    if sequence < 256 || sequence == plan.source_id || volume == plan.source
+        || read_record(&path.join("plan"))? != text || read_record(&path.join("sealed"))? != sealed
+        || (matches!(consistency, Consistency::Filesystem) && read_record(&path.join("live-seal-verified"))? != "1\n")
+    {
+        return Err(invalid("the capture inventory disagrees with its sealed record"));
+    }
+    Ok(RecordedCapture { consistency, plan, volume, sequence, digest })
 }
 
 fn seal(store: &Store, id: &str, text: &str) -> io::Result<()> {

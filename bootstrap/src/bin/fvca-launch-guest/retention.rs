@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fvca_initrd_bootstrap::retention_policy::{self, Policy};
 
-use super::{Consistency, backup, btrfs, invalid, lease, live, parse_plan_fields, private_directory,
-            publish, read_record, restore, runtime, snapshot_at, uuid};
+use super::{Consistency, backup, btrfs, invalid, lease, live, optional_record, private_directory,
+            publish, recorded_capture, restore, snapshot_at, uuid};
 use crate::{CAPTURE_LOCK, POOL, verify_pool};
 
 const SETS: &str = "/run/fvca/host-data/captures/sets";
@@ -32,14 +32,6 @@ struct Complete {
     present: bool,
 }
 
-fn optional_record(path: &Path) -> io::Result<Option<String>> {
-    match read_record(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
 impl Complete {
     fn expiry_record(&self, id: &str) -> String {
         format!("FVCA-LOCAL-CAPTURE-EXPIRED-1\ncapture={id}\nsnapshot_uuid={}\nsnapshot_id={}\ndisk_sha256={}\n",
@@ -48,26 +40,7 @@ impl Complete {
 
     fn load(path: &Path, id: &str, fsid: &str) -> io::Result<Option<Self>> {
         let Some(manifest) = optional_record(&path.join("manifest"))? else { return Ok(None); };
-        let mut lines = manifest.splitn(5, '\n');
-        if lines.next() != Some("CAPTURE_COMPLETE") {
-            return Err(invalid("unexpected local capture manifest"));
-        }
-        let mut take = |field| lines.next().and_then(|line| line.strip_prefix(field))
-            .ok_or_else(|| invalid("incomplete finalized capture manifest"));
-        let volume = uuid(take("snapshot_uuid=")?)?.to_owned();
-        let sequence = take("snapshot_id=")?.parse::<u64>().map_err(io::Error::other)?;
-        let digest = runtime::hash(take("disk_sha256=")?)?.to_owned();
-        let text = lines.next().ok_or_else(|| invalid("the capture has no embedded plan"))?;
-        let consistency = if text.starts_with(Consistency::Filesystem.header()) { Consistency::Filesystem }
-                          else { Consistency::CleanStopped };
-        let plan = parse_plan_fields(text, id, consistency, Some(fsid))?;
-        let sealed = format!("CAPTURE_SEALED_PENDING_VALIDATION\nsnapshot_uuid={volume}\nsnapshot_id={sequence}\n{text}");
-        if sequence < 256 || sequence == plan.source_id || volume == plan.source
-            || read_record(&path.join("plan"))? != text || read_record(&path.join("sealed"))? != sealed
-            || (matches!(consistency, Consistency::Filesystem) && read_record(&path.join("live-seal-verified"))? != "1\n")
-        {
-            return Err(invalid("the capture inventory disagrees with its sealed record"));
-        }
+        let record = recorded_capture(path, id, fsid, &manifest)?;
         let mut pending_backup = false;
         for entry in fs::read_dir(path)? {
             let name = entry?.file_name();
@@ -80,7 +53,8 @@ impl Complete {
         let expired = optional_record(&path.join("expired"))?;
         let present = path.join("snapshot").try_exists()?;
         let complete = Self {
-            captured: plan.captured, sequence, volume, digest, consistency, pending_backup,
+            captured: record.plan.captured, sequence: record.sequence, volume: record.volume.to_owned(),
+            digest: record.digest.to_owned(), consistency: record.consistency, pending_backup,
             retiring: intent.is_some(), expired: expired.is_some(), present,
         };
         let expected = complete.expiry_record(id);
@@ -91,8 +65,8 @@ impl Complete {
             return Err(invalid("local capture state does not match its expiry journal"));
         }
         if present {
-            let (snapshot, _) = snapshot_at(path, consistency, &plan)?;
-            if snapshot.id != sequence || snapshot.uuid != complete.volume {
+            let (snapshot, _) = snapshot_at(path, record.consistency, &record.plan)?;
+            if snapshot.id != record.sequence || snapshot.uuid != complete.volume {
                 return Err(invalid("local snapshot differs from the verified capture inventory"));
             }
         }

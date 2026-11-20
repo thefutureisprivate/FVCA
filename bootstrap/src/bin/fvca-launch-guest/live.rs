@@ -63,6 +63,19 @@ pub(crate) fn require_idle() -> io::Result<()> {
     Ok(())
 }
 
+pub(super) fn can_reconcile(id: &str) -> io::Result<bool> {
+    if active()?.as_deref() == Some(id) {
+        return Ok(true);
+    }
+    require_idle()?;
+    match read_record(&window_path(id).join("sealed")) {
+        Ok(sealed) if sealed == "1\n" => Ok(true),
+        Ok(_) => Err(invalid("unexpected live seal acknowledgement")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 fn window_path(id: &str) -> PathBuf {
     Path::new(RUN).join(format!("live-capture-{id}"))
 }

@@ -291,6 +291,28 @@ repository=REPLACE_WITH_64_LOWERCASE_HEX_DIGITS
 
 Start `fvca-backup-live@CAPTURE_UUID.service` to capture a running Guest or `fvca-backup-stopped@CAPTURE_UUID.service` to use an orderly stop. Upload begins after Guest recovery. The isolated worker authenticates the authorized repository, reads back the exact snapshot inventory and manifest, then returns the full snapshot ID. The coordinator records the result in `backup-REPOSITORY_ID` beside the finalized capture manifest. After an upload failure, retry with the same capture UUID and the same capture mode to reuse the sealed disk. The pending record identifies the sealed disk and its SHA-256 digest.
 
+### Schedule Service Guest backups
+
+Add `--backup-job FILE` when composing the signed ordinary Hypervisor UKI. The job uses live capture, the repository already registered by `--backup-policy`, and the local capture budget selected by `--retention-policy`. Choose the maximum recovery-point age and the interval to allow for detection, capture and upload time.
+
+```text
+FVCA-BACKUP-JOB-1
+repository=REPLACE_WITH_64_LOWERCASE_HEX_DIGITS
+interval_seconds=21600
+retry_seconds=300
+max_data_loss_seconds=28800
+max_quiesce_seconds=15
+restore_objective_seconds=14400
+```
+
+The signed quiescence budget sets when the live capture worker is fenced and the independent resume/thaw watchdog intervenes. A blocked kernel or provider call can extend recovery time. The restore objective is recorded with job status for comparison with restore qualification. [systemd timer options](https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html)
+
+`fvca-backup-health.timer` dispatches due work after boot and checks status every `retry_seconds` while the appliance is running. A successful scheduled upload sets the next interval using the capture time. Read `FVCA_BACKUP_JOB_STATUS` for the last verified scheduled snapshot, its age and any pending capture. Route `FVCA_BACKUP_JOB_ALERT` and failures of `fvca-backup-health.service` or `fvca-backup-scheduled.service` to monitoring. The health check reports a missed recovery point when the last verified scheduled capture is absent or older than `max_data_loss_seconds`, including during an upload. Off-node pack verification and restore qualification report their own outcomes.
+
+The job saves its pending UUID on the encrypted Hypervisor Btrfs mirror before capture. A retry after reboot reuses the acknowledged sealed snapshot. The launcher journals the attached disk's Btrfs and inode identities before handing it to libvirt. After an abrupt shutdown it reclaims that exact disk once the previous VM, PID file and bind mount are gone. Clean-stop receipts still require an orderly Guest shutdown.
+
+If an interrupted attempt ended before creating any snapshot and the Guest operation lease is clear, the job records that attempt as abandoned and allocates a new UUID. An unacknowledged snapshot is preserved for reconciliation. A verified S3 receipt remains eligible for age reporting after local expiry.
+
 ### Inventory and expire local captures
 
 Start `fvca-capture-list.service` to log the local capture catalog or `fvca-capture-inspect@CAPTURE_UUID.service` to inspect one capture. Finalized entries report capture time, disk SHA-256, Btrfs snapshot UUID and pending backup status. Expired entries retain their manifest and backup receipt for reference.

@@ -92,11 +92,15 @@ fn release_stage(store: &Store, id: &str, pending: &str, selection: &guest_boot:
 }
 
 pub(crate) fn upload(id: &str, running: bool) -> io::Result<()> {
-    super::uuid(id)?;
     let policy_text = fs::read_to_string(backup_policy::POLICY)?;
     let policy = backup_policy::parse(&policy_text)?;
-    preflight_credentials(Path::new(backup_policy::CREDENTIALS))?;
     let _job = lease(Path::new(BACKUP_LOCK))?;
+    upload_locked(id, running, &policy)
+}
+
+pub(super) fn upload_locked(id: &str, running: bool, policy: &backup_policy::Policy<'_>) -> io::Result<()> {
+    super::uuid(id)?;
+    preflight_credentials(Path::new(backup_policy::CREDENTIALS))?;
     let consistency = if running {
         live::capture(id)?;
         Consistency::Filesystem

@@ -1,0 +1,7 @@
+[Unit]
+Description=Schedule checks of the authorized FVCA backup job
+ConditionPathExists=/run/fvca/vm-backup-job
+
+[Timer]
+OnBootSec=10s
+AccuracySec=1s

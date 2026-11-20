@@ -4,7 +4,7 @@ use std::alloc::System;
 use std::ffi::{CStr, CString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, fchown};
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -20,6 +20,7 @@ static ALLOCATOR: System = System;
 
 const UUID: &CStr = c"e629aa43-af11-47c6-aedc-a2dc47f1cc3a";
 const POOL: &str = "/run/fvca/host-data";
+const VM_PARENT: &str = "/run/fvca/host-data/vms";
 const VM_DIRECTORY: &str = "/run/fvca/host-data/vms/service-guest";
 const DISK: &str = "/run/fvca/host-data/vms/service-guest/data.raw";
 const ALIAS: &str = "/run/fvca/guest-state.raw";
@@ -27,6 +28,7 @@ const PID: &str = "/run/libvirt/qemu/fvca-service-guest.pid";
 const RECEIPT: &str = "/run/fvca/guest-clean-stop";
 const OPERATION_LOCK: &str = "/run/fvca/guest-operation.lock";
 const CAPTURE_LOCK: &str = "/run/fvca/guest-capture.lock";
+const ATTACHMENT: &str = "data-attachment";
 
 fn verify_boot_files(directory: &Path, selection: &guest_boot::Selection<'_>) -> io::Result<()> {
     let mut checksum = Command::new("/usr/bin/sha256sum").env_clear()
@@ -91,7 +93,7 @@ fn raw_disk(path: &Path) -> io::Result<File> {
 
 fn verify_storage_directory() -> io::Result<File> {
     verify_pool()?;
-    for path in ["/run/fvca/host-data/vms", VM_DIRECTORY] {
+    for path in [VM_PARENT, VM_DIRECTORY] {
         private_directory(Path::new(path))?;
     }
     let root = File::open(VM_DIRECTORY)?;
@@ -123,10 +125,59 @@ fn invalidate_receipt() -> io::Result<()> {
     }
 }
 
+fn attachment_record(root: &File, metadata: &fs::Metadata) -> io::Result<String> {
+    let volume = fvca_btrfs_boundary::subvolume(root)?;
+    let fsid = fvca_btrfs_boundary::filesystem_uuid(&verify_pool()?)?;
+    if volume.read_only || !matches!((metadata.uid(), metadata.gid()), (0, 0) | (107, 107)) {
+        return Err(invalid("unexpected storage identity for the Guest attachment"));
+    }
+    Ok(format!("FVCA-GUEST-ATTACHMENT-1\npool={fsid}\nsubvolume={}\nsubvolume_id={}\ninode={}\nbytes={}\n",
+               volume.uuid, volume.id, metadata.ino(), metadata.len()))
+}
+
+fn clear_attachment(dir: &Path) -> io::Result<()> {
+    fs::remove_file(dir.join(ATTACHMENT))?;
+    private_directory(dir)?.sync_all()
+}
+
+fn reclaim_attachment() -> io::Result<()> {
+    let dir = Path::new(VM_PARENT);
+    let Some(record) = capture::optional_record(&dir.join(ATTACHMENT))? else { return Ok(()); };
+    if Path::new(PID).try_exists()? || Path::new(ALIAS).try_exists()? {
+        return Err(invalid("Guest attachment recovery requires the prior disk attachment to be absent"));
+    }
+    let root = verify_storage_directory()?;
+    let metadata = raw_disk_metadata(Path::new(DISK))?;
+    if record != attachment_record(&root, &metadata)? {
+        return Err(invalid("the registered disk differs from its durable attachment record"));
+    }
+    // Check identity with metadata only. The normal virt_image_t label also
+    // denies init_t a content read until the detached disk has been relabelled.
+    run(Command::new("/usr/bin/chcon").args(["--no-dereference", "system_u:object_r:fvca_host_data_t:s0", DISK]))?;
+    let disk = File::open(DISK)?;
+    let opened = disk.metadata()?;
+    if (opened.dev(), opened.ino()) != (metadata.dev(), metadata.ino()) {
+        return Err(invalid("the Guest disk changed during attachment recovery"));
+    }
+    fvca_btrfs_boundary::require_cow_and_checksums(&disk)?;
+    if (metadata.uid(), metadata.gid()) != (0, 0) {
+        fchown(&disk, Some(0), Some(0))?;
+    }
+    disk.sync_all()?;
+    clear_attachment(dir)?;
+    println!("FVCA_GUEST_ATTACHMENT_RECLAIMED");
+    Ok(())
+}
+
 fn prepare_data() -> io::Result<()> {
-    verify_data()?;
+    if Path::new(PID).try_exists()? || Path::new(ALIAS).try_exists()? {
+        return Err(invalid("the prior Guest attachment is still present"));
+    }
+    reclaim_attachment()?;
+    let (root, disk) = verify_data()?;
     invalidate_receipt()?;
     // Keep the pool private while giving sVirt one file to label for QEMU.
+    capture::publish(Path::new(VM_PARENT), ATTACHMENT, &attachment_record(&root, &disk.metadata()?)?)?;
     run(Command::new("/usr/bin/chcon").args(["system_u:object_r:virt_image_t:s0", DISK]))?;
     OpenOptions::new().write(true).create_new(true).mode(0o600).open(ALIAS)?;
     run(Command::new("/usr/bin/mount").args(["--internal-only", "--bind", DISK, ALIAS]))
@@ -207,7 +258,7 @@ fn shutdown() -> io::Result<()> {
     let events = EventLoop::register()?;
     let connection = Connection::connect()?;
     if stop(&connection, &events)? {
-        run(Command::new("/usr/bin/chcon").args(["--no-dereference", "system_u:object_r:fvca_host_data_t:s0", DISK]))?;
+        release(&connection)?;
         let (root, disk) = verify_data()?;
         disk.sync_all()?;
         capture::publish(Path::new("/run/fvca"), "guest-clean-stop", &capture::stop_receipt(&root, &disk)?)?;
@@ -227,20 +278,20 @@ fn stop(connection: &Connection, events: &EventLoop) -> io::Result<bool> {
 }
 
 fn release(connection: &Connection) -> io::Result<()> {
-    if !Path::new(ALIAS).try_exists()? {
-        return Ok(());
-    }
     if connection.lookup(UUID)?.is_some() || Path::new(PID).try_exists()? {
         return Err(invalid("the Service Guest still owns its data attachment"));
     }
-    let mounted = Command::new("/usr/bin/findmnt").env_clear()
-        .args(["--mountpoint", ALIAS]).stdout(Stdio::null()).status()?;
-    match mounted.code() {
-        Some(0) => run(Command::new("/usr/bin/umount").args(["--internal-only", ALIAS]))?,
-        Some(1) => {}
-        _ => return Err(io::Error::other("could not inspect the Guest data attachment")),
+    if Path::new(ALIAS).try_exists()? {
+        let mounted = Command::new("/usr/bin/findmnt").env_clear()
+            .args(["--mountpoint", ALIAS]).stdout(Stdio::null()).status()?;
+        match mounted.code() {
+            Some(0) => run(Command::new("/usr/bin/umount").args(["--internal-only", ALIAS]))?,
+            Some(1) => {}
+            _ => return Err(io::Error::other("could not inspect the Guest data attachment")),
+        }
+        fs::remove_file(ALIAS)?;
     }
-    fs::remove_file(ALIAS)
+    reclaim_attachment()
 }
 
 fn activate() -> io::Result<()> {
@@ -260,7 +311,7 @@ fn activate() -> io::Result<()> {
         [option] if option == "--release" => {
             let _lease = capture::lease(Path::new(OPERATION_LOCK))?;
             capture::live::require_idle()?;
-            if !Path::new(ALIAS).try_exists()? {
+            if !Path::new(ALIAS).try_exists()? && !Path::new(VM_PARENT).join(ATTACHMENT).try_exists()? {
                 return Ok(());
             }
             release(&Connection::connect()?)
@@ -274,6 +325,8 @@ fn activate() -> io::Result<()> {
         [option, request] if option == "--restore-s3" => capture::restore::cold_restore(request, true),
         [option, id] if option == "--backup-live" => capture::backup::upload(id, true),
         [option, id] if option == "--backup-stopped" => capture::backup::upload(id, false),
+        [option] if option == "--backup-job-run" => capture::backup_job::operate(true),
+        [option] if option == "--backup-job-health" => capture::backup_job::operate(false),
         [option] if option == "--capture-list" => capture::retention::inspect(None),
         [option, id] if option == "--capture-inspect" => capture::retention::inspect(Some(id)),
         [option, id] if option == "--capture-expire" => capture::retention::maintain(Some(id)),

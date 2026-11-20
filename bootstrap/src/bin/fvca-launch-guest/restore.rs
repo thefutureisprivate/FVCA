@@ -13,12 +13,11 @@ use fvca_initrd_bootstrap::recovery;
 use super::{Consistency, GUEST_UNIT, Store, attached_disk, backup, btrfs, complete_record, directory,
             disk_digest, guest_boot, invalid, lease, live, only_data_member, parse_plan_fields, private_directory,
             publish, raw_disk, read_record, remove_stale_stage, run, runtime, uuid, verify_boot_files, wait_for_lease};
-use crate::{ALIAS, CAPTURE_LOCK, OPERATION_LOCK, PID, UUID, VM_DIRECTORY, verified_definition};
+use crate::{ALIAS, CAPTURE_LOCK, OPERATION_LOCK, PID, UUID, VM_DIRECTORY, VM_PARENT, verified_definition};
 
 const RESTORES: &str = "/run/fvca/host-data/captures/restores";
 pub(super) const RESTORE_LOCK: &str = "/run/fvca/guest-restore.lock";
 const DOWNLOADS: &str = "/run/fvca/host-data/captures/restore-downloads";
-const VM_PARENT: &str = "/run/fvca/host-data/vms";
 const HEADER: &str = "FVCA-GUEST-RESTORE-1";
 
 struct Request<'a> {
@@ -193,7 +192,7 @@ fn require_stopped() -> io::Result<()> {
     if connection.lookup(UUID)?.is_some() || Path::new(PID).try_exists()? || Path::new(ALIAS).try_exists()? {
         return Err(invalid("cold restore requires the Service Guest to be stopped and its disk detached"));
     }
-    Ok(())
+    crate::reclaim_attachment()
 }
 
 fn current_bundle() -> io::Result<String> {

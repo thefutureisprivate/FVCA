@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub mod backup_policy;
+pub mod backup_job;
 pub mod recovery;
 pub mod retention_policy;
 pub mod btrfs;

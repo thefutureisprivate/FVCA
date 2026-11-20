@@ -6,7 +6,7 @@ use std::io;
 use std::os::unix::fs::FileTypeExt;
 use std::process::ExitCode;
 
-use fvca_initrd_bootstrap::{backup_policy, guest_boot, invalid, recovery, retention_policy};
+use fvca_initrd_bootstrap::{backup_job, backup_policy, guest_boot, invalid, recovery, retention_policy};
 use fvca_initrd_bootstrap::runtime::{self, Runtime, hash};
 
 #[path = "fvca-activate-runtime/storage.rs"]
@@ -29,7 +29,9 @@ fn activate() -> io::Result<()> {
     storage::activate_if_selected()?;
     backup_policy::activate_if_selected()?;
     retention_policy::activate_if_selected()?;
-    guest_boot::activate_if_selected(!recovery::activate_if_selected()?)?;
+    let recovering = recovery::activate_if_selected()?;
+    backup_job::activate_if_selected(recovering)?;
+    guest_boot::activate_if_selected(!recovering)?;
 
     println!("FVCA_VM_RUNTIME_ACTIVE {runtime_hash}");
     Ok(())
