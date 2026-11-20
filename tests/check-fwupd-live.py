@@ -52,6 +52,19 @@ def serve(address, mode):
                     digests.append(sha256(stream.read()).hexdigest())
             self.catalog = "1:" + ":".join(digests)
 
+        @dbus.service.method(interface, in_signature="ssssssuh", out_signature="")
+        def VerifyFvcaCabinet(self, archive, payload, guid, protocol, version, version_format, raw, fd):
+            assert payload == "7" * 64
+            assert guid == "a1234567-d234-4031-a111-000000000000"
+            assert (protocol, version, version_format, raw) == ("org.uefi.capsule", "1.51", "pair", 65587)
+            with os.fdopen(fd.take(), "rb") as stream:
+                seals = fcntl.fcntl(stream, fcntl.F_GET_SEALS)
+                required = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+                assert seals & required == required
+                assert not os.fstat(stream.fileno()).st_mode & 0o111
+                content = stream.read()
+                assert content == b"exact cabinet" and archive == sha256(content).hexdigest()
+
         @dbus.service.method(interface, in_signature="", out_signature="aa{sv}")
         def GetDevices(self):
             setting = mode.read_text()

@@ -828,6 +828,15 @@ async fn refresh(
         }
     };
     observe()?;
+    let check_cabinet = |path: &Path| {
+        require_current()?;
+        let file = state::open_regular(path)?;
+        match &source {
+            SnapshotSource::Live(live) => live.verify_cabinet(file, &offer)?,
+            SnapshotSource::File(..) => verify_member(file, &offer.archive)?,
+        }
+        observe()
+    };
     let (staged, observation_sha256) = stage_archive(
         &repo,
         &parent,
@@ -835,7 +844,7 @@ async fn refresh(
         &head_bytes,
         &signature,
         &approval_sha256,
-        &observe,
+        &check_cabinet,
     )
     .await?;
     let vendor_authentication = match offer.qualification.vendor_authentication {
@@ -847,6 +856,8 @@ async fn refresh(
     Ok(Some(Staged {
         offer_sha256: approval_sha256,
         archive_sha256: offer.archive.sha256,
+        verified_payload_sha256: matches!(source, SnapshotSource::Live(_))
+            .then_some(offer.payload_sha256),
         observation_sha256,
         qualified_vendor_authentication: vendor_authentication,
         staged,
@@ -857,6 +868,8 @@ async fn refresh(
 struct Staged {
     offer_sha256: String,
     archive_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified_payload_sha256: Option<String>,
     observation_sha256: String,
     qualified_vendor_authentication: &'static str,
     staged: PathBuf,
@@ -912,7 +925,7 @@ async fn stage_archive(
     document: &[u8],
     signature: &[u8],
     approval_sha256: &str,
-    observe: &dyn Fn() -> Result<String>,
+    check_cabinet: &dyn Fn(&Path) -> Result<String>,
 ) -> Result<(PathBuf, String)> {
     let target = TargetName::new(format!("fvca-firmware-{}.cab", offer.archive.sha256))?;
     if check_target(repo, &target, offer.archive.bytes, &offer.archive.sha256)?
@@ -932,11 +945,8 @@ async fn stage_archive(
                     invalid("existing firmware stage does not match the signed offer").into(),
                 );
             }
-            verify_member(
-                state::open_regular(&destination.join(ARCHIVE))?,
-                &offer.archive,
-            )?;
-            return Ok((destination, observe()?));
+            let observation = check_cabinet(&destination.join(ARCHIVE))?;
+            return Ok((destination, observation));
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => (),
         Err(error) => return Err(error.into()),
@@ -947,14 +957,13 @@ async fn stage_archive(
         .tempdir_in(parent)?;
     let path = temporary.path();
     download(repo, &target, &path.join(ARCHIVE), offer.archive.bytes).await?;
-    verify_member(state::open_regular(&path.join(ARCHIVE))?, &offer.archive)?;
     for (name, bytes) in [(OFFER, document), (SIGNATURE, signature)] {
         let mut file = output_file(&path.join(name))?;
         file.write_all(bytes)?;
         file.sync_all()?;
     }
     File::open(path)?.sync_all()?;
-    let observation_sha256 = observe()?;
+    let observation_sha256 = check_cabinet(&path.join(ARCHIVE))?;
     rustix::fs::renameat_with(
         rustix::fs::CWD,
         path,

@@ -357,11 +357,15 @@ def assemble(args, work):
     if args.firmware_update_owner is not None:
         required += ("usr/lib/fvca/firmware-update-enrollment-v1", "usr/bin/chcon")
         for tree, members in (
-            (prepared / "root", (Path("usr/libexec/fwupd/fwupd"), Path("usr/lib/systemd/system/fvca-fwupd.service"))),
+            (prepared / "root", (Path("usr/libexec/fwupd/fwupd"), Path("usr/lib/systemd/system/fvca-fwupd.service"),
+                                 Path("usr/share/fvca/firmware-build.txt"))),
             (runtime_work / "tree", vm_runtime.FIRMWARE_UPDATE_UNITS),
         ):
             if any((tree / member).is_symlink() or not (tree / member).is_file() for member in members):
                 raise ValueError("scheduled Host firmware requires the confined fwupd core and VM runtime units")
+        provenance = (prepared / "root/usr/share/fvca/firmware-build.txt").read_text(encoding="ascii")
+        if not re.search(r"^cabinet_patch_sha256=[0-9a-f]{64}$", provenance, re.MULTILINE):
+            raise ValueError("scheduled Host firmware requires the native cabinet verifier")
     if args.boot_trial_candidate is not None:
         recorder = runtime_work / "tree" / vm_runtime.TRIAL_HEALTH
         if recorder.is_symlink() or not recorder.is_file() or recorder.stat().st_mode & 0o111 == 0:

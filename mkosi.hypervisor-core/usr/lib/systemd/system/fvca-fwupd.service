@@ -13,6 +13,7 @@ TimeoutStartSec=60s
 RuntimeDirectory=fvca-firmware
 RuntimeDirectoryMode=0700
 Environment=STATE_DIRECTORY=/run/fvca-firmware CACHE_DIRECTORY=/run/fvca-firmware
+UnsetEnvironment=FWUPD_SELF_TEST
 CapabilityBoundingSet=
 DevicePolicy=closed
 DeviceAllow=char-nvme r

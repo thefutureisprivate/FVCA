@@ -9,6 +9,7 @@ use crate::{Result, invalid};
 
 const CALL_TIMEOUT: u64 = 10_000_000;
 const CATALOG_TIMEOUT: u64 = 120_000_000;
+const CABINET_TIMEOUT: u64 = 120_000_000;
 const STR_LIMIT: usize = 4096;
 const ITEM_LIMIT: usize = 128;
 
@@ -132,10 +133,25 @@ impl Bus {
         let call = self.prepare(owner, c"/", c"org.freedesktop.fwupd", c"UpdateMetadata")?;
         call.append(b's', c"lvfs".as_ptr().cast())?;
         for fd in [metadata, signature] {
-            // sd-bus duplicates each passed Unix descriptor before this value goes out of scope.
-            call.append(b'h', std::ptr::from_ref(&fd.as_raw_fd()).cast())?;
+            call.append_fd(fd)?;
         }
         self.send(&call, CATALOG_TIMEOUT)?.finish()
+    }
+
+    pub(super) fn verify_cabinet(
+        &self,
+        owner: &CStr,
+        identity: [&CStr; 6],
+        version_raw: u32,
+        cabinet: BorrowedFd<'_>,
+    ) -> Result<()> {
+        let call = self.prepare(owner, c"/", c"org.freedesktop.fwupd", c"VerifyFvcaCabinet")?;
+        for value in identity {
+            call.append(b's', value.as_ptr().cast())?;
+        }
+        call.append(b'u', std::ptr::from_ref(&version_raw).cast())?;
+        call.append_fd(cabinet)?;
+        self.send(&call, CABINET_TIMEOUT)?.finish()
     }
 
     fn prepare(
@@ -196,9 +212,14 @@ impl Message {
     }
 
     fn append(&self, kind: u8, value: *const c_void) -> io::Result<()> {
-        // Private callers provide a NUL-terminated string or a pointer to a live c_int.
+        // Private callers provide a NUL-terminated string or a pointer to the matching scalar type.
         check(unsafe { sd_bus_message_append_basic(self.0.as_ptr(), kind as c_char, value) })?;
         Ok(())
+    }
+
+    fn append_fd(&self, fd: BorrowedFd<'_>) -> io::Result<()> {
+        // sd-bus duplicates the descriptor before the stack value and borrow expire.
+        self.append(b'h', std::ptr::from_ref(&fd.as_raw_fd()).cast())
     }
 
     pub(super) fn string(&mut self) -> Result<String> {

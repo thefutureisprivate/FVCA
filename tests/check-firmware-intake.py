@@ -165,6 +165,7 @@ def qualify(client, output):
             assert status["disposition"] == disposition and stamp <= status["last_refresh"] < status["fresh_until"]
             if disposition == "staged":
                 assert status["archive_sha256"] == digest(archive)
+                assert "verified_payload_sha256" not in status
                 stage = Path(status["staged"])
                 assert {path.name for path in stage.iterdir()} == {"firmware.cab", "offer.json", "offer.sig"}
                 assert (stage / "firmware.cab").read_bytes() == archive

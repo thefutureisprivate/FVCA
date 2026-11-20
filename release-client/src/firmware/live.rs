@@ -2,7 +2,7 @@
 
 use std::ffi::{CStr, CString};
 use std::fs::{self, File};
-use std::io::{Seek, Write};
+use std::io::{self, Read, Seek};
 use std::os::fd::AsFd;
 use std::path::Path;
 
@@ -287,12 +287,14 @@ fn esrt(path: &Path) -> Result<Vec<Esrt>> {
     Ok(entries)
 }
 
-fn sealed(name: &CStr, bytes: &[u8]) -> Result<File> {
+fn sealed(name: &CStr, input: impl Read, bytes: u64) -> Result<File> {
     let mut file = File::from(memfd_create(
         name,
         MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING | MemfdFlags::NOEXEC_SEAL,
     )?);
-    file.write_all(bytes)?;
+    if io::copy(&mut input.take(bytes + 1), &mut file)? != bytes {
+        return Err(invalid("firmware descriptor length differs from its verified input").into());
+    }
     fcntl_add_seals(
         &file,
         SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
@@ -332,8 +334,16 @@ impl Session {
     fn import(peer: Peer, expected: &str, payloads: &[Vec<u8>; 2]) -> Result<Self> {
         let mut catalog = peer.catalog()?;
         if !matches_catalog(&catalog, expected) {
-            let metadata = sealed(c"fvca-lvfs-metadata", &payloads[0])?;
-            let signature = sealed(c"fvca-lvfs-signature", &payloads[1])?;
+            let metadata = sealed(
+                c"fvca-lvfs-metadata",
+                payloads[0].as_slice(),
+                payloads[0].len() as u64,
+            )?;
+            let signature = sealed(
+                c"fvca-lvfs-signature",
+                payloads[1].as_slice(),
+                payloads[1].len() as u64,
+            )?;
             peer.bus
                 .import_lvfs(&peer.owner, metadata.as_fd(), signature.as_fd())?;
             catalog = peer.catalog()?;
@@ -351,6 +361,26 @@ impl Session {
             return Err(invalid("fwupd firmware catalog changed during intake").into());
         }
         Ok(())
+    }
+
+    pub(super) fn verify_cabinet(&self, file: File, offer: &Offer) -> Result<()> {
+        let identity = [
+            CString::new(offer.archive.sha256.as_str())?,
+            CString::new(offer.payload_sha256.as_str())?,
+            CString::new(offer.device.guid.as_str())?,
+            CString::new(offer.device.component.protocol())?,
+            CString::new(offer.to.text.as_str())?,
+            CString::new(offer.device.version_format.as_str())?,
+        ];
+        self.require_catalog()?;
+        let archive = sealed(c"fvca-firmware-cabinet", file, offer.archive.bytes)?;
+        self.peer.bus.verify_cabinet(
+            &self.peer.owner,
+            identity.each_ref().map(CString::as_c_str),
+            offer.to.raw.unwrap_or(0),
+            archive.as_fd(),
+        )?;
+        self.require_catalog()
     }
 
     pub(super) fn read(&self, identity: &DeviceIdentity) -> Result<Observation> {
@@ -480,6 +510,30 @@ mod tests {
         );
         let session = Session::import(peer, &identity, &payloads)?;
         session.require_catalog()?;
+        let cabinet = b"exact cabinet";
+        assert!(sealed(c"too-short", cabinet.as_slice(), 5).is_err());
+        assert!(sealed(c"too-long", cabinet.as_slice(), 20).is_err());
+        let archive = CString::new(crate::channel::digest(cabinet))?;
+        let payload = CString::new("7".repeat(64))?;
+        let guid = CString::new(guid)?;
+        let fd = sealed(
+            c"firmware-cabinet-fixture",
+            cabinet.as_slice(),
+            cabinet.len() as u64,
+        )?;
+        session.peer.bus.verify_cabinet(
+            &session.peer.owner,
+            [
+                &archive,
+                &payload,
+                &guid,
+                c"org.uefi.capsule",
+                c"1.51",
+                c"pair",
+            ],
+            65587,
+            fd.as_fd(),
+        )?;
         fs::write(&mode, "catalog-replaced")?;
         let error = session.require_catalog().err().unwrap();
         assert!(error.to_string().contains("catalog changed during intake"));

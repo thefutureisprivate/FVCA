@@ -1,0 +1,245 @@
+--- a/src/fu-dbus-daemon.c
++++ b/src/fu-dbus-daemon.c
+@@ -1922,2 +1922,2 @@
+-static GBytes *
+-fu_dbus_daemon_read_catalog_fd(gint fd, goffset limit, GError **error)
++static FuInputStream *
++fu_dbus_daemon_open_sealed_fd(gint fd, goffset limit, GError **error)
+@@ -1928,2 +1927,0 @@
+-	g_autoptr(FuInputStream) stream = NULL;
+-
+@@ -1934 +1932 @@
+-				    "expected a bounded, sealed, non-executable catalog descriptor");
++				    "expected a bounded, sealed, non-executable firmware descriptor");
+@@ -1937 +1935,8 @@
+-	stream = fu_unix_seekable_input_stream_new(fd, FALSE, error);
++	return fu_unix_seekable_input_stream_new(fd, FALSE, error);
++}
++
++static GBytes *
++fu_dbus_daemon_read_catalog_fd(gint fd, goffset limit, GError **error)
++{
++	gsize size;
++	g_autoptr(FuInputStream) stream = fu_dbus_daemon_open_sealed_fd(fd, limit, error);
+@@ -1940 +1945,135 @@
+-	return fu_input_stream_read_bytes(stream, 0, (gsize)st.st_size, NULL, error);
++	if (!fu_input_stream_size(stream, &size, error))
++		return NULL;
++	return fu_input_stream_read_bytes(stream, 0, size, NULL, error);
++}
++
++static gboolean
++fu_dbus_daemon_approved_version(const gchar *protocol,
++				const gchar *version,
++				const gchar *format,
++				guint32 raw)
++{
++	FwupdVersionFormat kind = fwupd_version_format_from_string(format);
++	g_autofree gchar *normalized = NULL;
++
++	if (strlen(version) == 0 || strlen(version) > 64)
++		return FALSE;
++	if (g_strcmp0(protocol, "org.nvmexpress") == 0)
++		return raw == 0 && kind == FWUPD_VERSION_FORMAT_PLAIN;
++	if (g_strcmp0(protocol, "org.uefi.capsule") != 0 || raw == 0 ||
++	    (kind != FWUPD_VERSION_FORMAT_NUMBER && kind != FWUPD_VERSION_FORMAT_PAIR &&
++	     kind != FWUPD_VERSION_FORMAT_TRIPLET && kind != FWUPD_VERSION_FORMAT_QUAD))
++		return FALSE;
++	normalized = fu_version_from_uint32(raw, kind);
++	return g_strcmp0(normalized, version) == 0;
++}
++
++static gboolean
++fu_dbus_daemon_cabinet_version_matches(XbNode *node, const gchar *version, guint32 raw)
++{
++	const gchar *value = xb_node_get_attr(node, "version");
++	guint64 value_raw = 0;
++	if (g_strcmp0(value, version) == 0)
++		return TRUE;
++	return raw != 0 && value != NULL &&
++	       fu_strtoull(value, &value_raw, 1, G_MAXUINT32, FU_INTEGER_BASE_AUTO, NULL) &&
++	       value_raw == raw;
++}
++
++static gboolean
++fu_dbus_daemon_verify_cabinet(FuEngine *engine,
++			    FuInputStream *stream,
++			    const gchar *guid,
++			    const gchar *protocol,
++			    const gchar *version,
++			    guint32 version_raw,
++			    const gchar *payload_sha256,
++			    GError **error)
++{
++	g_autoptr(FuCabinet) cabinet = fu_engine_build_cabinet_from_stream(engine, stream, error);
++	g_autoptr(XbSilo) silo = NULL;
++	g_autoptr(GPtrArray) components = NULL;
++	g_autoptr(XbQuery) release_query = NULL;
++	g_autoptr(XbNode) selected = NULL;
++	g_autoptr(FuRelease) release = fu_release_new();
++	g_autofree gchar *digest = NULL;
++	FuInputStream *payload;
++	XbNode *selected_component = NULL;
++
++	if (cabinet == NULL)
++		return FALSE;
++	components = fu_cabinet_get_components(cabinet, error);
++	if (components == NULL)
++		return FALSE;
++	silo = fu_cabinet_get_silo(cabinet, error);
++	if (silo == NULL)
++		return FALSE;
++	release_query = xb_query_new_full(silo, "releases/release", XB_QUERY_FLAG_FORCE_NODE_CACHE, error);
++	if (release_query == NULL)
++		return FALSE;
++
++	/* Resolve a single exact target using the same silo and release stream as fwupd. */
++	for (guint i = 0; i < components->len; i++) {
++		XbNode *component = g_ptr_array_index(components, i);
++		g_autoptr(GPtrArray) provides =
++		    xb_node_query(component, "provides/firmware[@type='flashed']", 0, NULL);
++		g_autoptr(GPtrArray) releases = NULL;
++		gboolean matches_guid = FALSE;
++
++		for (guint j = 0; provides != NULL && j < provides->len; j++) {
++			if (g_strcmp0(xb_node_get_text(g_ptr_array_index(provides, j)), guid) == 0)
++				matches_guid = TRUE;
++		}
++		if (!matches_guid)
++			continue;
++		/* The native parser stores signature results and the selected basename on cached nodes. */
++		releases = xb_node_query_full(component, release_query, error);
++		if (releases == NULL)
++			return FALSE;
++		for (guint j = 0; j < releases->len; j++) {
++			XbNode *node = g_ptr_array_index(releases, j);
++			if (!fu_dbus_daemon_cabinet_version_matches(node, version, version_raw))
++				continue;
++			if (selected != NULL) {
++				g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++						    "cabinet has ambiguous matching firmware releases");
++				return FALSE;
++			}
++			selected = g_object_ref(node);
++			selected_component = component;
++		}
++	}
++	if (selected == NULL) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++				    "cabinet does not contain the approved device GUID and target version");
++		return FALSE;
++	}
++	if (!fu_release_load(release, cabinet, selected_component, selected, FWUPD_INSTALL_FLAG_NONE,
++			     error))
++		return FALSE;
++	if (g_strcmp0(fu_release_get_protocol(release), protocol) != 0) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++				    "cabinet release protocol differs from the approved protocol");
++		return FALSE;
++	}
++	if (!fu_release_has_flag(release, FWUPD_RELEASE_FLAG_TRUSTED_METADATA) ||
++	    !fu_release_has_flag(release, FWUPD_RELEASE_FLAG_TRUSTED_PAYLOAD)) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++				    "cabinet metadata or payload lacks a trusted distribution signature");
++		return FALSE;
++	}
++	payload = fu_release_get_stream(release);
++	if (payload == NULL) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++				    "cabinet release has no payload stream");
++		return FALSE;
++	}
++	digest = fu_input_stream_compute_checksum(payload, G_CHECKSUM_SHA256, error);
++	if (digest == NULL)
++		return FALSE;
++	if (g_strcmp0(digest, payload_sha256) != 0) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++				    "cabinet payload SHA-256 differs from the approved digest");
++		return FALSE;
++	}
++	return TRUE;
+@@ -1942,0 +2082,62 @@
++
++static void
++fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
++					GVariant *parameters,
++					FuEngineRequest *request,
++					GDBusMethodInvocation *invocation)
++{
++#ifdef HAVE_GIO_UNIX
++	FuEngine *engine = fu_daemon_get_engine(FU_DAEMON(self));
++	GDBusMessage *message = g_dbus_method_invocation_get_message(invocation);
++	GUnixFDList *list = g_dbus_message_get_unix_fd_list(message);
++	const gchar *archive_sha256, *payload_sha256, *guid, *protocol, *version, *format;
++	guint32 version_raw;
++	gint handle;
++	g_autofd gint fd = -1;
++	g_autoptr(FuInputStream) stream = NULL;
++	g_autoptr(GError) error = NULL;
++	g_autofree gchar *digest = NULL;
++	gboolean verified;
++
++	g_variant_get(parameters, "(&s&s&s&s&s&suh)", &archive_sha256, &payload_sha256, &guid,
++		      &protocol, &version, &format, &version_raw, &handle);
++	if (!fu_engine_request_has_converter_flag(request, FWUPD_CODEC_FLAG_TRUSTED) ||
++	    !fu_context_get_config_bool(fu_engine_get_context(engine), "OnlyTrusted") ||
++	    g_getenv("FWUPD_SELF_TEST") != NULL ||
++	    list == NULL || g_unix_fd_list_get_length(list) != 1 || handle != 0 ||
++	    strlen(archive_sha256) != 64 || strlen(payload_sha256) != 64 || strlen(guid) != 36 ||
++	    !fu_dbus_daemon_approved_version(protocol, version, format, version_raw)) {
++		g_dbus_method_invocation_return_error_literal(invocation, G_DBUS_ERROR,
++							      G_DBUS_ERROR_ACCESS_DENIED,
++							      "FVCA requires one exact approved cabinet");
++		return;
++	}
++	fd = g_unix_fd_list_get(list, handle, &error);
++	if (fd < 0)
++		goto fail;
++	stream = fu_dbus_daemon_open_sealed_fd(fd, 256 * FU_MB, &error);
++	if (stream == NULL)
++		goto fail;
++	digest = fu_input_stream_compute_checksum(stream, G_CHECKSUM_SHA256, &error);
++	if (digest == NULL)
++		goto fail;
++	if (g_strcmp0(digest, archive_sha256) != 0) {
++		g_dbus_method_invocation_return_error_literal(invocation, FWUPD_ERROR,
++							      FWUPD_ERROR_INVALID_FILE,
++							      "cabinet SHA-256 differs from the approved digest");
++		return;
++	}
++	verified = fu_dbus_daemon_verify_cabinet(engine, stream, guid, protocol, version, version_raw,
++					      payload_sha256, &error);
++	fu_daemon_set_status(FU_DAEMON(self), FWUPD_STATUS_IDLE);
++	if (!verified)
++		goto fail;
++	g_dbus_method_invocation_return_value(invocation, NULL);
++	return;
++fail:
++	fu_dbus_daemon_method_invocation_return_gerror(invocation, error);
++#else
++	g_dbus_method_invocation_return_error_literal(invocation, FWUPD_ERROR, FWUPD_ERROR_NOT_SUPPORTED,
++						      "cabinet verification requires Unix descriptors");
++#endif
++}
+@@ -2755,0 +2957 @@
++	    {"VerifyFvcaCabinet", fu_dbus_daemon_method_verify_fvca_cabinet},
+@@ -2780 +2982,3 @@
+-	    (g_strcmp0(method_name, "GetUpgrades") != 0 || self->fvca_catalog == NULL)) {
++	    (self->fvca_catalog == NULL ||
++	     (g_strcmp0(method_name, "GetUpgrades") != 0 &&
++	      g_strcmp0(method_name, "VerifyFvcaCabinet") != 0))) {
+--- a/src/org.freedesktop.fwupd.xml
++++ b/src/org.freedesktop.fwupd.xml
+@@ -770,0 +771,12 @@
++    <method name='VerifyFvcaCabinet'>
++      <arg type='s' name='archive_sha256' direction='in'/>
++      <arg type='s' name='payload_sha256' direction='in'/>
++      <arg type='s' name='guid' direction='in'/>
++      <arg type='s' name='protocol' direction='in'/>
++      <arg type='s' name='version' direction='in'/>
++      <arg type='s' name='version_format' direction='in'/>
++      <arg type='u' name='version_raw' direction='in'/>
++      <arg type='h' name='fd' direction='in'/>
++    </method>
++
++    <!--***********************************************************-->

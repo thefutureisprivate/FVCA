@@ -18,6 +18,9 @@ FWUPD = "org.freedesktop.fwupd"
 DBUS = "org.freedesktop.DBus"
 CONFIG = Path("/usr/lib/fvca/firmware-bus.conf")
 MFD_NOEXEC_SEAL = 0x0008  # Linux memfd UAPI, not exposed by Python's os module.
+P3_ARCHIVE = "a90d488cc31ba8eade423a9a980c96bc793c0e51cff375ae7da2a9336735a3ba"
+P3_PAYLOAD = "78ea6a1e305ed7cba594493a798878e6b10f54dab81a2714b2d96facaa685553"
+P3_GUID = "ed151d94-9d52-4a39-b0aa-c0088fdcaa4f"
 
 
 @contextmanager
@@ -35,8 +38,8 @@ def running(command, **kwargs):
 
 
 @contextmanager
-def catalog_descriptor(content, *, sealed=True):
-    fd = os.memfd_create("fwupd-catalog-test", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL)
+def firmware_descriptor(content, *, sealed=True):
+    fd = os.memfd_create("fwupd-read-only-test", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL)
     try:
         with os.fdopen(os.dup(fd), "wb") as stream:
             stream.write(content)
@@ -59,17 +62,17 @@ def check_catalog(call, owner, metadata, signature):
     changed = bytes([metadata[0] ^ 1]) + metadata[1:]
     identity = f"{sha256(metadata).hexdigest()}:{sha256(signature).hexdigest()}"
 
-    with catalog_descriptor(signature) as jcat, catalog_descriptor(metadata) as content:
+    with firmware_descriptor(signature) as jcat, firmware_descriptor(metadata) as content:
         def publish(data, remote="lvfs", **kwargs):
             return call("call", owner, "/", FWUPD, "UpdateMetadata", "shh", remote, str(data), str(jcat),
                         pass_fds=(data, jcat), **kwargs)
 
         foreign = publish(content, "lvfs-testing", check=False)
         assert foreign.returncode != 0 and "Access denied" in foreign.stderr, foreign.stderr
-        with catalog_descriptor(metadata, sealed=False) as unsealed:
+        with firmware_descriptor(metadata, sealed=False) as unsealed:
             rejected = publish(unsealed, check=False)
         assert rejected.returncode != 0 and "sealed, non-executable" in rejected.stderr, rejected.stderr
-        with catalog_descriptor(changed) as corrupt:
+        with firmware_descriptor(changed) as corrupt:
             rejected = publish(corrupt, check=False)
         assert rejected.returncode != 0 and "checksum" in rejected.stderr.lower(), rejected.stderr
         assert receipt() == ""
@@ -80,7 +83,36 @@ def check_catalog(call, owner, metadata, signature):
     print("fwupd verifies the LVFS signature and binds catalog generations to the exact bytes")
 
 
-def check(directory, metadata, signature):
+def check_cabinet(call, owner, cabinet, unsigned):
+    assert sha256(cabinet).hexdigest() == P3_ARCHIVE
+
+    def verify(fd, expected=None, *, archive=P3_ARCHIVE, payload=P3_PAYLOAD, guid=P3_GUID,
+               protocol="org.uefi.capsule", version="1.51", version_format="pair", raw=65587):
+        result = call("call", owner, "/", FWUPD, "VerifyFvcaCabinet", "ssssssuh",
+                      archive, payload, guid, protocol, version, version_format, str(raw), str(fd),
+                      pass_fds=(fd,), check=False)
+        if expected is None:
+            assert result.returncode == 0, result.stderr
+        else:
+            assert result.returncode != 0 and expected in result.stderr, result.stderr
+
+    with firmware_descriptor(cabinet, sealed=False) as descriptor:
+        verify(descriptor, "sealed, non-executable")
+    with firmware_descriptor(cabinet) as descriptor:
+        verify(descriptor, "cabinet SHA-256 differs", archive="0" * 64)
+        verify(descriptor, "payload SHA-256 differs", payload="0" * 64)
+        verify(descriptor, "approved device GUID and target version", guid="9" * 36)
+        verify(descriptor, "approved device GUID and target version", version="1.52", raw=65588)
+        verify(descriptor, "Access denied", version="1.52")
+        verify(descriptor, "cabinet release protocol differs",
+               protocol="org.nvmexpress", version="65587", version_format="plain", raw=0)
+        verify(descriptor)
+    with firmware_descriptor(unsigned) as descriptor:
+        verify(descriptor, "lacks a trusted distribution signature", archive=sha256(unsigned).hexdigest())
+    print("fwupd verifies the exact P3 Ultra cabinet and payload and rejects an unsigned repack")
+
+
+def check(directory, metadata, signature, cabinet, unsigned):
     address = f"unix:path={directory / 'bus'}"
 
     def call(*args, check=True, **kwargs):
@@ -127,6 +159,7 @@ def check(directory, metadata, signature):
             assert sorted(plugin["Name"]["data"] for plugin in inventory) == ["nvme", "uefi_capsule"]
             print("real fwupd peer is ready and has exactly the two built-in plugins")
             check_catalog(call, owner, metadata, signature)
+            check_cabinet(call, owner, cabinet, unsigned)
 
             # Exercise both the real well-known-name policy and the unique-name path used by Rust.
             for peer in (FWUPD, owner):
@@ -149,8 +182,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--catalog", required=True, type=Path)
     parser.add_argument("--signature", required=True, type=Path)
+    parser.add_argument("--cabinet", required=True, type=Path)
+    parser.add_argument("--unsigned-cabinet", required=True, type=Path)
     args = parser.parse_args()
     if os.geteuid() != 0 or not CONFIG.is_file():
         raise SystemExit("run inside a disposable Fedora root with the staged firmware component")
     with tempfile.TemporaryDirectory(prefix="fvca-fwupd-host-") as path:
-        check(Path(path), args.catalog.read_bytes(), args.signature.read_bytes())
+        check(Path(path), args.catalog.read_bytes(), args.signature.read_bytes(),
+              args.cabinet.read_bytes(), args.unsigned_cabinet.read_bytes())
