@@ -58,11 +58,16 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
         cpu = "Skylake-Client,vmx=on,hle=off,rtm=off"
         machine += ",kernel_irqchip=split"
         devices = ["-device", "virtio-rng-pci"]
+    nvme = getattr(args, "nvme_boot", False)
+    sector = getattr(args, "boot_sector_size", 512)
+    geometry = f",logical_block_size={sector},physical_block_size={sector}" if nvme or sector != 512 else ""
+    boot_device = "nvme,drive=fvca-boot,serial=fvca-slot-1" if nvme else "virtio-blk-pci,drive=fvca-boot"
+    media_access = "snapshot=on" if nvme else "readonly=on"
     command = [
         "qemu-system-x86_64", *devices, "-machine", machine, "-accel", "kvm", "-cpu", cpu,
         "-m", "4096" if nested is not None else "2048", "-smp", "2", *loader,
-        "-drive", f"if=none,id=fvca-boot,format=raw,readonly=on,file={image(args.disk)}",
-        "-device", "virtio-blk-pci,drive=fvca-boot,bootindex=1",
+        "-drive", f"if=none,id=fvca-boot,format=raw,{media_access},file={image(args.disk)}",
+        "-device", f"{boot_device}{geometry},bootindex=1",
     ]
     for index, member in enumerate(members):
         drive = f"fvca-member-{index}"
@@ -74,9 +79,10 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
         "-display", "none", "-serial", "stdio", "-monitor", "none", "-nic", "none", "-no-reboot",
     ]
     if args.runtime is not None and attach_runtime:
+        companion = "nvme,drive=fvca-runtime,serial=fvca-slot-2" if nvme else "virtio-blk-pci,drive=fvca-runtime"
         command += [
-            "-drive", f"if=none,id=fvca-runtime,format=raw,readonly=on,file={image(args.runtime)}",
-            "-device", "virtio-blk-pci,drive=fvca-runtime",
+            "-drive", f"if=none,id=fvca-runtime,format=raw,{media_access},file={image(args.runtime)}",
+            "-device", f"{companion}{geometry}",
         ]
     if nested is not None and attach_guest:
         command += [

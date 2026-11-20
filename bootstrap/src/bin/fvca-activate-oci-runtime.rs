@@ -26,7 +26,7 @@ fn activate() -> io::Result<()> {
     if fs::read_to_string("/sysroot/usr/lib/fvca/role")? != "service-guest\n" {
         return Err(invalid("expected a Service Guest core"));
     }
-    let runtime_hash = runtime::activate(Runtime::Oci)?;
+    let runtime_hash = runtime::activate(Runtime::Oci, None)?;
     workload_trust::enroll()?;
     let quadlets = "/run/fvca/oci-probe-quadlet";
     fs::create_dir_all(quadlets)?;

@@ -82,8 +82,17 @@ pub fn mount_verified(
     signature: &Path,
     target: &Path,
     options: &str,
+    devices: Option<&(PathBuf, PathBuf)>,
 ) -> io::Result<()> {
-    let (data, tree) = runtime_devices(hash(root)?, label)?;
+    let root = hash(root)?;
+    let discovered;
+    let (data, tree) = match devices {
+        Some(devices) => devices,
+        None => {
+            discovered = runtime_devices(root, label)?;
+            &discovered
+        }
+    };
     fs::create_dir_all(target)?;
     let mapping = format!("fvca-{name}");
     run(Command::new("/usr/lib/systemd/systemd-veritysetup")
@@ -97,7 +106,7 @@ pub fn mount_verified(
         .arg(target))
 }
 
-pub fn activate(selected: Runtime) -> io::Result<String> {
+pub fn activate(selected: Runtime, devices: Option<&(PathBuf, PathBuf)>) -> io::Result<String> {
     let (role, runtime, label) = match selected {
         Runtime::Vm => ("hypervisor", "vm-runtime", "VM runtime"),
         Runtime::Oci => ("service-guest", "oci-runtime", "OCI runtime"),
@@ -109,7 +118,7 @@ pub fn activate(selected: Runtime) -> io::Result<String> {
     let staging = format!("/run/fvca/{runtime}");
     let signature = format!("/usr/lib/fvca/{runtime}.p7s");
     mount_verified(
-        runtime, label, runtime_hash, Path::new(&signature), Path::new(&staging), "ro,nodev,nosuid",
+        runtime, label, runtime_hash, Path::new(&signature), Path::new(&staging), "ro,nodev,nosuid", devices,
     )?;
 
     let binding = fs::read_to_string(format!("{staging}/usr/share/fvca/{runtime}-base.roothash"))?;

@@ -168,7 +168,23 @@ python3 tools/compose-hypervisor.py \
 
 Use the QEMU command above with `build/hypervisor-profile/fvca-dev-hypervisor.raw` as the boot disk. Pass the runtime as a second drive with `-drive if=virtio,format=raw,readonly=on,file=build/vm-runtime/vm-runtime.raw`. Use Intel KVM with VMX exposed to the appliance for this test. The appliance disables nested virtualization for its own guests. The initramfs activates the selected signed verity mapping and mounts an overlay made from two read-only layers before switch-root.
 
-The readiness probe runs `qemu-img` from the composed `/usr` and exercises a diskless, networkless q35 VM through the private libvirt socket. It requires an sVirt MCS label, the dedicated QEMU UID, seccomp, no-new-privileges, zero effective capabilities, and a private mount namespace. The console prints `FVCA_LIBVIRT_LIFECYCLE_OK` after the VM starts, suspends, resumes, and stops. Booting a signed Service Guest and production release authorization remain separate qualification targets.
+The readiness probe runs `qemu-img` from the composed `/usr` and exercises a diskless, networkless q35 VM through the private libvirt socket. It requires an sVirt MCS label, the dedicated QEMU UID, seccomp, no-new-privileges, zero effective capabilities, and a private mount namespace. The console prints `FVCA_LIBVIRT_LIFECYCLE_OK` after the VM starts, suspends, resumes, and stops. Production release authorization still requires independent approval.
+
+### Boot a self-contained Hypervisor GPT slot
+
+Use the Hypervisor initramfs from the native mkosi recipe and pass `--gpt-slot UUID` to `tools/compose-hypervisor.py` with the approved Host storage selection and Guest boot bundle. Use a distinct slot UUID for each boot disk, including disks carrying identical release bytes. The composer writes a new GPT image with its own FAT32 ESP, core, VM runtime and Guest boot capsule. It checks the installed partition identities and bytes before publishing the image. Install `dosfstools` on the builder. The GPT and ESP default to 4 KiB logical sectors, which matches the target NVMe drives. For a device with 512-byte logical sectors, pass `--gpt-sector-size 512` and use `--sector-size 512` during qualification.
+
+The signed UKI names the slot's exact partition UUIDs and carries the core verity signature. During boot the runtime activator checks that all seven partitions share one disk and that the mounted verity root uses the approved core partition pair. It then activates the explicitly selected VM runtime and Guest capsule with dm-verity. The Hypervisor opens the separately provisioned encrypted Btrfs mirror after the slot check. [systemd verity device selection](https://www.freedesktop.org/software/systemd/man/latest/systemd-veritysetup-generator.html) · [systemd GPT image construction](https://www.freedesktop.org/software/systemd/man/latest/systemd-repart.html)
+
+Create two disposable slot images and test them using the Secure Boot variable store and development Btrfs mirror below.
+
+```sh
+python3 tests/check-hypervisor-gpt-slots.py \
+  --first build/slot-a.raw --second build/slot-b.raw --variables build/fvca-vars.fd \
+  --lab build/host-storage-lab --output build/gpt-slot-checks
+```
+
+The test attaches the boot images as virtual NVMe devices with the selected logical sector size. Compose its inputs with a recovery UKI or provide a seeded Guest and the matching Host storage profile. The test selects each slot with both disks attached and rejects duplicate locators or a tuple split across the two disks. Installing these immutable partitions alongside the data partitions on the physical NVMes, physical degraded boot, and automatic trial boot remain separate qualification steps.
 
 ## Development Hypervisor storage
 

@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{invalid, runtime};
 
@@ -51,7 +51,7 @@ pub fn parse(payload: &str) -> io::Result<Selection<'_>> {
     Ok(Selection { bundle, core, runtime, checksums })
 }
 
-pub fn activate_if_selected(auto_start: bool) -> io::Result<()> {
+pub fn activate_if_selected(auto_start: bool, devices: Option<&(PathBuf, PathBuf)>) -> io::Result<()> {
     let payload = match fs::read_to_string(SOURCE) {
         Ok(payload) => payload,
         Err(error) if error.kind() == io::ErrorKind::NotFound && !Path::new(SIGNATURE).try_exists()? => return Ok(()),
@@ -59,7 +59,7 @@ pub fn activate_if_selected(auto_start: bool) -> io::Result<()> {
     };
     let selection = parse(&payload)?;
     runtime::mount_verified("guest-boot", "Guest boot bundle", selection.bundle, Path::new(SIGNATURE),
-                            Path::new(BOOT), "ro,nodev,nosuid,noexec")?;
+                            Path::new(BOOT), "ro,nodev,nosuid,noexec", devices)?;
     fs::write(SELECTION, payload)?;
     if !auto_start {
         return Ok(());

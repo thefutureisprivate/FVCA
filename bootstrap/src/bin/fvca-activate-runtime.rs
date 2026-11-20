@@ -6,7 +6,7 @@ use std::io;
 use std::os::unix::fs::FileTypeExt;
 use std::process::ExitCode;
 
-use fvca_initrd_bootstrap::{backup_job, backup_policy, guest_boot, invalid, recovery, retention_policy};
+use fvca_initrd_bootstrap::{backup_job, backup_policy, guest_boot, hypervisor_slot::Slot, invalid, recovery, retention_policy};
 use fvca_initrd_bootstrap::runtime::{self, Runtime, hash};
 
 #[path = "fvca-activate-runtime/storage.rs"]
@@ -24,14 +24,15 @@ fn activate() -> io::Result<()> {
     {
         return Err(invalid("Intel KVM must be available with nested virtualization disabled"));
     }
-    let runtime_hash = runtime::activate(Runtime::Vm)?;
+    let slot = Slot::load()?;
+    let runtime_hash = runtime::activate(Runtime::Vm, slot.as_ref().map(|slot| &slot.runtime))?;
     runtime::install_development_probe("fvca-vm-runtime-probe.service", PROBE)?;
     storage::activate_if_selected()?;
     backup_policy::activate_if_selected()?;
     retention_policy::activate_if_selected()?;
     let recovering = recovery::activate_if_selected()?;
     backup_job::activate_if_selected(recovering)?;
-    guest_boot::activate_if_selected(!recovering)?;
+    guest_boot::activate_if_selected(!recovering, slot.as_ref().map(|slot| &slot.guest))?;
 
     println!("FVCA_VM_RUNTIME_ACTIVE {runtime_hash}");
     Ok(())

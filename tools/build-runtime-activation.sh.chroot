@@ -22,3 +22,6 @@ cargo build --frozen --release --target "$target" --manifest-path "$SRCDIR/boots
 for binary in "${binaries[@]}"; do
     install -Dm755 "$CARGO_TARGET_DIR/$target/release/$binary" "$DESTDIR/usr/lib/fvca/${binary#fvca-}"
 done
+if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-slot-support-v1"
+fi

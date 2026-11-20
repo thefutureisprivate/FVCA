@@ -9,9 +9,11 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from uuid import UUID
 
 import backup_destination
 import guest_boot_bundle
+import hypervisor_gpt
 from image_verity import VERITY_PARTITIONS, read_layout, verify_verity
 from runtime_boot import (
     DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_LAUNCH_FILES, WORKLOAD_TRUST_FILES,
@@ -211,10 +213,17 @@ def assemble(args, work):
     forbidden = tuple(f"usr/lib/fvca/{name}" for name in (
         "hypervisor.composition", "vm-runtime.p7s", "host-storage",
         *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, *BACKUP_FILES, BACKUP_JOB_FILE,
-        RESTORE_FILE, RETENTION_FILE,
+        RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE,
     ))
-    verify_initrd(args.initrd, uname, ACTIVATION_FILES, forbidden, "Hypervisor")
+    required = ACTIVATION_FILES
+    if args.gpt_slot:
+        required += (f"usr/lib/fvca/{hypervisor_gpt.SUPPORT}",)
+    verify_initrd(args.initrd, uname, required, forbidden, "Hypervisor")
     extra = (("host-storage", storage),) if storage is not None else ()
+    ids = None
+    if args.gpt_slot:
+        ids, slot_files = hypervisor_gpt.approval(args.gpt_slot, prepared)
+        extra += slot_files
     backup = backup_selection(args)
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
@@ -223,7 +232,10 @@ def assemble(args, work):
                *retention_selection(args.retention_policy, backup)),
     )
     cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS))
-    disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)
+    if ids is None:
+        disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)
+    else:
+        disk = hypervisor_gpt.pack(args, work, ids, cmdline, uname, composition, pcr_options)
     args.output.hardlink_to(disk)
     print(f"FVCA Hypervisor development disk binds core {core_hash} to VM runtime {runtime_hash}")
 
@@ -235,6 +247,8 @@ def main():
     parser.add_argument("--storage", type=Path, help="host storage selection to embed in the signed UKI")
     parser.add_argument("--guest-boot", type=Path, help="verified Guest boot bundle disk to authorize")
     parser.add_argument("--guest-release-certificate", type=Path, help="trusted Guest release signer")
+    parser.add_argument("--gpt-slot", type=UUID, help="assign one unique UUID to a self-contained Hypervisor GPT slot image")
+    parser.add_argument("--gpt-sector-size", type=int, choices=(512, 4096), help="GPT slot logical sector size (default 4096)")
     parser.add_argument("--backup-policy", type=Path, help="S3 destination and repository ID to authorize in this UKI")
     parser.add_argument("--backup-ca", type=Path, help="PEM trust bundle for the selected S3 endpoint")
     parser.add_argument("--backup-job", type=Path, help="authorize the periodic live Service Guest backup job")
@@ -250,6 +264,10 @@ def main():
         parser.error("Guest boot requires its signed bundle disk, release certificate, and Host storage")
     if args.output.exists():
         parser.error("output disk already exists")
+    if args.gpt_slot is not None and args.guest_boot is None:
+        parser.error("a GPT slot requires its authorized Guest boot bundle")
+    if args.gpt_sector_size is not None and args.gpt_slot is None:
+        parser.error("sector size is only configurable for a GPT slot image")
     if (args.backup_policy is None) != (args.backup_ca is None) or (
         args.backup_policy is not None and args.guest_boot is None
     ):

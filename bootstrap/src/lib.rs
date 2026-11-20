@@ -13,6 +13,7 @@ pub mod retention_policy;
 pub mod btrfs;
 pub mod direct_boot;
 pub mod guest_boot;
+pub mod hypervisor_slot;
 pub mod runtime;
 pub mod selinux;
 #[cfg(feature = "libvirt")]

@@ -92,14 +92,19 @@ def prepare_core(args, work):
     return prepared, core_hash, offset, cmdline, uname
 
 
-def write_disk(args, work, offset, cmdline, uname, composition, *, uki_options=(), direct_boot=False):
+def build_uki(args, work, cmdline, uname, composition, options):
     uki = work / "composed.efi"
     run("ukify", "build", "--config=/dev/null", f"--linux={work / 'linux'}",
         f"--os-release=@{work / 'osrel'}", f"--uname={uname}",
         f"--cmdline={cmdline}",
         f"--initrd={args.initrd}", f"--initrd={composition}",
         f"--secureboot-private-key={args.boot_key}", f"--secureboot-certificate={args.boot_certificate}",
-        *uki_options, "--no-sign-kernel", f"--output={uki}")
+        *options, "--no-sign-kernel", f"--output={uki}")
+    return uki
+
+
+def write_disk(args, work, offset, cmdline, uname, composition, *, uki_options=(), direct_boot=False):
+    uki = build_uki(args, work, cmdline, uname, composition, uki_options)
 
     disk = work / "composed.raw"
     run("cp", "--reflink=auto", "--sparse=always", "--", args.core, disk)
