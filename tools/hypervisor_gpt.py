@@ -20,10 +20,14 @@ PARTITIONS = {
 }
 
 
-def approval(identifier, prepared):
+def partition_ids(identifier):
     if identifier.int == 0:
         raise ValueError("Hypervisor slot UUID must be nonzero")
-    ids = {name: str(uuid5(identifier, name)) for name in PARTITIONS}
+    return {name: str(uuid5(identifier, name)) for name in PARTITIONS}
+
+
+def approval(identifier, prepared):
+    ids = partition_ids(identifier)
     manifest = "FVCA-HYPERVISOR-SLOT-1\n" + "".join(f"{name}={part}\n" for name, part in ids.items())
     return ids, ((MANIFEST, manifest.encode("ascii")), (ROOT_SIGNATURE, (prepared / "root.p7s").read_bytes()))
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=Discover and activate an eligible prepared Hypervisor release
+Description=Discover, prepare and activate an eligible Hypervisor release
 After=fvca-base-ready.service
 AssertSecurity=uefi-secureboot
 AssertSecurity=selinux

@@ -21,3 +21,12 @@
 (allow init_t fvca_host_data_t (dir (relabelfrom)))
 (allow init_t fvca_vm_slot_t (dir (getattr ioctl open read relabelfrom relabelto rename reparent rmdir search write)))
 (allowx init_t fvca_vm_slot_t (ioctl dir (0x9411 0x943c)))
+
+; Publish release directories atomically inside the updater's staging area.
+; Only the staging root receives this label during verified boot.
+(type fvca_os_stage_t)
+(typeattributeset file_type (fvca_os_stage_t))
+(roletype object_r fvca_os_stage_t)
+(allow fvca_os_stage_t fs_t (filesystem (associate)))
+(allow init_t fvca_os_stage_t (dir (add_name create getattr open read relabelfrom relabelto remove_name rename rmdir search setattr write)))
+(allow init_t fvca_os_stage_t (file (create getattr lock open read rename setattr unlink write)))

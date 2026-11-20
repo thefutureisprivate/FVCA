@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub use fvca_trial_authorization::APPROVAL_LIMIT;
-use fvca_trial_authorization::{Authorization, Entry, PENDING, Trial, authorization, trial};
+use fvca_trial_authorization::{
+    Authorization, Entry, PENDING, RUNNING_CONTEXT, Trial, authorization, trial,
+};
 
 use crate::{find_partition, identity, invalid, recovery, runtime, sys_block};
 
@@ -23,7 +25,6 @@ const CANDIDATE_ARGUMENT: &str = "fvca.hypervisor_trial";
 const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 const STARTED: &str = "/run/fvca/boot-trial-started";
 const REBOOT_PENDING: &str = "/run/fvca/trial-reboot-pending";
-const RUNNING_TRIAL_CONTEXT: &str = "/run/fvca/running-trial-context";
 const HOST_DATA: &str = "/run/fvca/host-data";
 const EFI: &str = "/sys/firmware/efi/efivars";
 const EFI_GLOBAL: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
@@ -94,7 +95,7 @@ pub fn publish_running_context(
         .as_bytes(),
     );
     // This private /run record carries the verified UKI composition across switch-root.
-    publish(Path::new(RUNNING_TRIAL_CONTEXT), &key)
+    publish(Path::new(RUNNING_CONTEXT), &key)
 }
 
 #[cfg(feature = "promotion")]

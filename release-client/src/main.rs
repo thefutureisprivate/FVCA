@@ -572,11 +572,13 @@ fn run() -> Result<()> {
 }
 
 async fn run_host_update() -> Result<()> {
+    use fvca_trial_authorization::{APPROVAL_LIMIT, PEER_BYTES, PEER_ENROLLMENT, RUNNING_CONTEXT};
+
     let boot = Path::new("/run/fvca");
     if boot.join("boot-trial-started").try_exists()? {
         return Err(invalid("Host update scheduling requires a stable boot").into());
     }
-    state::read(&boot.join("running-trial-context"), 2048)?;
+    state::read(Path::new(RUNNING_CONTEXT), APPROVAL_LIMIT as u64)?;
     handoff::require_update_state()?;
     let owner = boot.join("os-update-owner");
     let scope = state::read(&boot.join("os-update-depot"), 64)?;
@@ -588,6 +590,11 @@ async fn run_host_update() -> Result<()> {
     } else {
         depot::HostDepot::Https(scope.parse()?)
     };
+    let peer = match state::read(&boot.join(PEER_ENROLLMENT), PEER_BYTES as u64) {
+        Ok(record) => Some(String::from_utf8(record)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     let directory = boot.join("host-data/os-update");
     channel::discover(
         &directory.join("trusted-root.json"),
@@ -596,7 +603,7 @@ async fn run_host_update() -> Result<()> {
         &directory.join("policy.json"),
         &directory.join("policy.sig"),
         &owner,
-        channel::Operation::DeliverTrial(channel::Delivery::Scheduled(depot)),
+        channel::Operation::DeliverTrial(channel::Delivery::Scheduled { depot, peer }),
     )
     .await
 }

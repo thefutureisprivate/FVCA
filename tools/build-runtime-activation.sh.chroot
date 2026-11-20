@@ -31,5 +31,5 @@ if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-trial-support-v3"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-promotion-support-v2"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-standing-trial-support-v4"
-    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-update-timer-support-v1"
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-update-support-v2"
 fi

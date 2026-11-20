@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use fvca_trial_authorization::Standing;
 
 use super::{
-    PENDING, RUNNING_TRIAL_CONTEXT, boot_next, boot_order, gpt_device, read_record, selected,
-    standing, verify_candidate_esp,
+    PENDING, RUNNING_CONTEXT, boot_next, boot_order, gpt_device, read_record, selected, standing,
+    verify_candidate_esp,
 };
-use crate::{HYPERVISOR_EPOCH_ARGUMENT, invalid};
+use crate::invalid;
 
 pub struct PendingTrial {
     directory: PathBuf,
@@ -18,8 +18,8 @@ pub struct PendingTrial {
 
 impl PendingTrial {
     pub fn verify() -> io::Result<Self> {
-        let context = read_record(Path::new(RUNNING_TRIAL_CONTEXT))?;
-        let (key, running) = context
+        let context = read_record(Path::new(RUNNING_CONTEXT))?;
+        let (key, _) = context
             .split_first_chunk::<32>()
             .ok_or_else(|| invalid("missing verified running trial context"))?;
         let directory = super::record_directory()?;
@@ -29,17 +29,8 @@ impl PendingTrial {
             .ok_or_else(|| invalid("truncated signed trial approval"))?;
         fvca_signature_boundary::verify_ed25519(key, signature, payload)?;
         let approval = Standing::parse(std::str::from_utf8(payload).map_err(io::Error::other)?)?;
+        approval.require_running_context(key, &context)?;
         let trial = &approval.authorization.trial;
-        let [core, runtime, guest] = approval.stable_roots;
-        let expected = format!(
-            "{}\n{core}\n{runtime}\n{guest}\n{HYPERVISOR_EPOCH_ARGUMENT}={},{}\n",
-            trial.stable.esp, approval.stable_epoch, approval.epoch_policy
-        );
-        if running != expected.as_bytes() {
-            return Err(invalid(
-                "trial does not authorize the running stable composition",
-            ));
-        }
         check_pending(&directory, &approval)?;
         gpt_device(&trial.stable)?;
         verify_candidate_esp(&approval.authorization)?;

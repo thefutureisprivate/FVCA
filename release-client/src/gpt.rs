@@ -13,7 +13,7 @@ use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use fvca_trial_authorization::{KEY_ARGUMENT, Standing, key_marker};
+use fvca_trial_authorization::{KEY_ARGUMENT, PEER_PARTITIONS, Standing, key_marker};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -69,6 +69,13 @@ pub(crate) struct StandingSite {
 struct StandingCheck<'a> {
     site: &'a StandingSite,
     authorize: &'a dyn Fn() -> Result<()>,
+    live: Option<LiveInstall<'a>>,
+}
+
+pub(crate) struct LiveInstall<'a> {
+    pub peer: [&'a str; PEER_PARTITIONS],
+    pub approval: &'a Standing<'a>,
+    pub trial_key: &'a [u8],
 }
 
 #[derive(Deserialize)]
@@ -385,6 +392,26 @@ impl Artifact {
         Ok(())
     }
 
+    fn require_trial_target(
+        &self,
+        approval: &Standing<'_>,
+        stable: &Layout<8>,
+        inactive: &Layout<8>,
+    ) -> Result<()> {
+        let authorized = &approval.authorization;
+        if authorized.trial.stable.esp != stable.regions[0].uuid
+            || authorized.trial.candidate.esp != inactive.regions[0].uuid
+            || authorized.bytes != inactive.regions[0].extent.bytes
+            || authorized.digest != hex::encode(self.digests[0])
+        {
+            return Err(invalid(
+                "trial approval differs from the reviewed EFI partitions or selected ESP bytes",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     fn matches(&self, target: &File, installed: Extent, index: usize) -> io::Result<bool> {
         let wanted = self.layout.regions[index].extent.bytes;
         let payload = Extent {
@@ -522,6 +549,24 @@ impl StandingSite {
         Ok(state::open_regular(&certificate)?)
     }
 
+    fn require_trial_epochs(
+        &self,
+        active: u64,
+        candidate: u64,
+        approval: &Standing<'_>,
+    ) -> Result<()> {
+        if approval.stable_epoch != active
+            || approval.candidate_epoch != candidate
+            || approval.epoch_policy != self.epoch_policy_sha256
+        {
+            return Err(invalid(
+                "trial approval differs from the selected releases or TPM enrollment",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn verify_prepared(
         &self,
         active: (install::Slot, u64, &str),
@@ -532,15 +577,7 @@ impl StandingSite {
         trial_key: &[u8],
     ) -> Result<()> {
         selected.require_update_from(active.1, active.2)?;
-        if approval.stable_epoch != active.1
-            || approval.candidate_epoch != selected.epoch
-            || approval.epoch_policy != self.epoch_policy_sha256
-        {
-            return Err(invalid(
-                "trial approval differs from the selected releases or TPM enrollment",
-            )
-            .into());
-        }
+        self.require_trial_epochs(active.1, selected.epoch, approval)?;
         let (stable, inactive) = self.slots(active.0);
         if !stable.path.is_absolute() || !inactive.path.is_absolute() {
             return Err(invalid("reviewed Hypervisor disk paths must be absolute").into());
@@ -556,17 +593,7 @@ impl StandingSite {
         )?;
         let candidate = Artifact::open(incoming, sector)?;
         candidate.fits(&inactive_layout)?;
-        let authorized = &approval.authorization;
-        if authorized.trial.stable.esp != stable_layout.regions[0].uuid
-            || authorized.trial.candidate.esp != inactive_layout.regions[0].uuid
-            || authorized.bytes != inactive_layout.regions[0].extent.bytes
-            || authorized.digest != hex::encode(candidate.digests[0])
-        {
-            return Err(invalid(
-                "trial approval differs from the reviewed EFI partitions or selected ESP bytes",
-            )
-            .into());
-        }
+        candidate.require_trial_target(approval, &stable_layout, &inactive_layout)?;
         for (index, region) in inactive_layout.regions.iter().take(SLOT.len()).enumerate() {
             if !candidate.matches(&inactive_disk.file, region.extent, index)? {
                 return Err(invalid(
@@ -600,7 +627,7 @@ impl StandingSite {
                 policy: &self.epoch_policy_sha256,
                 auto_pcr_key: Some(&self.storage_pcr_key_fingerprint),
                 require_trial: true,
-                trial_transaction: Some(authorized.trial.transaction),
+                trial_transaction: Some(approval.authorization.trial.transaction),
                 trial_key: Some(trial_key),
             },
         )?;
@@ -624,6 +651,7 @@ impl StandingSite {
         incoming: &Path,
         state_dir: &Path,
         authorize: &dyn Fn() -> Result<()>,
+        live: Option<LiveInstall<'_>>,
     ) -> Result<()> {
         let (stable, recovery) = self.slots(active.0);
         if !valid_digest(&self.boot_certificate_sha256)
@@ -652,6 +680,7 @@ impl StandingSite {
             Some(StandingCheck {
                 site: self,
                 authorize,
+                live,
             }),
             &mut io::stderr(),
         )
@@ -711,23 +740,32 @@ fn install_reviewed(
     let auto_pcr_key = standing
         .as_ref()
         .map(|authority| authority.site.storage_pcr_key_fingerprint.as_str());
+    let live = standing.as_ref().and_then(|check| check.live.as_ref());
     let active_epoch = ReleaseEpoch {
         number: plan.active_epoch,
         policy: &plan.epoch_policy_sha256,
         auto_pcr_key,
         require_trial: false,
         trial_transaction: None,
-        trial_key: None,
+        trial_key: live.map(|trial| trial.trial_key),
     };
     let next_epoch = ReleaseEpoch {
         number: selected.epoch,
         policy: &plan.epoch_policy_sha256,
         auto_pcr_key,
         require_trial: standing.is_some(),
-        trial_transaction: None,
-        trial_key: None,
+        trial_transaction: live.map(|trial| trial.approval.authorization.trial.transaction),
+        trial_key: live.map(|trial| trial.trial_key),
     };
-    let (active, active_layout) = reviewed(&plan.active, sector)?;
+    let (active, active_layout) = if live.is_some() {
+        reviewed_layout(
+            &plan.active,
+            sector,
+            Disk::observe(&plan.active.path, sector)?,
+        )?
+    } else {
+        reviewed(&plan.active, sector)?
+    };
     let (inactive, inactive_layout) = reviewed_layout(
         &plan.inactive,
         sector,
@@ -735,6 +773,25 @@ fn install_reviewed(
     )?;
     require_distinct_disks((&active, &active_layout), (&inactive, &inactive_layout))?;
     candidate.fits(&inactive_layout)?;
+    if let Some(live) = live {
+        if !active.physical
+            || inactive_layout.regions[..PEER_PARTITIONS]
+                .iter()
+                .map(|part| part.uuid.as_str())
+                .ne(live.peer)
+        {
+            return Err(invalid(
+                "reviewed inactive NVMe partitions differ from the signed peer slot",
+            )
+            .into());
+        }
+        standing
+            .as_ref()
+            .expect("live installation uses standing policy")
+            .site
+            .require_trial_epochs(plan.active_epoch, selected.epoch, live.approval)?;
+        candidate.require_trial_target(live.approval, &active_layout, &inactive_layout)?;
+    }
     stable.verify_installed(
         &active,
         &active_layout,

@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
-use fvca_trial_authorization::{APPROVAL_LIMIT, Standing};
+use fvca_trial_authorization::{APPROVAL_LIMIT, RUNNING_CONTEXT, Standing, peer_partitions};
 use jiff::{
     Timestamp,
     tz::{TimeZone, TimeZoneDatabase},
@@ -30,7 +30,10 @@ pub enum Operation {
 pub enum Delivery {
     Inbox,
     Activate,
-    Scheduled(HostDepot),
+    Scheduled {
+        depot: HostDepot,
+        peer: Option<String>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -499,7 +502,7 @@ pub async fn discover(
         .prefix(".tuf-")
         .tempdir_in(directory)?;
     let scope = match &operation {
-        Operation::DeliverTrial(Delivery::Scheduled(depot)) => Some(depot),
+        Operation::DeliverTrial(Delivery::Scheduled { depot, .. }) => Some(depot),
         _ => None,
     };
     let depot = Depot::with_scope(&config, policy.max_release_bytes.max(MANIFEST_BYTES), scope)?;
@@ -619,17 +622,55 @@ pub async fn discover(
                             Ok(())
                         };
                         authorize()?;
-                        site.verify_prepared(
-                            active,
-                            &selection,
-                            &staged,
-                            scratch.path(),
-                            &approval,
-                            key,
-                        )?;
+                        let peer = if let Delivery::Scheduled { peer, .. } = delivery {
+                            approval.require_running_context(
+                                key,
+                                &state::read(Path::new(RUNNING_CONTEXT), APPROVAL_LIMIT as u64)?,
+                            )?;
+                            peer.as_deref().map(peer_partitions).transpose()?
+                        } else {
+                            None
+                        };
+                        let lease = peer.as_ref().map(|_| handoff::lock_install()).transpose()?;
+                        let transaction = approval.authorization.trial.transaction;
+                        if let Some(peer) = peer
+                            && !handoff::check_install(transaction, &envelope)?
+                        {
+                            let authorize_install = || {
+                                authorize()?;
+                                if handoff::check_install(transaction, &envelope)? {
+                                    return Err(invalid(
+                                        "trial was published during live preparation",
+                                    )
+                                    .into());
+                                }
+                                Ok(())
+                            };
+                            site.install(
+                                active,
+                                &selection,
+                                &staged,
+                                directory,
+                                &authorize_install,
+                                Some(gpt::LiveInstall {
+                                    peer,
+                                    approval: &approval,
+                                    trial_key: key,
+                                }),
+                            )?;
+                        } else {
+                            site.verify_prepared(
+                                active,
+                                &selection,
+                                &staged,
+                                scratch.path(),
+                                &approval,
+                                key,
+                            )?;
+                        }
                         handoff::publish(&envelope, &authorize)?;
-                        status.delivered_trial =
-                            Some(approval.authorization.trial.transaction.into());
+                        drop(lease);
+                        status.delivered_trial = Some(transaction.into());
                         if !matches!(delivery, Delivery::Inbox) {
                             request_result =
                                 authorize().and_then(|()| handoff::request_activation());
@@ -639,7 +680,7 @@ pub async fn discover(
                         }
                     }
                     Operation::PrepareGpt => {
-                        site.install(active, &selection, &staged, directory, &eligible)?
+                        site.install(active, &selection, &staged, directory, &eligible, None)?
                     }
                     Operation::Discover => unreachable!("discovery has no installation policy"),
                 }

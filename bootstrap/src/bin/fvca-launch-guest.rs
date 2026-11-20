@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use fvca_initrd_bootstrap::{guest_boot::{self, SERVICE_GUEST_UUID as UUID}, invalid, run, vm_confinement};
 use fvca_libvirt_boundary::{Connection, Domain, EventLoop, PAUSED, RUNNING};
+use fvca_trial_authorization::GUEST_CAPTURE_LOCK as CAPTURE_LOCK;
 
 #[path = "fvca-launch-guest/capture.rs"]
 mod capture;
@@ -26,7 +27,6 @@ const ALIAS: &str = "/run/fvca/guest-state.raw";
 const PID: &str = "/run/libvirt/qemu/fvca-service-guest.pid";
 const RECEIPT: &str = "/run/fvca/guest-clean-stop";
 const OPERATION_LOCK: &str = "/run/fvca/guest-operation.lock";
-const CAPTURE_LOCK: &str = "/run/fvca/guest-capture.lock";
 const ATTACHMENT: &str = "data-attachment";
 
 #[path = "fvca-launch-guest/update.rs"]

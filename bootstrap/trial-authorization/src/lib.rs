@@ -7,6 +7,36 @@ use std::io;
 pub const APPROVAL_LIMIT: usize = 2048;
 pub const PENDING: &str = "pending-trial";
 pub const KEY_ARGUMENT: &str = "fvca.trial_key";
+pub const RUNNING_CONTEXT: &str = "/run/fvca/running-trial-context";
+pub const GUEST_CAPTURE_LOCK: &str = "/run/fvca/guest-capture.lock";
+pub const PEER_PARTITIONS: usize = 7;
+pub const PEER_ENROLLMENT: &str = "os-update-peer";
+pub const PEER_BYTES: usize = PEER_PARTITIONS * 37;
+
+pub fn peer_partitions(record: &str) -> io::Result<[&str; PEER_PARTITIONS]> {
+    let text = record
+        .strip_suffix('\n')
+        .ok_or_else(|| invalid("missing signed peer partition terminator"))?;
+    let mut fields = text.split('\n');
+    let mut partitions = [""; PEER_PARTITIONS];
+    for index in 0..partitions.len() {
+        let part = uuid(
+            fields
+                .next()
+                .ok_or_else(|| invalid("incomplete signed peer slot"))?,
+        )?;
+        if part == "00000000-0000-0000-0000-000000000000" || partitions[..index].contains(&part) {
+            return Err(invalid(
+                "signed peer slot partition identities must be distinct and nonzero",
+            ));
+        }
+        partitions[index] = part;
+    }
+    if fields.next().is_some() {
+        return Err(invalid("extra signed peer partition identities"));
+    }
+    Ok(partitions)
+}
 
 pub fn key_marker(key: &[u8]) -> String {
     let mut value = String::with_capacity(KEY_ARGUMENT.len() + 65);
@@ -157,6 +187,23 @@ pub fn authorization(text: &str) -> io::Result<Authorization<'_>> {
 }
 
 impl Standing<'_> {
+    pub fn require_running_context(&self, key: &[u8], context: &[u8]) -> io::Result<()> {
+        let (running_key, running) = context
+            .split_first_chunk::<32>()
+            .ok_or_else(|| invalid("missing verified running trial context"))?;
+        let [core, runtime, guest] = self.stable_roots;
+        let expected = format!(
+            "{}\n{core}\n{runtime}\n{guest}\nfvca.hypervisor_epoch={},{}\n",
+            self.authorization.trial.stable.esp, self.stable_epoch, self.epoch_policy,
+        );
+        if running_key != key || running != expected.as_bytes() {
+            return Err(invalid(
+                "trial does not authorize the running stable composition",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn parse(body: &str) -> io::Result<Standing<'_>> {
         if body.len() + 64 > APPROVAL_LIMIT {
             return Err(invalid("standing trial approval exceeds its bound"));

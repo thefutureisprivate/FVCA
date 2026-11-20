@@ -96,6 +96,7 @@ def guest_selection(args, work):
 BACKUP_FILES = ("vm-backup-policy", "vm-backup-ca.pem")
 BACKUP_JOB_FILE = "vm-backup-job"
 UPDATE_FILES = ("os-update-owner", "os-update-depot", "os-update-ca.pem")
+UPDATE_PEER = "os-update-peer"
 RESTORE_FILE = "vm-restore-authorization"
 RETENTION_FILE = "vm-retention-policy"
 
@@ -115,15 +116,19 @@ def update_selection(args, authorities):
     owner = args.os_update_owner.read_bytes()
     if len(owner) != 32 or not any(owner) or any(owner == key for _, key in authorities):
         raise ValueError("Host updates require a distinct raw 32-byte Ed25519 owner public key")
+    peer = ()
+    if args.os_update_peer_slot is not None:
+        ids = hypervisor_gpt.partition_ids(args.os_update_peer_slot)
+        peer = ((UPDATE_PEER, "".join(f"{part}\n" for part in ids.values()).encode("ascii")),)
     if args.os_update_address is None:
-        return ((UPDATE_FILES[0], owner), (UPDATE_FILES[1], b"local\n"))
+        return ((UPDATE_FILES[0], owner), (UPDATE_FILES[1], b"local\n"), *peer)
     address = args.os_update_address
     if address.is_unspecified or address.is_multicast or "%" in str(address):
         raise ValueError("Host update HTTPS requires a scoped literal IP address")
     ca = args.os_update_ca.read_bytes()
     if not ca.startswith(b"-----BEGIN CERTIFICATE-----") or len(ca) > 65_536:
         raise ValueError("invalid Host update depot CA bundle")
-    return tuple(zip(UPDATE_FILES, (owner, f"{address}\n".encode("ascii"), ca), strict=True))
+    return (*zip(UPDATE_FILES, (owner, f"{address}\n".encode("ascii"), ca), strict=True), *peer)
 
 
 def backup_job_selection(path, backup):
@@ -298,7 +303,7 @@ def assemble(args, work):
         "hypervisor.composition", "vm-runtime.p7s", "host-storage",
         *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, *BACKUP_FILES, BACKUP_JOB_FILE,
         RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE, TRIAL_FILE,
-        TRIAL_CANDIDATE_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY, EPOCH_FILE, *UPDATE_FILES,
+        TRIAL_CANDIDATE_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY, EPOCH_FILE, *UPDATE_FILES, UPDATE_PEER,
     ))
     required = ACTIVATION_FILES
     if storage is not None:
@@ -319,7 +324,7 @@ def assemble(args, work):
         required += (f"usr/lib/fvca/{STANDING_TRIAL_SUPPORT}", "usr/lib/fvca/set-boot-next",
                      "usr/lib/fvca/verify-boot-approval", "usr/bin/systemctl")
     if args.os_update_owner is not None:
-        required += ("usr/lib/fvca/hypervisor-update-timer-support-v1",)
+        required += ("usr/lib/fvca/hypervisor-update-support-v2", "usr/bin/chcon")
     if args.boot_trial_candidate is not None:
         recorder = runtime_work / "tree" / vm_runtime.TRIAL_HEALTH
         if recorder.is_symlink() or not recorder.is_file() or recorder.stat().st_mode & 0o111 == 0:
@@ -393,6 +398,7 @@ def main():
     trial.add_argument("--boot-trial-candidate", type=Path, help="validate readiness during the authorized GPT trial")
     parser.add_argument("--boot-trial-public-key", type=Path, help="pin the independent Ed25519 standing trial authority")
     parser.add_argument("--os-update-owner", type=Path, help="enroll the raw Ed25519 owner key for scheduled Host updates")
+    parser.add_argument("--os-update-peer-slot", type=UUID, help="grant live installation to the other provisioned GPT slot")
     parser.add_argument("--os-update-address", type=ipaddress.ip_address, help="permit the signed Host updater to reach one HTTPS depot IP")
     parser.add_argument("--os-update-ca", type=Path, help="pin the HTTPS depot CA bundle in this UKI")
     parser.add_argument("--boot-promotion-public-key", type=Path, help="pin the independent Ed25519 promotion authority")
@@ -441,6 +447,10 @@ def main():
         parser.error("scheduled Host HTTPS updates require an enrolled owner, depot address and CA")
     if args.os_update_owner is not None and args.boot_trial_public_key is None:
         parser.error("scheduled Host updates require the standing PIN-less boot trial profile")
+    if args.os_update_peer_slot is not None and (
+        args.os_update_owner is None or args.os_update_peer_slot == args.gpt_slot
+    ):
+        parser.error("live installation requires an enrolled owner and the distinct peer GPT slot UUID")
     if args.boot_promotion_public_key is not None and (
         (args.boot_trial is None and args.boot_trial_candidate is None and args.boot_trial_public_key is None)
         or args.restore_authorization is not None
