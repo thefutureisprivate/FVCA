@@ -263,6 +263,13 @@ fn platform(dmi: &Path) -> Result<Platform> {
     })
 }
 
+pub(super) fn require_platform(policy: &Policy) -> Result<()> {
+    if platform(Path::new(DMI))? != policy.platform {
+        return Err(invalid("live firmware discovery requires the enrolled Host").into());
+    }
+    Ok(())
+}
+
 fn esrt(path: &Path) -> Result<Vec<Esrt>> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(path)? {
@@ -309,10 +316,9 @@ pub(super) struct Session {
 
 impl Session {
     pub(super) fn open(policy: &Policy, offer: &Offer, payloads: &[Vec<u8>; 2]) -> Result<Self> {
-        if offer.remote != "lvfs" || platform(Path::new(DMI))? != policy.platform {
-            return Err(
-                invalid("live catalog import requires the enrolled Host and LVFS remote").into(),
-            );
+        require_platform(policy)?;
+        if offer.remote != "lvfs" {
+            return Err(invalid("live catalog import requires the LVFS remote").into());
         }
         let peer = Peer::connect(ADDRESS, 0, Path::new(DAEMON))?;
         if peer.version()? != policy.fwupd_version {

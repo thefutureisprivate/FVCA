@@ -329,7 +329,7 @@ async fn boot_envelope(
     Ok(bytes)
 }
 
-fn save(path: &Path, name: &str, value: &impl Serialize) -> Result<()> {
+pub(super) fn save(path: &Path, name: &str, value: &impl Serialize) -> Result<()> {
     let mut record = tempfile::NamedTempFile::new_in(path)?;
     serde_json::to_writer(&mut record, value)?;
     record.write_all(b"\n")?;
@@ -392,10 +392,7 @@ pub(super) fn checkpoint(path: &Path, name: &str, sequence: u64, bytes: &[u8]) -
                 || next.sequence < previous.sequence
                 || (next.sequence == previous.sequence && next.sha256 != previous.sha256)
             {
-                return Err(invalid(
-                    "signed OS policy or channel sequence rollback or equivocation",
-                )
-                .into());
+                return Err(invalid("signed update sequence rollback or equivocation").into());
             }
             if next.sequence == previous.sequence {
                 return Ok(());
@@ -599,9 +596,9 @@ pub async fn discover(
         .tempdir_in(directory)?;
     let scope = match &operation {
         Operation::DeliverTrial(Delivery::Scheduled { depot, .. }) => {
-            Some((depot, Role::Hypervisor))
+            Some((depot, Role::Hypervisor.update_state()))
         }
-        Operation::ScheduleGuest(depot) => Some((depot, Role::ServiceGuest)),
+        Operation::ScheduleGuest(depot) => Some((depot, Role::ServiceGuest.update_state())),
         _ => None,
     };
     let depot = Depot::with_scope(&config, policy.max_release_bytes.max(MANIFEST_BYTES), scope)?;

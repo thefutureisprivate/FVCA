@@ -86,6 +86,7 @@ BACKUP_FILES = ("vm-backup-policy", "vm-backup-ca.pem")
 BACKUP_JOB_FILE = "vm-backup-job"
 UPDATE_FILES = ("os-update-owner", "os-update-depot", "os-update-ca.pem")
 GUEST_UPDATE_FILES = tuple(f"guest-{name}" for name in UPDATE_FILES)
+FIRMWARE_UPDATE_FILES = ("firmware-update-owner", "firmware-update-depot", "firmware-update-ca.pem")
 UPDATE_PEER = "os-update-peer"
 RESTORE_FILE = "vm-restore-authorization"
 RETENTION_FILE = "vm-retention-policy"
@@ -105,14 +106,14 @@ def depot_selection(names, source, address, ca_file, distinct):
         return ()
     owner = source.read_bytes()
     if len(owner) != 32 or not any(owner) or owner in distinct:
-        raise ValueError("OS updates require a distinct raw 32-byte Ed25519 owner public key")
+        raise ValueError("scheduled updates require a distinct raw 32-byte Ed25519 owner public key")
     if address is None:
         return ((names[0], owner), (names[1], b"local\n"))
     if address.is_unspecified or address.is_multicast or "%" in str(address):
-        raise ValueError("OS update HTTPS requires a scoped literal IP address")
+        raise ValueError("scheduled update HTTPS requires a scoped literal IP address")
     ca = ca_file.read_bytes()
     if not ca.startswith(b"-----BEGIN CERTIFICATE-----") or len(ca) > 65_536:
-        raise ValueError("invalid OS update depot CA bundle")
+        raise ValueError("invalid update depot CA bundle")
     return tuple(zip(names, (owner, f"{address}\n".encode("ascii"), ca), strict=True))
 
 
@@ -123,11 +124,15 @@ def update_selection(args, authorities):
         distinct.add(host[0][1])
     guest = depot_selection(GUEST_UPDATE_FILES, args.guest_os_update_owner, args.guest_os_update_address,
                             args.guest_os_update_ca, distinct)
+    if guest:
+        distinct.add(guest[0][1])
+    firmware = depot_selection(FIRMWARE_UPDATE_FILES, args.firmware_update_owner, args.firmware_update_address,
+                               args.firmware_update_ca, distinct)
     peer = ()
     if args.os_update_peer_slot is not None:
         ids = hypervisor_gpt.partition_ids(args.os_update_peer_slot)
         peer = ((UPDATE_PEER, "".join(f"{part}\n" for part in ids.values()).encode("ascii")),)
-    return (*host, *guest, *peer)
+    return (*host, *guest, *firmware, *peer)
 
 
 def backup_job_selection(path, backup):
@@ -276,6 +281,8 @@ def assemble(args, work):
         raise ValueError("unattended TPM unlock requires a protected Hypervisor epoch")
     if args.boot_trial_public_key is not None and not auto:
         raise ValueError("standing boot trial authority requires PIN-less TPM storage")
+    if args.firmware_update_owner is not None and not auto:
+        raise ValueError("scheduled firmware discovery requires PIN-less TPM storage")
     digests = [member.token_digest for member in storage.members] if storage is not None else (None, None)
     tpm = digests[0] is not None
     token_paths = (args.tpm_token_a, args.tpm_token_b)
@@ -310,7 +317,8 @@ def assemble(args, work):
         *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, *BACKUP_FILES, BACKUP_JOB_FILE,
         RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE, TRIAL_FILE,
         TRIAL_CANDIDATE_FILE, TRIAL_WATCHDOG_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY,
-        GUEST_TRIAL_KEY, GUEST_BASE_EPOCH, EPOCH_FILE, *UPDATE_FILES, *GUEST_UPDATE_FILES, UPDATE_PEER,
+        GUEST_TRIAL_KEY, GUEST_BASE_EPOCH, EPOCH_FILE, *UPDATE_FILES, *GUEST_UPDATE_FILES,
+        *FIRMWARE_UPDATE_FILES, UPDATE_PEER,
     ))
     required = ACTIVATION_FILES
     if storage is not None:
@@ -346,6 +354,14 @@ def assemble(args, work):
             path = runtime_work / "tree" / member
             if path.is_symlink() or not path.is_file():
                 raise ValueError("the VM runtime lacks scheduled Service Guest updates")
+    if args.firmware_update_owner is not None:
+        required += ("usr/lib/fvca/firmware-update-enrollment-v1", "usr/bin/chcon")
+        for tree, members in (
+            (prepared / "root", (Path("usr/libexec/fwupd/fwupd"), Path("usr/lib/systemd/system/fvca-fwupd.service"))),
+            (runtime_work / "tree", vm_runtime.FIRMWARE_UPDATE_UNITS),
+        ):
+            if any((tree / member).is_symlink() or not (tree / member).is_file() for member in members):
+                raise ValueError("scheduled Host firmware requires the confined fwupd core and VM runtime units")
     if args.boot_trial_candidate is not None:
         recorder = runtime_work / "tree" / vm_runtime.TRIAL_HEALTH
         if recorder.is_symlink() or not recorder.is_file() or recorder.stat().st_mode & 0o111 == 0:
@@ -442,6 +458,10 @@ def main():
     parser.add_argument("--guest-os-update-owner", type=Path, help="enroll the raw Ed25519 owner key for scheduled Guest updates")
     parser.add_argument("--guest-os-update-address", type=ipaddress.ip_address, help="permit the Guest updater to reach one HTTPS depot IP")
     parser.add_argument("--guest-os-update-ca", type=Path, help="pin the Guest HTTPS depot CA bundle in this UKI")
+    parser.add_argument("--firmware-update-owner", type=Path, help="enroll the raw Ed25519 owner key for Host firmware")
+    parser.add_argument("--firmware-update-address", type=ipaddress.ip_address,
+                        help="permit firmware discovery to reach one HTTPS depot IP")
+    parser.add_argument("--firmware-update-ca", type=Path, help="pin the firmware HTTPS depot CA bundle in this UKI")
     parser.add_argument("--boot-promotion-public-key", type=Path, help="pin the independent Ed25519 promotion authority")
     parser.add_argument("--backup-policy", type=Path, help="S3 destination and repository ID to authorize in this UKI")
     parser.add_argument("--backup-ca", type=Path, help="PEM trust bundle for the selected S3 endpoint")
@@ -509,6 +529,12 @@ def main():
         parser.error("scheduled Guest HTTPS updates require an enrolled owner, depot address and CA")
     if args.guest_os_update_owner is not None and args.guest_trial_public_key is None:
         parser.error("scheduled Guest updates require an enrolled Guest trial authority")
+    if (args.firmware_update_address is None) != (args.firmware_update_ca is None) or (
+        args.firmware_update_address is not None and args.firmware_update_owner is None
+    ):
+        parser.error("scheduled firmware HTTPS requires an enrolled owner, depot address and CA")
+    if args.firmware_update_owner is not None and (args.epoch_policy is None or args.restore_authorization is not None):
+        parser.error("scheduled firmware discovery requires an ordinary epoch-protected Hypervisor")
     if args.os_update_peer_slot is not None and (
         args.os_update_owner is None or args.os_update_peer_slot == args.gpt_slot
     ):

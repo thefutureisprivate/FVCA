@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 use tough::schema::key::Key;
 use tough::{Repository, TargetName};
 
-use crate::channel::{checkpoint, digest, target, verify};
-use crate::depot::{CONFIG_BYTES, Depot, METADATA_BYTES};
+use crate::channel::{checkpoint, digest, save, target, verify};
+use crate::depot::{CONFIG_BYTES, Depot, EnrolledDepot, METADATA_BYTES};
 use crate::{
-    MANIFEST_BYTES, Member, Result, Role, check_target, download, invalid, load_repository,
-    output_file, state, valid_digest, verify_member,
+    MANIFEST_BYTES, Member, Result, Role, check_target, download, handoff, invalid,
+    load_repository, output_file, state, valid_digest, verify_member,
 };
 
 const ARCHIVE_LIMIT: u64 = 256 * 1024 * 1024;
@@ -28,6 +28,8 @@ const OBSERVATION_AGE: i64 = 300;
 const OFFER: &str = "offer.json";
 const SIGNATURE: &str = "offer.sig";
 const ARCHIVE: &str = "firmware.cab";
+const ENROLLMENT: &str = "firmware-update";
+const STATUS: &str = "firmware-update-status.json";
 
 #[derive(Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -329,7 +331,7 @@ impl Catalog {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Offer {
+struct Head {
     schema: String,
     role: Role,
     channel: String,
@@ -338,6 +340,33 @@ struct Offer {
     expires: i64,
     system_uuid: String,
     fwupd_version: String,
+    #[serde(deserialize_with = "Deserialize::deserialize")]
+    offer: Option<Offer>,
+}
+
+impl Head {
+    fn require_scope(&self, policy: &Policy, now: i64) -> Result<()> {
+        if self.schema != "fvca-firmware-channel-v1"
+            || self.role != Role::Hypervisor
+            || self.channel != policy.channel
+            || self.sequence == 0
+            || !current(self.valid_from, self.expires, now)
+            || self.expires - self.valid_from > 7 * 86_400
+            || self.system_uuid != policy.platform.system_uuid
+            || self.fwupd_version != policy.fwupd_version
+        {
+            return Err(invalid("firmware channel is outside the signed Host policy").into());
+        }
+        if let Some(offer) = &self.offer {
+            offer.require_scope(policy)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Offer {
     device: DeviceIdentity,
     remote: String,
     epoch: u64,
@@ -350,16 +379,8 @@ struct Offer {
 }
 
 impl Offer {
-    fn require_scope(&self, policy: &Policy, now: i64) -> Result<()> {
-        if self.schema != "fvca-firmware-offer-v2"
-            || self.role != Role::Hypervisor
-            || self.channel != policy.channel
-            || self.sequence == 0
-            || !current(self.valid_from, self.expires, now)
-            || self.expires - self.valid_from > 7 * 86_400
-            || self.system_uuid != policy.platform.system_uuid
-            || self.fwupd_version != policy.fwupd_version
-            || !policy.allowed_devices.contains(&self.device)
+    fn require_scope(&self, policy: &Policy) -> Result<()> {
+        if !policy.allowed_devices.contains(&self.device)
             || !policy.allowed_remotes.contains(&self.remote)
             || self.epoch < policy.minimum_epoch
             || !(1..=policy.max_archive_bytes).contains(&self.archive.bytes)
@@ -571,6 +592,7 @@ fn unique_device<'a>(devices: &'a Devices, id: &str) -> Result<&'a ObservedDevic
 pub enum ObservationSource<'a> {
     File(&'a Path),
     Live,
+    Scheduled(&'a EnrolledDepot),
 }
 
 enum SnapshotSource {
@@ -578,22 +600,117 @@ enum SnapshotSource {
     Live(live::Session),
 }
 
-pub async fn stage(
-    trusted_root: &Path,
-    depot_config: &Path,
-    directory: &Path,
-    policy_path: &Path,
-    policy_signature: &Path,
-    owner_path: &Path,
-    source: ObservationSource<'_>,
-) -> Result<()> {
+pub struct Intake<'a> {
+    pub trusted_root: &'a Path,
+    pub depot_config: &'a Path,
+    pub directory: &'a Path,
+    pub policy: &'a Path,
+    pub signature: &'a Path,
+    pub owner: &'a Path,
+}
+
+pub async fn scheduled() -> Result<()> {
+    let boot = Path::new("/run/fvca");
+    if boot.join("boot-trial-started").try_exists()? {
+        return Err(invalid("firmware scheduling requires a stable Hypervisor boot").into());
+    }
+    let directory = boot.join("host-data").join(ENROLLMENT);
+    handoff::require_pool_directory(&directory)?;
+    let depot = EnrolledDepot::load(boot, ENROLLMENT)?;
+    stage(
+        Intake {
+            trusted_root: &directory.join("trusted-root.json"),
+            depot_config: &directory.join("depot.json"),
+            directory: &directory,
+            policy: &directory.join("policy.json"),
+            signature: &directory.join("policy.sig"),
+            owner: &boot.join("firmware-update-owner"),
+        },
+        ObservationSource::Scheduled(&depot),
+    )
+    .await
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct Freshness {
+    channel: Option<String>,
+    last_refresh: Option<i64>,
+    fresh_until: Option<i64>,
+    channel_sequence: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct Status {
+    schema: &'static str,
+    disposition: &'static str,
+    checked_at: i64,
+    #[serde(flatten)]
+    freshness: Freshness,
+    #[serde(flatten)]
+    staged: Option<Staged>,
+}
+
+pub async fn stage(inputs: Intake<'_>, source: ObservationSource<'_>) -> Result<()> {
+    let directory = inputs.directory;
     let _lease = state::lock(directory)?;
-    let owner = state::read(owner_path, 32)?;
-    let document = state::read(policy_path, MANIFEST_BYTES)?;
+    let scheduled = matches!(source, ObservationSource::Scheduled(_));
+    let freshness = if scheduled {
+        match state::read(&directory.join(STATUS), MANIFEST_BYTES) {
+            Ok(previous) => serde_json::from_slice(&previous)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Freshness::default(),
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        Freshness::default()
+    };
+    let mut status = Status {
+        schema: "fvca-firmware-discovery-status-v1",
+        disposition: "checking",
+        checked_at: Timestamp::now().as_second(),
+        freshness,
+        staged: None,
+    };
+    if scheduled {
+        save(directory, STATUS, &status)?;
+    }
+    let result = refresh(inputs, source, &mut status.freshness)
+        .await
+        .map(|staged| {
+            status.disposition = if staged.is_some() {
+                "staged"
+            } else {
+                "no-offer"
+            };
+            status.staged = staged;
+        });
+    if result.is_err() {
+        status.disposition = "blocked";
+    }
+    if scheduled {
+        save(directory, STATUS, &status)?;
+    }
+    if scheduled || result.is_ok() {
+        println!("{}", serde_json::to_string(&status)?);
+    }
+    result
+}
+
+async fn refresh(
+    inputs: Intake<'_>,
+    source: ObservationSource<'_>,
+    freshness: &mut Freshness,
+) -> Result<Option<Staged>> {
+    let directory = inputs.directory;
+    let scheduled = match source {
+        ObservationSource::Scheduled(depot) => Some((depot, ENROLLMENT)),
+        _ => None,
+    };
+    let owner = state::read(inputs.owner, 32)?;
+    let document = state::read(inputs.policy, MANIFEST_BYTES)?;
     verify(
         &owner,
         &document,
-        &state::read(policy_signature, 64)?,
+        &state::read(inputs.signature, 64)?,
         "invalid standing Host firmware policy signature",
     )?;
     let policy: Policy = serde_json::from_slice(&document)?;
@@ -604,8 +721,8 @@ pub async fn stage(
             invalid("Host firmware owner and qualification authorities must be distinct").into(),
         );
     }
-    let root = state::read(trusted_root, METADATA_BYTES)?;
-    let config = state::read(depot_config, CONFIG_BYTES)?;
+    let root = state::read(inputs.trusted_root, METADATA_BYTES)?;
+    let config = state::read(inputs.depot_config, CONFIG_BYTES)?;
     if digest(&root) != policy.tuf_root_sha256 || digest(&config) != policy.depot_config_sha256 {
         return Err(invalid("firmware depot or root differs from the standing policy").into());
     }
@@ -617,8 +734,15 @@ pub async fn stage(
     )?;
     let work = tempfile::Builder::new()
         .prefix(".firmware-tuf-")
-        .tempdir_in(directory)?;
-    let depot = Depot::from_config(&config, policy.max_archive_bytes.max(CATALOG_LIMIT))?;
+        .tempdir()?;
+    let depot = Depot::with_scope(
+        &config,
+        policy.max_archive_bytes.max(CATALOG_LIMIT),
+        scheduled,
+    )?;
+    if !matches!(source, ObservationSource::File(_)) {
+        live::require_platform(&policy)?;
+    }
     let repo = load_repository(depot, directory, root, work.path()).await?;
     if repo.root().signed.keys.values().any(|key| {
         matches!(key, Key::Ed25519 { keyval, .. } if keyval.public.as_ref() == owner || keyval.public.as_ref() == qualification)
@@ -626,20 +750,20 @@ pub async fn stage(
         return Err(invalid("TUF and Host firmware authorities must use distinct keys").into());
     }
     let stem = format!("fvca-firmware-{}", policy.channel);
-    let offer_bytes = target(&repo, format!("{stem}.json"), MANIFEST_BYTES).await?;
+    let head_bytes = target(&repo, format!("{stem}.json"), MANIFEST_BYTES).await?;
     let signature = target(&repo, format!("{stem}.sig"), 64).await?;
     verify(
         &qualification,
-        &offer_bytes,
+        &head_bytes,
         &signature,
         "invalid independent firmware qualification signature",
     )?;
-    let offer: Offer = serde_json::from_slice(&offer_bytes)?;
+    let head: Head = serde_json::from_slice(&head_bytes)?;
     let verified_at = Timestamp::now().as_second();
-    offer.require_scope(&policy, verified_at)?;
+    head.require_scope(&policy, verified_at)?;
     let expires = [
         policy.expires,
-        offer.expires,
+        head.expires,
         repo.root().signed.expires.as_second(),
         repo.timestamp().signed.expires.as_second(),
         repo.snapshot().signed.expires.as_second(),
@@ -657,12 +781,29 @@ pub async fn stage(
         }
         Ok(now)
     };
+    require_current()?;
     checkpoint(
         directory,
         &format!("{stem}-checkpoint.json"),
-        offer.sequence,
-        &offer_bytes,
+        head.sequence,
+        &head_bytes,
     )?;
+    *freshness = Freshness {
+        channel: Some(head.channel),
+        last_refresh: Some(verified_at),
+        fresh_until: Some(expires),
+        channel_sequence: Some(head.sequence),
+    };
+    let approval_sha256 = digest(&head_bytes);
+    let parent = directory.join("staged");
+    state::staged(&parent)?;
+    let keep = head.offer.as_ref().map(|_| approval_sha256.as_str());
+    require_current()?;
+    retire_stages(&parent, keep, scheduled.is_some())?;
+    let Some(offer) = head.offer else {
+        require_current()?;
+        return Ok(None);
+    };
     let payloads = offer.catalog.download(&repo).await?;
     require_current()?;
     let source = match source {
@@ -670,7 +811,7 @@ pub async fn stage(
             let bytes = state::read(path, OBSERVATION_LIMIT)?;
             SnapshotSource::File(serde_json::from_slice(&bytes)?, digest(&bytes))
         }
-        ObservationSource::Live => {
+        ObservationSource::Live | ObservationSource::Scheduled(_) => {
             SnapshotSource::Live(live::Session::open(&policy, &offer, &payloads)?)
         }
     };
@@ -687,14 +828,11 @@ pub async fn stage(
         }
     };
     observe()?;
-    let parent = directory.join("staged");
-    state::staged(&parent)?;
-    let approval_sha256 = digest(&offer_bytes);
     let (staged, observation_sha256) = stage_archive(
         &repo,
         &parent,
         &offer,
-        &offer_bytes,
+        &head_bytes,
         &signature,
         &approval_sha256,
         &observe,
@@ -706,30 +844,65 @@ pub async fn stage(
             "independently-verified-vendor-signature"
         }
     };
-    println!(
-        "{}",
-        serde_json::to_string(&Staged {
-            schema: "fvca-firmware-stage-status-v1",
-            disposition: "staged",
-            offer_sha256: &approval_sha256,
-            archive_sha256: &offer.archive.sha256,
-            observation_sha256: &observation_sha256,
-            qualified_vendor_authentication: vendor_authentication,
-            staged: &staged,
-        })?
-    );
-    Ok(())
+    Ok(Some(Staged {
+        offer_sha256: approval_sha256,
+        archive_sha256: offer.archive.sha256,
+        observation_sha256,
+        qualified_vendor_authentication: vendor_authentication,
+        staged,
+    }))
 }
 
 #[derive(Serialize)]
-struct Staged<'a> {
-    schema: &'static str,
-    disposition: &'static str,
-    offer_sha256: &'a str,
-    archive_sha256: &'a str,
-    observation_sha256: &'a str,
+struct Staged {
+    offer_sha256: String,
+    archive_sha256: String,
+    observation_sha256: String,
     qualified_vendor_authentication: &'static str,
-    staged: &'a Path,
+    staged: PathBuf,
+}
+
+fn retire_stages(parent: &Path, retain: Option<&str>, scheduled: bool) -> Result<()> {
+    if scheduled {
+        handoff::require_pool_directory(parent)?;
+    }
+    let mut removed = false;
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .ok_or_else(|| invalid("invalid firmware staging name"))?;
+        if !(valid_digest(name) || name.starts_with(".firmware-")) {
+            return Err(invalid("unrecognized firmware staging directory").into());
+        }
+        let path = entry.path();
+        if scheduled {
+            handoff::require_pool_directory(&path)?;
+        } else {
+            state::directory(&path)?;
+        }
+        if retain == Some(name) {
+            continue;
+        }
+        let files = fs::read_dir(&path)?.collect::<io::Result<Vec<_>>>()?;
+        for file in &files {
+            if !matches!(file.file_name().to_str(), Some(ARCHIVE | OFFER | SIGNATURE))
+                || !file.file_type()?.is_file()
+            {
+                return Err(invalid("unrecognized firmware staging file").into());
+            }
+        }
+        for file in files {
+            fs::remove_file(file.path())?;
+        }
+        fs::remove_dir(path)?;
+        removed = true;
+    }
+    if removed {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 async fn stage_archive(

@@ -16,13 +16,30 @@ use tokio_util::io::ReaderStream;
 use tough::{Transport, TransportError, TransportErrorKind, TransportStream};
 use url::{Host, Url};
 
-use crate::{Result, Role, invalid, state};
+use crate::{Result, invalid, state};
 
 pub const METADATA_BYTES: u64 = 1024 * 1024;
 pub const CONFIG_BYTES: u64 = 64 * 1024;
 pub enum EnrolledDepot {
     Local,
     Https(IpAddr),
+}
+
+impl EnrolledDepot {
+    pub fn load(boot: &Path, name: &str) -> Result<Self> {
+        let bytes = state::read(&boot.join(format!("{name}-depot")), 64)?;
+        let selector = std::str::from_utf8(&bytes)?
+            .strip_suffix('\n')
+            .ok_or_else(|| invalid("invalid signed update depot selector"))?;
+        if selector == "local" {
+            return Ok(Self::Local);
+        }
+        let address: IpAddr = selector.parse()?;
+        if address.is_unspecified() || address.is_multicast() {
+            return Err(invalid("invalid signed update depot address").into());
+        }
+        Ok(Self::Https(address))
+    }
 }
 
 #[derive(Deserialize)]
@@ -73,7 +90,7 @@ impl Depot {
     pub fn with_scope(
         config: &[u8],
         max_target_bytes: u64,
-        scope: Option<(&EnrolledDepot, Role)>,
+        scope: Option<(&EnrolledDepot, &str)>,
     ) -> Result<Self> {
         let config: Config = serde_json::from_slice(config)?;
         let (metadata, targets, backend) = match config {
@@ -81,11 +98,8 @@ impl Depot {
                 if !path.is_absolute() {
                     return Err(invalid("local depot requires an absolute path").into());
                 }
-                let expected = scope.map(|(_, role)| {
-                    Path::new("/run/fvca/host-data")
-                        .join(role.update_state())
-                        .join("depot")
-                });
+                let expected = scope
+                    .map(|(_, name)| Path::new("/run/fvca/host-data").join(name).join("depot"));
                 if let Some((endpoint, _)) = scope
                     && (!matches!(endpoint, EnrolledDepot::Local)
                         || expected.as_ref() != Some(&path))
@@ -114,16 +128,14 @@ impl Depot {
                 ca_file,
                 deadline_seconds,
             } => {
-                if let Some((endpoint, role)) = scope {
+                if let Some((endpoint, name)) = scope {
                     let address = match base_url.host() {
                         Some(Host::Ipv4(ip)) => Some(IpAddr::V4(ip)),
                         Some(Host::Ipv6(ip)) => Some(IpAddr::V6(ip)),
                         _ => None,
                     };
                     if !matches!(endpoint, EnrolledDepot::Https(ip) if address == Some(*ip))
-                        || ca_file
-                            != Path::new("/run/fvca")
-                                .join(format!("{}-ca.pem", role.update_state()))
+                        || ca_file != Path::new("/run/fvca").join(format!("{name}-ca.pem"))
                     {
                         return Err(invalid(
                             "HTTPS depot or CA differs from the signed update enrollment",
@@ -353,8 +365,7 @@ mod tests {
             (wrong_https.as_slice(), &https),
             (wrong_ca.as_slice(), &https),
         ] {
-            let error =
-                Depot::with_scope(config, 1024, Some((scope, Role::Hypervisor))).unwrap_err();
+            let error = Depot::with_scope(config, 1024, Some((scope, "os-update"))).unwrap_err();
             assert!(error.to_string().contains("signed update enrollment"));
         }
     }

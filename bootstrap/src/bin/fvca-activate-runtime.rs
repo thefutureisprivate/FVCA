@@ -81,8 +81,13 @@ fn activate() -> io::Result<()> {
         hypervisor_trial::publish_running_context(esp, &verified_runtime, guest, epoch)?;
         host_update::activate_if_selected()?;
     }
-    if !recovering && guest.is_some() && !Path::new("/run/fvca/boot-trial-started").try_exists()? {
-        host_update::activate_guest_if_selected()?;
+    if !recovering && !Path::new("/run/fvca/boot-trial-started").try_exists()? {
+        if guest.is_some() {
+            host_update::activate_guest_if_selected()?;
+        }
+        if protected_epoch {
+            host_update::activate_firmware_if_selected()?;
+        }
     }
 
     println!("FVCA_VM_RUNTIME_ACTIVE {}", verified_runtime.extension);

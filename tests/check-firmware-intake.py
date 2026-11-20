@@ -83,20 +83,23 @@ def qualify(client, output):
 
     def offer(identity, version, target, sequence):
         return {
-            "schema": "fvca-firmware-offer-v2", "role": "hypervisor", "channel": "stable",
+            "schema": "fvca-firmware-channel-v1", "role": "hypervisor", "channel": "stable",
             "sequence": sequence, "valid_from": stamp - 60, "expires": stamp + 3600,
             "system_uuid": platform["system_uuid"], "fwupd_version": "2.1.10",
-            "device": identity, "remote": "lvfs", "epoch": 3, "from": version, "to": target,
-            "archive": {"sha256": digest(archive), "bytes": len(archive)}, "payload_sha256": "1" * 64,
-            "catalog": deepcopy(catalog),
-            "qualification": {
-                "distribution_evidence_sha256": "2" * 64, "vendor_authentication": "device-signature",
-                "vendor_evidence_sha256": "3" * 64, "transition_evidence_sha256": "4" * 64,
-                "reboot_policy_sha256": "5" * 64, "recovery_evidence_sha256": "6" * 64,
+            "offer": {
+                "device": identity, "remote": "lvfs", "epoch": 3, "from": version, "to": target,
+                "archive": {"sha256": digest(archive), "bytes": len(archive)}, "payload_sha256": "1" * 64,
+                "catalog": deepcopy(catalog),
+                "qualification": {
+                    "distribution_evidence_sha256": "2" * 64, "vendor_authentication": "device-signature",
+                    "vendor_evidence_sha256": "3" * 64, "transition_evidence_sha256": "4" * 64,
+                    "reboot_policy_sha256": "5" * 64, "recovery_evidence_sha256": "6" * 64,
+                },
             },
         }
 
     def snapshot(document, serial=None):
+        document = document["offer"]
         current = observed_device(document["device"], document["from"], serial)
         available = deepcopy(current)
         available["Releases"] = [
@@ -146,7 +149,7 @@ def qualify(client, output):
         "max_archive_bytes": 4096, "allowed_devices": [bios, nvme], "allowed_remotes": ["lvfs"], "minimum_epoch": 3,
     }
 
-    def run(name, observed, want=None, settings=policy, directory=state):
+    def run(name, observed, want=None, settings=policy, directory=state, *, disposition="staged"):
         intake["write_json"](observation, observed)
         intake["write_json"](policy_path, settings)
         signature.write_bytes(bytes.fromhex(owner.sign(policy_path.read_bytes()).signature))
@@ -159,10 +162,15 @@ def qualify(client, output):
         else:
             assert result.returncode == 0, (name, result)
             status = json.loads(result.stdout)
-            assert status["disposition"] == "staged" and status["archive_sha256"] == digest(archive)
-            stage = Path(status["staged"])
-            assert {path.name for path in stage.iterdir()} == {"firmware.cab", "offer.json", "offer.sig"}
-            assert (stage / "firmware.cab").read_bytes() == archive
+            assert status["disposition"] == disposition and stamp <= status["last_refresh"] < status["fresh_until"]
+            if disposition == "staged":
+                assert status["archive_sha256"] == digest(archive)
+                stage = Path(status["staged"])
+                assert {path.name for path in stage.iterdir()} == {"firmware.cab", "offer.json", "offer.sig"}
+                assert (stage / "firmware.cab").read_bytes() == archive
+                assert list((directory / "staged").iterdir()) == [stage]
+            else:
+                assert "staged" not in status and not any((directory / "staged").iterdir())
         print(f"{name} passed")
 
     run("capsule-staged", snapshot(initial))
@@ -172,10 +180,10 @@ def qualify(client, output):
     metadata = next(name for name in catalog_targets if name.endswith(".bin"))
     files[metadata].write_bytes(b"x" * catalog["metadata"]["bytes"])
     run("tampered-catalog-bytes", snapshot(initial), "Hash mismatch", directory=catalog_state)
-    assert not (catalog_state / "staged").exists()
+    assert not any((catalog_state / "staged").iterdir())
     publish(initial)
     wrong_catalog = deepcopy(initial)
-    wrong_catalog["catalog"]["signature"]["bytes"] += 1
+    wrong_catalog["offer"]["catalog"]["signature"]["bytes"] += 1
     publish(wrong_catalog)
     length_state = output / "wrong-length-state"
     length_state.mkdir(mode=0o700)
@@ -203,6 +211,10 @@ def qualify(client, output):
     duplicate.update(DeviceId="8" * 40, Serial="fixture-NVMe-B")
     nvme_observation["devices"]["Devices"].append(duplicate)
     run("two-identical-models", nvme_observation)
+    interrupted = state / "staged/.firmware-interrupted"
+    interrupted.mkdir(mode=0o700)
+    (interrupted / "firmware.cab").write_bytes(b"incomplete")
+    run("retire-interrupted-staging", nvme_observation)
     bad = snapshot(next_nvme, "fixture-NVMe-A")
     bad["devices"]["Devices"][0]["Flags"].append("wildcard-install")
     run("multi-device-installation", bad, "device is inhibited")
@@ -218,6 +230,16 @@ def qualify(client, output):
     run("replayed-offer-on-new-tuf-metadata", snapshot(initial), "rollback or equivocation")
     publish(dict(next_nvme, sequence=3), owner)
     run("tuf-and-owner-cannot-replace-qualification", nvme_observation, "independent firmware qualification")
+    withdrawal = dict(next_nvme, sequence=3, offer=None)
+    unauthorized = dict(withdrawal)
+    del unauthorized["offer"]
+    publish(unauthorized)
+    run("implicit-withdrawal-rejected", nvme_observation, "missing field")
+    assert len(list((state / "staged").iterdir())) == 1
+    publish(withdrawal)
+    run("signed-withdrawal-retires-cabinet", nvme_observation, disposition="no-offer")
+    publish(dict(next_nvme, sequence=3))
+    run("withdrawal-cannot-be-replayed-over", nvme_observation, "rollback or equivocation")
     publish(dict(next_nvme, sequence=3))
     files[cabinet.name].write_bytes(b"x" * len(archive))
     fresh = output / "tampered-archive-state"

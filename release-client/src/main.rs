@@ -502,6 +502,9 @@ fn run() -> Result<()> {
             Some("--run-guest-update") => {
                 return runtime()?.block_on(run_scheduled_update(Role::ServiceGuest));
             }
+            Some("--run-firmware-update") => {
+                return runtime()?.block_on(firmware::scheduled());
+            }
             _ => (),
         }
     }
@@ -528,7 +531,15 @@ fn run() -> Result<()> {
             firmware::ObservationSource::File(observation)
         };
         return runtime()?.block_on(firmware::stage(
-            root, depot, state, policy, signature, owner, source,
+            firmware::Intake {
+                trusted_root: root,
+                depot_config: depot,
+                directory: state,
+                policy,
+                signature,
+                owner,
+            },
+            source,
         ));
     }
     if let [
@@ -619,15 +630,7 @@ async fn run_scheduled_update(role: Role) -> Result<()> {
     let directory = boot.join("host-data").join(name);
     handoff::require_pool_directory(&directory)?;
     let owner = boot.join(format!("{name}-owner"));
-    let scope = state::read(&boot.join(format!("{name}-depot")), 64)?;
-    let scope = std::str::from_utf8(&scope)?
-        .strip_suffix('\n')
-        .ok_or_else(|| invalid("invalid signed update depot selector"))?;
-    let depot = if scope == "local" {
-        depot::EnrolledDepot::Local
-    } else {
-        depot::EnrolledDepot::Https(scope.parse()?)
-    };
+    let depot = depot::EnrolledDepot::load(boot, name)?;
     let operation = match role {
         Role::Hypervisor => {
             state::read(Path::new(RUNNING_CONTEXT), APPROVAL_LIMIT as u64)?;

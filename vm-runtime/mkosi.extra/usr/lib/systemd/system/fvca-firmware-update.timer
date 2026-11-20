@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule signed Host firmware discovery
+ConditionPathExists=/run/fvca/firmware-update-owner
+ConditionPathExists=!/run/fvca/boot-trial-started
+
+[Timer]
+OnBootSec=2min
+OnCalendar=hourly
+RandomizedDelaySec=90s
+AccuracySec=1s
+DeferReactivation=yes

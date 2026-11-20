@@ -1,4 +1,4 @@
-//! Enable the Host update timer only for the enrollment carried by the signed UKI.
+//! Enroll Host update services from the verified UKI.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -14,6 +14,7 @@ use crate::{invalid, run};
 
 const HOST_STATE: &str = "os-update";
 const GUEST_STATE: &str = "guest-os-update";
+const FIRMWARE_STATE: &str = "firmware-update";
 const HOST_DATA: &str = "/run/fvca/host-data";
 const RUN: &str = "/run/fvca";
 const SIGNED: &str = "/usr/lib/fvca";
@@ -72,7 +73,7 @@ fn owner_for(name: &str) -> io::Result<Option<Vec<u8>>> {
         Err(error) => return Err(error),
     };
     if owner.len() != 32 || owner.iter().all(|byte| *byte == 0) {
-        return Err(invalid("invalid signed OS update owner key"));
+        return Err(invalid("invalid signed update owner key"));
     }
     Ok(Some(owner))
 }
@@ -85,19 +86,17 @@ fn publish_depot(name: &str, service: &str, owner: &[u8]) -> io::Result<()> {
     let depot = fs::read_to_string(signed.join(&depot_name))?;
     if depot == "local\n" {
         if signed.join(&ca_name).try_exists()? {
-            return Err(invalid(
-                "a local OS update depot must have no HTTPS authority",
-            ));
+            return Err(invalid("a local update depot must have no HTTPS authority"));
         }
     } else {
         let address = depot
             .strip_suffix('\n')
             .and_then(|value| value.parse::<IpAddr>().ok())
             .filter(|ip| !ip.is_unspecified() && !ip.is_multicast())
-            .ok_or_else(|| invalid("the signed OS update depot must identify one IP address"))?;
+            .ok_or_else(|| invalid("the signed update depot must identify one IP address"))?;
         let ca = fs::read(signed.join(&ca_name))?;
         if ca.len() > 65_536 || !ca.starts_with(b"-----BEGIN CERTIFICATE-----") {
-            return Err(invalid("invalid signed OS update depot CA bundle"));
+            return Err(invalid("invalid signed update depot CA bundle"));
         }
         let dropin = Path::new(UNITS).join(format!("{service}.service.d"));
         fs::create_dir_all(&dropin)?;
@@ -174,5 +173,19 @@ pub fn activate_guest_if_selected() -> io::Result<()> {
     publish_depot(GUEST_STATE, "fvca-guest-os-update", &owner)?;
     enable_timer("fvca-guest-os-update")?;
     println!("FVCA_GUEST_OS_UPDATE_TIMER_ENROLLED");
+    Ok(())
+}
+
+pub fn activate_firmware_if_selected() -> io::Result<()> {
+    let Some(owner) = owner_for(FIRMWARE_STATE)? else {
+        return Ok(());
+    };
+    if let Err(error) = prepare_staging(FIRMWARE_STATE) {
+        eprintln!("FVCA_HOST_FIRMWARE_ENROLLMENT_BLOCKED {error}");
+        return Ok(());
+    }
+    publish_depot(FIRMWARE_STATE, "fvca-firmware-update", &owner)?;
+    enable_timer("fvca-firmware-update")?;
+    println!("FVCA_HOST_FIRMWARE_TIMER_ENROLLED");
     Ok(())
 }
