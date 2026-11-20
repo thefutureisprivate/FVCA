@@ -116,7 +116,7 @@ pub fn activate(cmdline: &str) -> io::Result<()> {
         ));
     }
     let profile = profile.uplink;
-    let (device, index) = net_setup::wait_for_interface(&profile, false).map_err(|error| {
+    let (device, index) = net_setup::wait_for_interface(profile.nic(), false).map_err(|error| {
         if error.kind() == io::ErrorKind::TimedOut {
             invalid("the signed Host management NIC is unavailable")
         } else {

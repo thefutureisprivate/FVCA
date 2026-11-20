@@ -7,7 +7,7 @@ use std::path::Path;
 
 use fvca_initrd_bootstrap::{
     guest_resources::{self, Resources},
-    invalid,
+    host_workload, invalid,
 };
 
 const PROFILE: &str = include_str!("../../../../policy/guest-direct-boot.xml");
@@ -50,10 +50,23 @@ fn profile(command_line: &str) -> String {
         .replace("FVCA_SIGNED_COMMAND_LINE", command_line)
 }
 
-fn render(command_line: &str, boot: &Path, resources: Resources) -> String {
+fn render(command_line: &str, boot: &Path, resources: Resources, mac: Option<&str>) -> String {
     // Rebind only paths from the fixed definition. The signed kernel command
     // line is added after path replacement.
-    PROFILE
+    let template = match mac {
+        Some(mac) => PROFILE.replace("  <devices>\n", &format!(
+            "  <devices>\n\
+             <interface type=\"ethernet\">\n\
+               <mac address=\"{mac}\"/>\n\
+               <target dev=\"{}\" managed=\"no\"/>\n\
+               <model type=\"virtio-non-transitional\"/>\n\
+               <driver name=\"qemu\"/>\n\
+               <rom enabled=\"no\"/>\n\
+               <address type=\"pci\" domain=\"0x0000\" bus=\"0x00\" slot=\"0x06\" function=\"0x0\"/>\n\
+             </interface>\n", host_workload::TAP)),
+        None => PROFILE.to_owned(),
+    };
+    template
         .trim_end_matches('\n')
         .replace("/run/fvca/guest-boot/", &format!("{}/", boot.display()))
         .replace(
@@ -64,7 +77,7 @@ fn render(command_line: &str, boot: &Path, resources: Resources) -> String {
         .replace("FVCA_SIGNED_COMMAND_LINE", command_line)
 }
 
-pub(super) fn verify(boot: &Path, core: &str) -> io::Result<String> {
+pub(super) fn verify(boot: &Path, core: &str) -> io::Result<(String, Option<String>)> {
     let command_line =
         signed_command_line(&read(&boot.join("cmdline"), COMMAND_LINE_LIMIT)?, core)?;
     if read(&boot.join("domain.xml"), MACHINE_LIMIT)? != profile(&command_line) {
@@ -72,14 +85,15 @@ pub(super) fn verify(boot: &Path, core: &str) -> io::Result<String> {
             "the signed Guest machine differs from the fixed direct-boot profile",
         ));
     }
-    Ok(command_line)
+    let mac = host_workload::guest_mac(&command_line)?;
+    Ok((command_line, mac))
 }
 
 pub(super) fn definition(boot: &Path, core: &str) -> io::Result<CString> {
-    let command_line = verify(boot, core)?;
+    let (command_line, mac) = verify(boot, core)?;
     let resources = guest_resources::active()?;
     guest_resources::require_capacity(resources)?;
-    CString::new(render(&command_line, boot, resources)).map_err(io::Error::other)
+    CString::new(render(&command_line, boot, resources, mac.as_deref())).map_err(io::Error::other)
 }
 
 #[cfg(test)]
@@ -94,12 +108,18 @@ mod tests {
         };
         let line = signed_command_line("roothash=core example=<x>&y>z\n", "core")?;
         let boot = Path::new("/run/fvca/guest-releases/verified");
-        let xml = render(&line, boot, settings);
+        let xml = render(&line, boot, settings, None);
         assert_eq!(xml.matches("/run/fvca/guest-releases/verified/").count(), 4);
         assert!(xml.contains("<memory unit=\"MiB\">2560</memory>"));
         assert!(xml.contains("<vcpu placement=\"static\">3</vcpu>"));
         assert!(xml.contains("<cmdline>roothash=core example=&lt;x&gt;&amp;y&gt;z</cmdline>"));
         assert!(!xml.contains("<interface"));
+        let connected = render(&line, boot, settings, Some("52:54:00:10:20:30"));
+        assert_eq!(connected.matches("<interface ").count(), 1);
+        assert!(connected.contains("dev=\"fvca-wl-tap\" managed=\"no\""));
+        assert!(connected.contains("slot=\"0x06\""));
+        assert!(connected.contains("driver name=\"qemu\""));
+        assert!(connected.contains("<rom enabled=\"no\"/>"));
         assert!(signed_command_line("roothash=other\n", "core").is_err());
         assert!(signed_command_line("roothash=core roothash=core\n", "core").is_err());
         assert!(signed_command_line("roothash=core \n\n", "core").is_err());

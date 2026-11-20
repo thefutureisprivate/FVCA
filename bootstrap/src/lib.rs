@@ -15,6 +15,7 @@ pub mod direct_boot;
 pub mod guest_boot;
 pub mod guest_resources;
 pub mod host_network;
+pub mod host_workload;
 mod net_setup;
 pub mod host_update;
 pub mod hypervisor_slot;

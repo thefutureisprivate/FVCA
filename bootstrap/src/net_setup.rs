@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fvca_trial_authorization::host_network::Uplink as Identity;
+use fvca_trial_authorization::host_network::{Nic, Uplink as Identity};
 
 use crate::{invalid, recovery, run};
 
@@ -67,10 +67,7 @@ pub(crate) fn signed_record(
     Ok(Some(raw))
 }
 
-fn initialized_interface(
-    profile: &Identity<'_>,
-    virtio: bool,
-) -> io::Result<Option<(PathBuf, u32)>> {
+fn initialized_interface(profile: Nic<'_>, virtio: bool) -> io::Result<Option<(PathBuf, u32)>> {
     let mut selected = None;
     for entry in fs::read_dir(NET)? {
         let path = entry?.path();
@@ -88,7 +85,7 @@ fn initialized_interface(
     Ok(selected)
 }
 
-fn inspect_interface(path: &Path, profile: &Identity<'_>, virtio: bool) -> io::Result<Option<u32>> {
+fn inspect_interface(path: &Path, profile: Nic<'_>, virtio: bool) -> io::Result<Option<u32>> {
     let device = fs::read_link(path.join("device"))?;
     let pci = if virtio {
         let sys_device = path.join("device");
@@ -123,10 +120,7 @@ fn inspect_interface(path: &Path, profile: &Identity<'_>, virtio: bool) -> io::R
     Ok(path.try_exists()?.then_some(index))
 }
 
-pub(crate) fn wait_for_interface(
-    profile: &Identity<'_>,
-    virtio: bool,
-) -> io::Result<(PathBuf, u32)> {
+pub(crate) fn wait_for_interface(profile: Nic<'_>, virtio: bool) -> io::Result<(PathBuf, u32)> {
     let deadline = Instant::now() + Duration::from_secs(12);
     loop {
         if let Some(device) = initialized_interface(profile, virtio)? {

@@ -824,6 +824,18 @@ Generate a fresh random nonce and use current Unix seconds with a validity windo
 
 The [off-node OpenTofu provider and module](opentofu/README.md) use this protocol for authenticated Guest configuration preflight and separate release observations.
 
+#### Host workload uplink
+
+For a connected Service Guest, pass `--workload-uplink FILE` along with `--guest-boot` to `compose-hypervisor.py`. Start the file with the dedicated workload NIC's PCI address and permanent MAC. Use the complete [Guest workload network record](#service-guest-workload-uplink) immediately after that header, starting on the next line. For a Hypervisor-managed Guest, use `pci=0000:00:06.0` in the Guest record. The Hypervisor checks the digest against the registered Guest release before signing and again on boot and trial admission.
+
+```text
+FVCA-HOST-WORKLOAD-1
+pci=0000:04:00.0
+mac=02:fc:00:00:00:02
+```
+
+Use distinct management and workload NICs, MAC addresses, and IPv4 subnets. Connect the workload NIC to its dedicated untagged network. The Hypervisor creates a bridge with no IP addresses and exactly two ports, the enrolled physical NIC and a fixed TAP. It filters transit by direction, the Guest's source and destination identity, approved peer and port, and connection state. The bridge admits ARP for approved neighbors including the enrolled gateway. Its host-facing chains drop traffic. Libvirt passes the pre-created TAP to the confined QEMU process with the userspace VirtIO backend. Standing updates preserve the exact Host workload enrollment. [Libvirt interface XML](https://libvirt.org/formatdomain.html#generic-ethernet-connection) · [nftables bridge filtering](https://wiki.nftables.org/wiki-nftables/index.php/Bridge_filtering)
+
 #### Admit a planned Guest configuration
 
 Add `apply_operator_public_key` to the signed management enrollment to authorize submission. Use a dedicated hex-encoded Ed25519 public key distinct from the read operator and the appliance's signing and release authorities. Writer enrollment requires the existing signed Host configuration-change path. Sign the request envelope with the submitter key and use this operation:
@@ -1132,7 +1144,7 @@ ingress=tcp,192.168.44.20,443
 egress=tcp,192.168.44.70,443
 ```
 
-Use `gateway=none` for an on-link profile and `dns=none` to omit a configured resolver. Each `ingress` or `egress` rule approves an exact IPv4 peer and TCP or UDP destination port. An enrolled resolver allows TCP and UDP on port 53 to that address. The workload receives the original client address and terminates its own application protocols. The `none` deployment uses Podman's isolated offline network mode. A connected lab must supply the enrolled virtio NIC on an isolated segment. Attachment to the Hypervisor's physical workload uplink requires its own site enrollment and qualification. [Podman networking](https://docs.podman.io/en/latest/markdown/podman-run.1.html) · [nftables reference](https://netfilter.org/projects/nftables/manpage.html)
+Use `gateway=none` for an on-link profile and `dns=none` to omit a configured resolver. Each `ingress` or `egress` rule approves an exact IPv4 peer and TCP or UDP destination port. An enrolled resolver allows TCP and UDP on port 53 to that address. The workload receives the original client address and terminates its own application protocols. The `none` deployment uses Podman's isolated offline network mode. A connected lab supplies the enrolled virtio NIC on an isolated segment. Enroll a [Host workload uplink](#host-workload-uplink) for a Hypervisor-managed Guest. [Podman networking](https://docs.podman.io/en/latest/markdown/podman-run.1.html) · [nftables reference](https://netfilter.org/projects/nftables/manpage.html)
 
 For Stalwart lifecycle qualification, run `tests/stalwart-lifecycle-initrd.sh` with the development OCI initramfs and a new output file. Use that initramfs when composing the disposable Guest, then add `--stalwart-lifecycle` to the `tests/check-storage.py --workload` invocation. The fixture checks the health endpoint, UID/GID, SELinux label, resource settings, Btrfs file persistence across restart, and clean stop. Stalwart runs in its offline bootstrap mode. Controller-backed freshness and protected updates remain pending. [Stalwart bootstrap mode](https://stalw.art/docs/configuration/bootstrap-mode/)
 

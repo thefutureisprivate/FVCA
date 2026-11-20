@@ -207,8 +207,9 @@ fn wait_for_boot(domain: &Domain<'_>, runtime: &str, events: &EventLoop, timeout
     let mut console = domain.console()?;
     domain.resume()?;
     let expected = format!("FVCA_OCI_RUNTIME_ACTIVE {runtime}");
-    let markers = [b"FVCA_DIRECT_BOOT_POLICY_ACTIVE".as_slice(), expected.as_bytes(), b"FVCA_DEV_BASE_READY"];
-    let mut seen = [false; 3];
+    let markers = [b"FVCA_DIRECT_BOOT_POLICY_ACTIVE".as_slice(), expected.as_bytes(), b"FVCA_DEV_BASE_READY", b"FVCA_WORKLOAD_NETWORK_READY"];
+    let network_enrolled = fvca_trial_authorization::host_workload::binding(&fs::read_to_string("/proc/cmdline")?)?.is_some();
+    let mut seen = [false, false, false, !network_enrolled];
     let mut buffer = [0; 4096];
     let mut tail = Vec::with_capacity(buffer.len() + 128);
     let deadline = Instant::now() + timeout;
@@ -233,8 +234,8 @@ fn wait_for_boot(domain: &Domain<'_>, runtime: &str, events: &EventLoop, timeout
         tail.drain(..tail.len().saturating_sub(128));
     }
     Err(io::Error::new(io::ErrorKind::TimedOut, format!(
-        "the Service Guest did not reach readiness (direct boot {}, verified runtime {}, root readiness {})",
-        seen[0], seen[1], seen[2],
+        "the Service Guest did not reach readiness (direct boot {}, verified runtime {}, root readiness {}, workload network {})",
+        seen[0], seen[1], seen[2], seen[3],
     )))
 }
 

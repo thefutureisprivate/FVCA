@@ -16,8 +16,8 @@ use std::process::Command;
 
 use fvca_trial_authorization::guest_config::Policy as GuestPolicy;
 use fvca_trial_authorization::{
-    KEY_ARGUMENT, PEER_PARTITIONS, Standing, WATCHDOG_ARGUMENT, host_network, key_marker,
-    watchdog_seconds,
+    KEY_ARGUMENT, PEER_PARTITIONS, Standing, WATCHDOG_ARGUMENT, host_network, host_workload,
+    key_marker, watchdog_seconds,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -164,6 +164,7 @@ struct VerifiedLoader {
     guest_configuration: GuestPolicy,
     management_enrollment: Option<ManagementBinding>,
     host_network: Option<String>,
+    host_workload: Option<String>,
 }
 
 impl VerifiedLoader {
@@ -180,6 +181,9 @@ impl VerifiedLoader {
         }
         if self.host_network != candidate.host_network {
             return Err(invalid("Host updates must preserve the signed uplink profile").into());
+        }
+        if self.host_workload != candidate.host_workload {
+            return Err(invalid("Host updates must preserve the signed workload uplink").into());
         }
         if stable.authority != next.authority {
             return Err(invalid(
@@ -216,6 +220,12 @@ impl VerifiedLoader {
             if host_network::binding(args)? != self.host_network.as_deref() {
                 return Err(invalid(
                     "the installed stable UKI differs from the running Host uplink",
+                )
+                .into());
+            }
+            if host_workload::binding(args)? != self.host_workload.as_deref() {
+                return Err(invalid(
+                    "the installed stable UKI differs from the running workload uplink",
                 )
                 .into());
             }
@@ -316,7 +326,12 @@ fn tool(program: &str, args: &[&Path]) -> Result<()> {
 }
 
 type ManagementBinding = (String, SocketAddr);
-type BootBindings = (GuestPolicy, Option<ManagementBinding>, Option<String>);
+type BootBindings = (
+    GuestPolicy,
+    Option<ManagementBinding>,
+    Option<String>,
+    Option<String>,
+);
 
 fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<BootBindings> {
     let uki::Policy { cmdline, pcrsig } = uki::read(efi)?;
@@ -396,6 +411,7 @@ fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<BootBindings>
         fvca_trial_authorization::management_binding(&cmdline)?
             .map(|(digest, address)| (digest.to_owned(), address)),
         host_network::binding(&cmdline)?.map(str::to_owned),
+        host_workload::binding(&cmdline)?.map(str::to_owned),
     ))
 }
 
@@ -443,7 +459,8 @@ fn loader(
         &[Path::new("--cert"), &fd_path(cert), &efi],
     )?;
     let signed = state::open_regular(&efi)?;
-    let (guest_configuration, management_enrollment, host_network) = verify_epoch(&signed, epoch)?;
+    let (guest_configuration, management_enrollment, host_network, host_workload) =
+        verify_epoch(&signed, epoch)?;
     let bytes = signed.metadata()?.len();
     let hash = digest(&signed, Extent { start: 0, bytes })?;
     if epoch.trial.is_some_and(|trial| {
@@ -459,6 +476,7 @@ fn loader(
         guest_configuration,
         management_enrollment,
         host_network,
+        host_workload,
     })
 }
 
@@ -1031,12 +1049,14 @@ mod tests {
             },
             management_enrollment: None,
             host_network: Some("f".repeat(64)),
+            host_workload: Some("d".repeat(64)),
         };
         let candidate = |binding, authority| VerifiedLoader {
             sha256: [2; 32],
             guest_configuration: GuestPolicy { binding, authority },
             management_enrollment: None,
             host_network: Some("f".repeat(64)),
+            host_workload: Some("d".repeat(64)),
         };
         let enrolled = Some([3; 32]);
         let unchanged = candidate(Some(binding(9, "a")), enrolled);
@@ -1046,6 +1066,13 @@ mod tests {
         assert!(
             stable
                 .require_host_configuration(&changed_network, false, None)
+                .is_err()
+        );
+        let mut changed_workload = candidate(Some(binding(9, "a")), enrolled);
+        changed_workload.host_workload = Some("c".repeat(64));
+        assert!(
+            stable
+                .require_host_configuration(&changed_workload, false, None)
                 .is_err()
         );
         let mut changed_enrollment = candidate(Some(binding(9, "a")), enrolled);

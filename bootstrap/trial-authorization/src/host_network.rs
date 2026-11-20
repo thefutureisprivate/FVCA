@@ -30,6 +30,32 @@ pub struct Uplink<'a> {
     pub gateway: Option<Ipv4Addr>,
 }
 
+#[derive(Clone, Copy)]
+pub struct Nic<'a> {
+    pub pci: &'a str,
+    pub mac: &'a str,
+}
+
+impl<'a> Nic<'a> {
+    pub(crate) fn parse(pci: &'a str, mac: &'a str) -> io::Result<Self> {
+        let pci = field(pci, "pci=")?;
+        let mac = field(mac, "mac=")?;
+        if !hardware_field(pci, b"hhhh:hh:hh.f")
+            || !valid_mac(mac)
+            || u8::from_str_radix(&pci[8..10], 16).map_or(true, |slot| slot > 31)
+        {
+            return Err(invalid("invalid enrolled PCI address or Ethernet MAC"));
+        }
+        Ok(Self { pci, mac })
+    }
+}
+
+pub(crate) fn valid_mac(mac: &str) -> bool {
+    hardware_field(mac, b"hh:hh:hh:hh:hh:hh")
+        && u8::from_str_radix(&mac[..2], 16).is_ok_and(|first| first & 1 == 0)
+        && mac != "00:00:00:00:00:00"
+}
+
 fn unicast(address: Ipv4Addr) -> bool {
     address.octets()[0] != 0
         && address.octets()[0] < 224
@@ -81,16 +107,7 @@ impl<'a> Profile<'a> {
 
 impl<'a> Uplink<'a> {
     pub(crate) fn parse(pci: &'a str, mac: &'a str, cidr: &str, gateway: &str) -> io::Result<Self> {
-        let pci = field(pci, "pci=")?;
-        let mac = field(mac, "mac=")?;
-        if !hardware_field(pci, b"hhhh:hh:hh.f")
-            || !hardware_field(mac, b"hh:hh:hh:hh:hh:hh")
-            || u8::from_str_radix(&mac[..2], 16).map_or(true, |first| first & 1 != 0)
-            || mac == "00:00:00:00:00:00"
-            || u8::from_str_radix(&pci[8..10], 16).map_or(true, |slot| slot > 31)
-        {
-            return Err(invalid("invalid enrolled PCI address or Ethernet MAC"));
-        }
+        let Nic { pci, mac } = Nic::parse(pci, mac)?;
         let (address, prefix) = field(cidr, "address=")?
             .split_once('/')
             .ok_or_else(|| invalid("the Host address requires a subnet prefix"))?;
@@ -117,11 +134,18 @@ impl<'a> Uplink<'a> {
         Ok(uplink)
     }
 
+    pub fn nic(self) -> Nic<'a> {
+        Nic {
+            pci: self.pci,
+            mac: self.mac,
+        }
+    }
+
     fn netmask(self) -> u32 {
         u32::MAX << (32 - self.prefix)
     }
 
-    pub(crate) fn on_link(self, ip: Ipv4Addr) -> bool {
+    pub fn on_link(self, ip: Ipv4Addr) -> bool {
         let mask = self.netmask();
         u32::from(ip) & mask == u32::from(self.address) & mask
     }

@@ -16,11 +16,13 @@ from uuid import UUID
 import backup_destination
 import guest_boot_bundle
 import host_storage
+import host_workload
 import hypervisor_gpt
 from runtime_boot import (
     DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_CHANGE_SUPPORT,
     GUEST_CONFIG_KEY, GUEST_CONFIG_KEY_ARGUMENT, GUEST_LAUNCH_FILES, GUEST_VM_SETTINGS,
     GUEST_VM_SUPPORT, HOST_NETWORK_ARGUMENT, HOST_NETWORK_POLICY, HOST_NETWORK_SUPPORT,
+    HOST_WORKLOAD_ARGUMENT, HOST_WORKLOAD_GUEST, HOST_WORKLOAD_POLICY, HOST_WORKLOAD_SUPPORT,
     MANAGEMENT_ADDRESS_ARGUMENT, MANAGEMENT_ARGUMENT, MANAGEMENT_POLICY,
     MANAGEMENT_POLICY_SUPPORT, MANAGEMENT_SUPPORT, WORKLOAD_NETWORK_ARGUMENT, WORKLOAD_NETWORK_POLICY,
     WORKLOAD_NETWORK_SUPPORT, WORKLOAD_TRUST_FILES,
@@ -451,7 +453,7 @@ def assemble(args, work):
         TRIAL_CANDIDATE_FILE, TRIAL_WATCHDOG_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY,
         GUEST_TRIAL_KEY, GUEST_BASE_EPOCH, EPOCH_FILE, *UPDATE_FILES, *GUEST_UPDATE_FILES,
         *FIRMWARE_UPDATE_FILES, UPDATE_PEER, GUEST_VM_SETTINGS, GUEST_CONFIG_KEY, HOST_NETWORK_POLICY, MANAGEMENT_POLICY,
-        WORKLOAD_NETWORK_POLICY,
+        WORKLOAD_NETWORK_POLICY, HOST_WORKLOAD_POLICY, HOST_WORKLOAD_GUEST,
     )) + (str(WORKLOAD_NETWORK_SUPPORT),)
     required = ACTIVATION_FILES
     required += (str(HOST_NETWORK_SUPPORT), "usr/bin/nft", "usr/bin/ip")
@@ -459,6 +461,14 @@ def assemble(args, work):
         marker = runtime_work / "tree" / HOST_NETWORK_SUPPORT
         if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
             raise ValueError("the signed VM runtime lacks Host uplink update enforcement")
+    if args.workload_uplink is not None:
+        required += (str(HOST_WORKLOAD_SUPPORT),)
+        required += tuple(f"usr/lib/modules/{uname}/kernel/{module}.ko.xz" for module in (
+            "drivers/net/tun", "net/bridge/netfilter/nft_meta_bridge", "net/bridge/netfilter/nf_conntrack_bridge",
+        ))
+        marker = runtime_work / "tree" / HOST_WORKLOAD_SUPPORT
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
+            raise ValueError("the signed VM runtime lacks workload TAP admission")
     if resources:
         required += (str(GUEST_VM_SUPPORT), "usr/bin/sha256sum")
         marker = runtime_work / "tree" / GUEST_VM_SUPPORT
@@ -561,6 +571,8 @@ def assemble(args, work):
     authorities = approval_keys(args)
     management, management_arguments, operators = management_selection(args, authorities)
     network, network_arguments = network_selection(args, management, backup)
+    guest_cmdline = (work / "guest/tree/cmdline").read_text(encoding="ascii") if guest else ""
+    workload, workload_arguments = host_workload.selection(args.workload_uplink, guest_cmdline, network)
     guest_epoch = ((GUEST_BASE_EPOCH, f"{args.guest_trial_epoch}\n".encode("ascii")),) if args.guest_trial_epoch else ()
     trial_key_arguments = tuple(f"{TRIAL_KEY_ARGUMENT}={key.hex()}" for name, key in authorities
                                 if name == STANDING_TRIAL_KEY)
@@ -568,7 +580,7 @@ def assemble(args, work):
                                         if name == GUEST_CONFIG_KEY)
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
-        extra=(*extra, *epoch, *guest, *resources, *management, *network, *backup, *backup_job_selection(args.backup_job, backup),
+        extra=(*extra, *epoch, *guest, *resources, *management, *network, *workload, *backup, *backup_job_selection(args.backup_job, backup),
                *restore_selection(args.restore_authorization, backup),
                *retention_selection(args.retention_policy, backup),
                *stable_trial, *candidate_trial, *watchdog, *guest_epoch,
@@ -576,12 +588,13 @@ def assemble(args, work):
     )
     if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT, TRIAL_WATCHDOG_ARGUMENT,
                                     GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_KEY_ARGUMENT, MANAGEMENT_ARGUMENT,
-                                    MANAGEMENT_ADDRESS_ARGUMENT, HOST_NETWORK_ARGUMENT, WORKLOAD_NETWORK_ARGUMENT)
+                                    MANAGEMENT_ADDRESS_ARGUMENT, HOST_NETWORK_ARGUMENT, HOST_WORKLOAD_ARGUMENT,
+                                    WORKLOAD_NETWORK_ARGUMENT)
            for arg in cmdline.split()):
         raise ValueError("shared core already configures a Hypervisor epoch, trial, Guest configuration or management")
     cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments,
                         *trial_key_arguments, *watchdog_arguments, *resource_arguments, *configuration_key_arguments,
-                        *management_arguments, *network_arguments))
+                        *management_arguments, *network_arguments, *workload_arguments))
     immutable = None
     if ids is None:
         disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)
@@ -618,6 +631,7 @@ def main():
     parser.add_argument("--management-enrollment", type=Path,
                         help="pin a Host management identity, listener, certificate and read-only operator")
     parser.add_argument("--host-network", type=Path, help="pin the Host management NIC, address and operator peer")
+    parser.add_argument("--workload-uplink", type=Path, help="pin the separate physical workload NIC and exact Guest network")
     parser.add_argument("--guest-trial-public-key", type=Path, help="pin the independent Service Guest trial signer")
     parser.add_argument("--guest-trial-epoch", type=int, help="initial epoch of the enrolled Service Guest release")
     parser.add_argument("--gpt-slot", type=UUID, help="assign one unique UUID to a self-contained Hypervisor GPT slot image")

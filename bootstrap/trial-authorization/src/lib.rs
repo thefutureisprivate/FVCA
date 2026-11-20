@@ -11,6 +11,7 @@ pub mod firmware;
 pub mod guest;
 pub mod guest_config;
 pub mod host_network;
+pub mod host_workload;
 pub mod workload_network;
 
 pub const APPROVAL_LIMIT: usize = 2048;

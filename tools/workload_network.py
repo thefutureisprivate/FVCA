@@ -36,10 +36,13 @@ def parse(data):
             or gateway is not None and (gateway == local.ip or gateway not in local.network or not usable(gateway))):
         raise ValueError("invalid workload address, on-link gateway or MTU")
 
+    endpoints = set()
+
     def peer(raw):
         address = ipv4(raw)
         if address == local.ip or not (usable(address) if address in local.network else gateway is not None):
             raise ValueError("workload peer has no route through the signed uplink")
+        endpoints.add(address)
 
     if base[6] != "none":
         peer(base[6])
@@ -53,6 +56,7 @@ def parse(data):
             raise ValueError("invalid or duplicate workload peer rule")
         peer(rule[3])
         seen[rule[1]].add(line)
+    return base[1], base[2], local, endpoints
 
 
 def selection(path, trust, cmdline):

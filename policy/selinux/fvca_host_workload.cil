@@ -1,0 +1,2 @@
+; The QEMU driver takes ownership of the persistent TAP created during verified Host setup.
+(allow virtqemud_t ifconfig_t (tun_socket (relabelfrom)))

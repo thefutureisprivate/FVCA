@@ -69,6 +69,7 @@ pub fn activate_if_selected(
         "ro,nodev,nosuid,noexec",
         devices,
     )?;
+    crate::host_workload::guest_mac(&fs::read_to_string(Path::new(BOOT).join("cmdline"))?)?;
     let bundle = selection.bundle.to_owned();
     fs::write(SELECTION, payload)?;
     crate::guest_resources::publish(cmdline)?;

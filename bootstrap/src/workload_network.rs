@@ -104,7 +104,7 @@ pub fn activate(cmdline: &str, workload_trust: bool) -> io::Result<()> {
         return Err(invalid("a workload uplink requires signed workload trust"));
     }
     let profile = Profile::parse(raw)?;
-    let (device, _) = net_setup::wait_for_interface(&profile.uplink, true)?;
+    let (device, _) = net_setup::wait_for_interface(profile.uplink.nic(), true)?;
     net_setup::require_down(&device)?;
     let name = device.file_name().expect("interface path has a basename");
     run(Command::new(IP).args(["netns", "add", NAMESPACE]))?;

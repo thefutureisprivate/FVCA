@@ -34,7 +34,8 @@ if [[ "${FVCA_HYPERVISOR_STORAGE:-}" == yes ]]; then
         -i "$SRCDIR/policy/selinux/fvca_boot_trial.cil" \
         -i "$SRCDIR/policy/selinux/fvca_hypervisor_epoch.cil" \
         -i "$SRCDIR/policy/selinux/fvca_backup.cil" \
-        -i "$SRCDIR/policy/selinux/fvca_management.cil"
+        -i "$SRCDIR/policy/selinux/fvca_management.cil" \
+        -i "$SRCDIR/policy/selinux/fvca_host_workload.cil"
     install -Dm644 /dev/null /usr/lib/fvca/management-policy-v1
 fi
 if [[ "${FVCA_HYPERVISOR_STORAGE:-}" == yes || "${FVCA_GUEST_OCI:-}" == yes ]]; then
