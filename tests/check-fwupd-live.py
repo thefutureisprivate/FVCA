@@ -83,11 +83,17 @@ def serve(address, mode):
                 "VersionRaw": dbus.UInt64(65578),
                 "Created": dbus.UInt64(42),
             }
+            if setting == "post-update":
+                device["Name"] = "System Firmware"
+                device["Flags"] = dbus.UInt64(1)
+                device["Version"] = "1.51"
+                device["VersionRaw"] = dbus.UInt64(65587)
             return [device, device] if setting == "duplicate" else [device]
 
         @dbus.service.method(interface, in_signature="s", out_signature="aa{sv}")
         def GetUpgrades(self, device):
             assert device == device_id
+            assert mode.read_text() != "post-update"
             return [{
                 "Version": "1.51",
                 "RemoteId": "lvfs",

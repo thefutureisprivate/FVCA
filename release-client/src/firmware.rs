@@ -4,6 +4,7 @@ mod activation;
 mod bus;
 mod capsule;
 mod live;
+mod result;
 
 use std::fs::{self, File, Permissions};
 use std::io::{self, Write};
@@ -33,6 +34,7 @@ const SIGNATURE: &str = "offer.sig";
 const ARCHIVE: &str = "firmware.cab";
 const STATUS: &str = "firmware-update-status.json";
 const OBSERVATION_SCHEMA: &str = "fvca-firmware-observation-v2";
+const HEAD_SCHEMA: &str = "fvca-firmware-channel-v1";
 
 #[derive(Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -118,6 +120,31 @@ impl DeviceIdentity {
                         && self.serial_sha256.is_none()
                 }
             }
+    }
+
+    fn matches_device(&self, device: &ObservedDevice) -> bool {
+        device.device_id == self.device_id
+            && device.name.as_deref() == Some(&self.model)
+            && device.plugin.as_deref() == Some(self.component.plugin())
+            && has(&device.guid, &self.guid)
+            && has(&device.vendor_ids, &self.vendor_id)
+            && has(&device.protocols, self.component.protocol())
+            && self.serial_sha256.as_ref().is_none_or(|expected| {
+                device.serial.as_ref().is_some_and(|serial| {
+                    !serial.is_empty() && digest(serial.as_bytes()) == *expected
+                })
+            })
+            && device.version_format.as_deref() == Some(&self.version_format)
+            && has(&device.flags, "internal")
+            && ![
+                "emulated",
+                "historical",
+                "unreachable",
+                "is-bootloader",
+                "unknown",
+            ]
+            .iter()
+            .any(|flag| has(&device.flags, flag))
     }
 }
 
@@ -252,7 +279,7 @@ struct ObservedRelease {
     flags: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Version {
     text: String,
@@ -353,7 +380,7 @@ struct Head {
 
 impl Head {
     fn require_scope(&self, policy: &Policy, now: i64) -> Result<()> {
-        if self.schema != "fvca-firmware-channel-v1"
+        if self.schema != HEAD_SCHEMA
             || self.role != Role::Hypervisor
             || self.channel != policy.channel
             || self.sequence == 0
@@ -386,6 +413,19 @@ struct Offer {
 }
 
 impl Offer {
+    fn valid_transition(&self) -> bool {
+        let format = &self.device.version_format;
+        self.from.matches_format(format)
+            && self.to.matches_format(format)
+            && self.from.text != self.to.text
+            && match self.device.component.esrt_type() {
+                Some(_) => {
+                    matches!((self.from.raw, self.to.raw), (Some(from), Some(to)) if from < to)
+                }
+                None => self.from.raw.is_none() && self.to.raw.is_none(),
+            }
+    }
+
     fn require_scope(&self, policy: &Policy) -> Result<()> {
         if !policy.allowed_devices.contains(&self.device)
             || !policy.allowed_remotes.contains(&self.remote)
@@ -397,17 +437,7 @@ impl Offer {
         {
             return Err(invalid("firmware offer is outside the signed Host policy").into());
         }
-        let format = &self.device.version_format;
-        if !self.from.matches_format(format)
-            || !self.to.matches_format(format)
-            || self.from.text == self.to.text
-            || match self.device.component.esrt_type() {
-                Some(_) => {
-                    !matches!((self.from.raw, self.to.raw), (Some(from), Some(to)) if from < to)
-                }
-                None => self.from.raw.is_some() || self.to.raw.is_some(),
-            }
-        {
+        if !self.valid_transition() {
             return Err(invalid("firmware offer has an invalid version transition").into());
         }
         let evidence = &self.qualification;
@@ -493,39 +523,22 @@ impl Offer {
     }
 
     fn check_device(&self, device: &ObservedDevice) -> Result<()> {
-        let identity = &self.device;
-        if device.name.as_deref() != Some(&identity.model)
-            || device.plugin.as_deref() != Some(identity.component.plugin())
-            || !has(&device.guid, &identity.guid)
-            || !has(&device.vendor_ids, &identity.vendor_id)
-            || !has(&device.protocols, identity.component.protocol())
-            || identity.serial_sha256.as_ref().is_some_and(|expected| {
-                device.serial.as_ref().is_none_or(|serial| {
-                    serial.is_empty() || digest(serial.as_bytes()) != *expected
-                })
-            })
-            || device.version_format.as_deref() != Some(&identity.version_format)
+        if !self.device.matches_device(device)
             || device.version.as_deref() != Some(&self.from.text)
             || device.version_raw != self.from.raw.map(u64::from)
-            || !has(&device.flags, "internal")
             || !has(&device.flags, "updatable")
             || [
-                "emulated",
-                "historical",
                 "locked",
-                "unreachable",
                 "updatable-hidden",
                 "needs-activation",
                 "needs-shutdown",
                 "needs-bootloader",
-                "is-bootloader",
                 "wait-for-replug",
                 "another-write-required",
                 "will-disappear",
                 "wildcard-install",
                 "install-all-releases",
                 "install-skip-version-check",
-                "unknown",
             ]
             .iter()
             .any(|flag| has(&device.flags, flag))
@@ -574,6 +587,15 @@ fn uuid(value: &str) -> bool {
                 byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
             }
         })
+}
+
+fn boot_id() -> Result<String> {
+    let bytes = state::read(Path::new("/proc/sys/kernel/random/boot_id"), 37)?;
+    let id = std::str::from_utf8(&bytes)?
+        .strip_suffix('\n')
+        .filter(|id| uuid(id))
+        .ok_or_else(|| invalid("invalid Linux boot identifier"))?;
+    Ok(id.to_owned())
 }
 
 fn current(start: i64, expires: i64, now: i64) -> bool {
@@ -630,7 +652,7 @@ pub async fn scheduled() -> Result<()> {
     let directory = boot.join("host-data").join(ENROLLMENT);
     let pool_directory = handoff::require_pool_directory(&directory)?;
     let _lease = state::lock(&directory)?;
-    if let Some(activation) = activation::recover(&directory, &pool_directory)? {
+    if let Some((activation, evidence)) = activation::recover(&directory, &pool_directory)? {
         let status = Status {
             schema: "fvca-firmware-discovery-status-v1",
             disposition: activation.disposition(),
@@ -638,6 +660,7 @@ pub async fn scheduled() -> Result<()> {
             freshness: Freshness::default(),
             staged: None,
             activation: Some(activation),
+            recovery_evidence: Some(evidence),
         };
         save(&directory, STATUS, &status)?;
         println!("{}", serde_json::to_string(&status)?);
@@ -677,6 +700,8 @@ struct Status {
     staged: Option<Staged>,
     #[serde(skip_serializing_if = "Option::is_none")]
     activation: Option<activation::Activation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_evidence: Option<result::Evidence>,
 }
 
 pub async fn stage(inputs: Intake<'_>, source: ObservationSource<'_>) -> Result<()> {
@@ -704,6 +729,7 @@ async fn stage_locked(inputs: Intake<'_>, source: ObservationSource<'_>) -> Resu
         freshness,
         staged: None,
         activation: None,
+        recovery_evidence: None,
     };
     if scheduled {
         save(directory, STATUS, &status)?;

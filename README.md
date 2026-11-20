@@ -309,6 +309,8 @@ The same check reads nonvolatile variable capacity and boot variables from one p
 
 An active `firmware-update/activation.json` record on the authenticated Host pool fences Guest startup, capture, and ordinary Host update and reboot operations. The scheduled firmware service reconciles that record before reading the update depot. If it can acquire the lifecycle lease after a recorded flash was interrupted, it durably records `outcome-unknown` and preserves the original operation, boot, device and signed offer identity. Reboot and power-transition states stay pending. In each case the service retains the staged cabinet and reports the active operation in `firmware-update-status.json`. Resolving the fence requires the device-specific recovery evidence.
 
+After a different Linux boot, recovery checks the digest of the original staged offer and reads the exact device from the pinned fwupd peer. A capsule operation also needs the pre-flash `esrt_before` entry in its activation record. Recovery compares the installed version with ESRT's version and last-attempt fields and reports its assessment under `recovery_evidence`. An NVMe version observation requires additional controller-specific result evidence. The interlock stays in place while firmware history, TPM and storage state still need verification. [UEFI ESRT fields](https://uefi.org/specs/UEFI/2.11/23_Firmware_Update_and_Reporting.html)
+
 ### Build the Host core with firmware discovery
 
 ```sh

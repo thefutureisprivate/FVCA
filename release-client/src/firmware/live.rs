@@ -10,9 +10,10 @@ use jiff::Timestamp;
 use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, memfd_create};
 
 use super::bus::{Bus, Message};
+use super::result::Observed;
 use super::{
     DeviceIdentity, Devices, Esrt, OBSERVATION_SCHEMA, Observation, ObservedDevice,
-    ObservedRelease, Offer, Platform, Policy,
+    ObservedRelease, Offer, Platform, Policy, Version, has, unique, unique_device,
 };
 use crate::{Result, invalid, state};
 
@@ -411,6 +412,82 @@ impl Session {
     }
 }
 
+pub(super) fn read_result(
+    offer: &Offer,
+    system_uuid: &str,
+    fwupd_version: &str,
+) -> Result<Observed> {
+    let peer = Peer::connect(ADDRESS, 0, Path::new(DAEMON))?;
+    result_snapshot(
+        &peer,
+        offer,
+        system_uuid,
+        fwupd_version,
+        Path::new(DMI),
+        Path::new(ESRT),
+    )
+}
+
+fn result_snapshot(
+    peer: &Peer,
+    offer: &Offer,
+    system_uuid: &str,
+    fwupd_version: &str,
+    dmi: &Path,
+    entries: &Path,
+) -> Result<Observed> {
+    if platform(dmi)?.system_uuid != system_uuid || peer.version()? != fwupd_version {
+        return Err(
+            invalid("firmware result differs from the activation Host or fwupd version").into(),
+        );
+    }
+    let devices = peer.devices()?;
+    let identity = &offer.device;
+    let device = unique_device(&devices, &identity.device_id)?;
+    if !identity.matches_device(device) {
+        return Err(invalid("firmware result differs from the activated physical device").into());
+    }
+    let version = Version {
+        text: device
+            .version
+            .clone()
+            .ok_or_else(|| invalid("fwupd did not report the resulting version"))?,
+        raw: device.version_raw.map(u32::try_from).transpose()?,
+    };
+    if !version.matches_format(&identity.version_format) {
+        return Err(invalid("fwupd reported an invalid resulting version format").into());
+    }
+    let esrt = if let Some(expected) = identity.component.esrt_type() {
+        let entry = unique(
+            esrt(entries)?
+                .into_iter()
+                .filter(|entry| entry.guid == identity.guid),
+            "ESRT did not report the activated firmware GUID",
+        )?;
+        if entry.fw_type != expected {
+            return Err(invalid("ESRT result changed the activated firmware resource type").into());
+        }
+        Some(entry)
+    } else {
+        None
+    };
+    let transition_pending = [
+        "needs-reboot",
+        "needs-shutdown",
+        "needs-activation",
+        "another-write-required",
+        "wait-for-replug",
+        "will-disappear",
+    ]
+    .iter()
+    .any(|flag| has(&device.flags, flag));
+    Ok(Observed {
+        version,
+        esrt,
+        transition_pending,
+    })
+}
+
 fn snapshot(peer: &Peer, id: &str, dmi: &Path, esrt_path: Option<&Path>) -> Result<Observation> {
     let start = Timestamp::now().as_second();
     let platform = platform(dmi)?;
@@ -508,6 +585,39 @@ mod tests {
             ["trusted-metadata", "is-upgrade", "trusted-report"]
         );
 
+        let head: super::super::Head = serde_json::from_value(super::super::result::test_offer())?;
+        let offer = head.offer.unwrap();
+        fs::write(&mode, "post-update")?;
+        fs::write(entry.join("fw_version"), "65587\n")?;
+        fs::write(entry.join("last_attempt_version"), "65587\n")?;
+        let result = result_snapshot(
+            &peer,
+            &offer,
+            &head.system_uuid,
+            &head.fwupd_version,
+            directory.path(),
+            &esrt,
+        )?;
+        assert_eq!(
+            super::super::result::assess(&offer, &result),
+            super::super::result::Assessment::TargetReported
+        );
+        fs::write(entry.join("fw_type"), "2\n")?;
+        assert!(
+            result_snapshot(
+                &peer,
+                &offer,
+                &head.system_uuid,
+                &head.fwupd_version,
+                directory.path(),
+                &esrt,
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("resource type")
+        );
+        fs::write(entry.join("fw_type"), "1\n")?;
         for (setting, reason) in [
             ("untrusted", "tainted or permits untrusted firmware"),
             ("tainted", "tainted or permits untrusted firmware"),

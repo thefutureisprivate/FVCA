@@ -9,7 +9,7 @@ use rustix::fs::{self, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 
-use super::{lower_hex, uuid};
+use super::{Esrt, lower_hex, result, uuid};
 use crate::{Result, channel::save, handoff, invalid, valid_digest};
 
 const SCHEMA: &str = "fvca-firmware-activation-v1";
@@ -29,10 +29,12 @@ enum Phase {
 pub(super) struct Activation {
     schema: String,
     transaction: String,
-    boot_id: String,
-    offer_sha256: String,
-    device_id: String,
+    pub(super) boot_id: String,
+    pub(super) offer_sha256: String,
+    pub(super) device_id: String,
     phase: Phase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) esrt_before: Option<Esrt>,
 }
 
 impl Activation {
@@ -74,7 +76,10 @@ impl Activation {
     }
 }
 
-pub(super) fn recover(directory: &Path, pool_directory: &File) -> Result<Option<Activation>> {
+pub(super) fn recover(
+    directory: &Path,
+    pool_directory: &File,
+) -> Result<Option<(Activation, result::Evidence)>> {
     if !activation_pending()? {
         return Ok(None);
     }
@@ -95,7 +100,9 @@ pub(super) fn recover(directory: &Path, pool_directory: &File) -> Result<Option<
         Err(error) => return Err(error.into()),
     };
     handoff::private_file(&file)?;
-    Activation::read(file)?.reconcile(directory).map(Some)
+    let activation = Activation::read(file)?.reconcile(directory)?;
+    let evidence = result::inspect(pool_directory, &activation);
+    Ok(Some((activation, evidence)))
 }
 
 #[cfg(test)]
@@ -120,6 +127,7 @@ mod tests {
                 offer_sha256: "1".repeat(64),
                 device_id: "2".repeat(40),
                 phase,
+                esrt_before: None,
             };
             save(directory, ACTIVATION, &record)?;
             let prior = std::fs::read(&path)?;

@@ -10,11 +10,10 @@ use rustix::fs::{self, CWD, Dir, Mode, OFlags, ResolveFlags, StatFs, StatVfsMoun
 use rustix::io::Errno;
 use serde::Serialize;
 
-use super::{Esrt, uuid};
+use super::{Esrt, boot_id};
 use crate::{Result, channel::digest, handoff, invalid, state};
 
 const EFIVARS: &str = "/sys/firmware/efi/efivars";
-const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 const EFIVARFS_MAGIC: u64 = 0xde5e81e4;
 const VFAT_MAGIC: u64 = 0x4d44;
 const ESP_PATH_LIMIT: usize = 256;
@@ -92,11 +91,7 @@ fn live_route(esrt: &Esrt, target: u32, payload_bytes: u64) -> Result<(String, R
     let (device_id, expected) = esp_binding(&binding)?;
     let efivars = File::from(fs::openat(CWD, EFIVARS, DIRECTORY, Mode::empty())?);
     let efivar_available = efivar_space(&fs::fstatfs(&efivars)?)?;
-    let boot = state::read(Path::new(BOOT_ID), 37)?;
-    let boot_id = std::str::from_utf8(&boot)?
-        .strip_suffix('\n')
-        .filter(|id| uuid(id))
-        .ok_or_else(|| invalid("invalid Linux boot identifier"))?;
+    let boot_id = boot_id()?;
     let boot_entry = route(&efivars, expected, esrt, target)?;
     let required = required_space(payload_bytes)?;
     let available = esp_space(Path::new(efi::FIRMWARE_ESP), device_id)?;
@@ -107,7 +102,7 @@ fn live_route(esrt: &Esrt, target: u32, payload_bytes: u64) -> Result<(String, R
         .into());
     }
     Ok((
-        boot_id.to_owned(),
+        boot_id,
         Route::Matched {
             boot_entry,
             esp_device_path_sha256: digest(expected),
