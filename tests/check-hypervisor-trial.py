@@ -85,8 +85,12 @@ def qualify(args):
                 break
             after = Edk2VarStore(variables).get_varlist().get("BootNext")
             if (before.data if before else None) != (after.data if after else None):
-                # Do not retry if the firmware already consumed the override.
-                break
+                if not refusal or attempt == 3:
+                    # The firmware already consumed a real trial override.
+                    break
+                # The refusal case seeds BootNext without arming a trial. Rebuild
+                # its disposable varstore after a stall before Linux starts.
+                prepare_vars(args.variables, variables, stable, candidate, next_id=CANDIDATE)
         selected = f"FVCA_HYPERVISOR_SLOT_VERIFIED {selected[1]['uuid'].lower()}".encode()
         expected = (b"Secure boot enabled", b"FVCA_SELINUX_ENFORCING", selected, lab["HOST_PROFILES"], finish, marker, *required)
         if (prompts != 2 or (not refusal and lab["FAIL"] in log) or not all(value in log for value in expected)
