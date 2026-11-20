@@ -176,11 +176,15 @@ pub fn activate_guest_if_selected() -> io::Result<()> {
     Ok(())
 }
 
-pub fn activate_firmware_if_selected() -> io::Result<()> {
+pub fn activate_firmware_if_selected(esp: &str) -> io::Result<()> {
     let Some(owner) = owner_for(FIRMWARE_STATE)? else {
         return Ok(());
     };
     if let Err(error) = prepare_staging(FIRMWARE_STATE) {
+        eprintln!("FVCA_HOST_FIRMWARE_ENROLLMENT_BLOCKED {error}");
+        return Ok(());
+    }
+    if let Err(error) = crate::hypervisor_trial::publish_firmware_esp(esp) {
         eprintln!("FVCA_HOST_FIRMWARE_ENROLLMENT_BLOCKED {error}");
         return Ok(());
     }

@@ -11,8 +11,8 @@ use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, memfd_create};
 
 use super::bus::{Bus, Message};
 use super::{
-    DeviceIdentity, Devices, Esrt, Observation, ObservedDevice, ObservedRelease, Offer, Platform,
-    Policy,
+    DeviceIdentity, Devices, Esrt, OBSERVATION_SCHEMA, Observation, ObservedDevice,
+    ObservedRelease, Offer, Platform, Policy,
 };
 use crate::{Result, invalid, state};
 
@@ -278,10 +278,21 @@ fn esrt(path: &Path) -> Result<Vec<Esrt>> {
             return Err(invalid("invalid or excessive ESRT entries").into());
         }
         let path = entry.path();
+        let flags = attribute(&path, "capsule_flags")?;
         entries.push(Esrt {
             guid: attribute(&path, "fw_class")?.to_ascii_lowercase(),
             fw_type: attribute(&path, "fw_type")?.parse()?,
             fw_version: attribute(&path, "fw_version")?.parse()?,
+            lowest_supported_fw_version: attribute(&path, "lowest_supported_fw_version")?
+                .parse()?,
+            capsule_flags: u32::from_str_radix(
+                flags
+                    .strip_prefix("0x")
+                    .ok_or_else(|| invalid("invalid ESRT capsule flags"))?,
+                16,
+            )?,
+            last_attempt_version: attribute(&path, "last_attempt_version")?.parse()?,
+            last_attempt_status: attribute(&path, "last_attempt_status")?.parse()?,
         });
     }
     Ok(entries)
@@ -405,7 +416,7 @@ fn snapshot(peer: &Peer, id: &str, dmi: &Path, esrt_path: Option<&Path>) -> Resu
     let mut upgraded = selected.clone();
     upgraded.releases = peer.upgrades(id)?;
     Ok(Observation {
-        schema: "fvca-firmware-observation-v1".into(),
+        schema: OBSERVATION_SCHEMA.into(),
         observed_at: start,
         platform,
         fwupd_version,
@@ -453,8 +464,16 @@ mod tests {
             fs::write(directory.path().join(file), value)?;
         }
         fs::write(entry.join("fw_class"), guid.to_ascii_uppercase())?;
-        fs::write(entry.join("fw_type"), "1\n")?;
-        fs::write(entry.join("fw_version"), "65578\n")?;
+        for (file, value) in [
+            ("fw_type", "1\n"),
+            ("fw_version", "65578\n"),
+            ("lowest_supported_fw_version", "65578\n"),
+            ("capsule_flags", "0x50000\n"),
+            ("last_attempt_version", "65578\n"),
+            ("last_attempt_status", "0\n"),
+        ] {
+            fs::write(entry.join(file), value)?;
+        }
 
         let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let read = || snapshot(&peer, id, directory.path(), Some(&esrt));
@@ -468,6 +487,10 @@ mod tests {
         assert_eq!(observed.esrt[0].guid, guid);
         assert_eq!(observed.esrt[0].fw_type, 1);
         assert_eq!(observed.esrt[0].fw_version, 65578);
+        assert_eq!(observed.esrt[0].lowest_supported_fw_version, 65578);
+        assert_eq!(observed.esrt[0].capsule_flags, 0x50000);
+        assert_eq!(observed.esrt[0].last_attempt_version, 65578);
+        assert_eq!(observed.esrt[0].last_attempt_status, 0);
         let device = super::super::unique_device(&observed.upgrades, id)?;
         assert_eq!(device.version_format.as_deref(), Some("pair"));
         assert_eq!(device.version_raw, Some(65578));

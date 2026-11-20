@@ -108,10 +108,12 @@ def qualify(client, output):
         ]
         capsule = document["device"]["component"] != "nvme"
         return {
-            "schema": "fvca-firmware-observation-v1", "observed_at": stamp, "platform": deepcopy(platform),
+            "schema": "fvca-firmware-observation-v2", "observed_at": stamp, "platform": deepcopy(platform),
             "fwupd_version": "2.1.10", "devices": {"Devices": [current]}, "upgrades": {"Devices": [available]},
             "esrt": [{"guid": document["device"]["guid"], "fw_type": 1,
-                      "fw_version": document["from"]["raw"]}] if capsule else [],
+                      "fw_version": document["from"]["raw"], "lowest_supported_fw_version": document["from"]["raw"],
+                      "capsule_flags": 0x50000, "last_attempt_version": document["from"]["raw"],
+                      "last_attempt_status": 0}] if capsule else [],
         }
 
     root_keys = intake["new_keys"]()
@@ -166,6 +168,7 @@ def qualify(client, output):
             if disposition == "staged":
                 assert status["archive_sha256"] == digest(archive)
                 assert "verified_payload_sha256" not in status
+                assert "capsule_delivery" not in status
                 stage = Path(status["staged"])
                 assert {path.name for path in stage.iterdir()} == {"firmware.cab", "offer.json", "offer.sig"}
                 assert (stage / "firmware.cab").read_bytes() == archive

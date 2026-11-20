@@ -1,6 +1,5 @@
 //! Arm and observe one authorized Hypervisor candidate boot.
 
-use std::collections::BTreeSet;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -9,7 +8,8 @@ use std::process::{Command, Stdio};
 
 pub use fvca_trial_authorization::APPROVAL_LIMIT;
 use fvca_trial_authorization::{
-    Authorization, Entry, PENDING, RUNNING_CONTEXT, Trial, authorization, trial,
+    Authorization, Entry, GUEST_CAPTURE_LOCK, PENDING, RUNNING_CONTEXT, Trial, authorization, efi,
+    trial,
 };
 
 use crate::{find_partition, identity, invalid, recovery, runtime, sys_block};
@@ -30,8 +30,6 @@ const STARTED: &str = "/run/fvca/boot-trial-started";
 const REBOOT_PENDING: &str = "/run/fvca/trial-reboot-pending";
 const HOST_DATA: &str = "/run/fvca/host-data";
 const EFI: &str = "/sys/firmware/efi/efivars";
-const EFI_GLOBAL: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
-const LOADER: &str = "\\EFI\\BOOT\\BOOTX64.EFI";
 const ATTRIBUTES: u32 = 7;
 const O_NONBLOCK: i32 = 0o4000;
 const O_NOFOLLOW: i32 = 0o400000;
@@ -147,7 +145,7 @@ fn candidate_selection(text: &str) -> io::Result<Trial<'_>> {
 }
 
 fn variable(name: &str) -> PathBuf {
-    Path::new(EFI).join(format!("{name}-{EFI_GLOBAL}"))
+    Path::new(EFI).join(format!("{name}-{}", efi::GLOBAL))
 }
 
 pub fn boot_next_path() -> PathBuf {
@@ -169,13 +167,7 @@ fn bounded_read(file: File, limit: usize) -> io::Result<Vec<u8>> {
 
 fn efi_data(name: &str, attributes: u32) -> io::Result<Vec<u8>> {
     let bytes = read(&variable(name), 4096)?;
-    let (header, data) = bytes
-        .split_at_checked(4)
-        .ok_or_else(|| invalid("truncated EFI variable"))?;
-    if header != attributes.to_le_bytes() {
-        return Err(invalid("unexpected EFI variable attributes"));
-    }
-    Ok(data.to_owned())
+    Ok(efi::variable_data(&bytes, attributes)?.to_owned())
 }
 
 fn selected() -> io::Result<u16> {
@@ -188,15 +180,7 @@ fn selected() -> io::Result<u16> {
 }
 
 fn boot_order() -> io::Result<Vec<u16>> {
-    let value = efi_data("BootOrder", ATTRIBUTES)?;
-    let (words, remainder) = value.as_chunks::<2>();
-    let order: Vec<_> = words.iter().copied().map(u16::from_le_bytes).collect();
-    let unique: BTreeSet<_> = order.iter().collect();
-    if !remainder.is_empty() || order.is_empty() || order.len() > 128 || unique.len() != order.len()
-    {
-        return Err(invalid("malformed EFI BootOrder"));
-    }
-    Ok(order)
+    efi::boot_order(&efi_data("BootOrder", ATTRIBUTES)?)
 }
 
 fn promoted_order(current: &[u16], stable: u16, candidate: u16) -> io::Result<Vec<u16>> {
@@ -246,9 +230,8 @@ fn number(path: &Path) -> io::Result<u64> {
         .map_err(io::Error::other)
 }
 
-fn gpt_device(entry: &Entry<'_>) -> io::Result<(PathBuf, u64)> {
-    let device =
-        find_partition(entry.esp)?.ok_or_else(|| invalid("authorized trial ESP is missing"))?;
+fn esp_device(esp: &str) -> io::Result<(PathBuf, u64, Vec<u8>)> {
+    let device = find_partition(esp)?.ok_or_else(|| invalid("authorized Host ESP is missing"))?;
     let partition = sys_block(&device)?;
     let disk = partition
         .parent()
@@ -269,69 +252,33 @@ fn gpt_device(entry: &Entry<'_>) -> io::Result<(PathBuf, u64)> {
     let partition_index =
         u32::try_from(number(&partition.join("partition"))?).map_err(io::Error::other)?;
 
-    let raw = efi_data(&format!("Boot{:04X}", entry.id), ATTRIBUTES)?;
-    let header = raw
-        .first_chunk::<6>()
-        .ok_or_else(|| invalid("truncated EFI load option"))?;
-    if header[..4] != 1u32.to_le_bytes() {
-        return Err(invalid(
-            "trial EFI load option must be an active application boot entry",
-        ));
-    }
-    let path_bytes = usize::from(u16::from_le_bytes([header[4], header[5]]));
-    let description = raw[6..]
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .position(|word| *word == [0, 0])
-        .filter(|length| *length != 0)
-        .ok_or_else(|| invalid("invalid EFI boot entry description"))?;
-    let path = &raw[6 + 2 * (description + 1)..];
-    if path.len() != path_bytes {
-        return Err(invalid(
-            "EFI boot entry must have no optional load parameters",
-        ));
-    }
-
-    let mut guid = [0u8; 16];
-    let mut offset = 0;
-    for group in entry.esp.split('-') {
-        for index in (0..group.len()).step_by(2) {
-            guid[offset] =
-                u8::from_str_radix(&group[index..index + 2], 16).map_err(io::Error::other)?;
-            offset += 1;
-        }
-    }
-    guid[..4].reverse();
-    guid[4..6].reverse();
-    guid[6..8].reverse();
-    let mut expected = vec![4, 1, 42, 0];
-    expected.extend_from_slice(&partition_index.to_le_bytes());
-    expected.extend_from_slice(&(start / sectors_per_block).to_le_bytes());
-    expected.extend_from_slice(&(size / sectors_per_block).to_le_bytes());
-    expected.extend_from_slice(&guid);
-    expected.extend_from_slice(&[2, 2]);
-    let loader: Vec<_> = LOADER
-        .encode_utf16()
-        .chain([0])
-        .flat_map(u16::to_le_bytes)
-        .collect();
-    expected.extend_from_slice(&[4, 4]);
-    expected.extend_from_slice(
-        &(u16::try_from(4 + loader.len()).map_err(io::Error::other)?).to_le_bytes(),
-    );
-    expected.extend_from_slice(&loader);
-    expected.extend_from_slice(&[0x7f, 0xff, 4, 0]);
-    if path != expected {
-        return Err(invalid(
-            "EFI load option does not match the authorized ESP and loader",
-        ));
-    }
     Ok((
         device,
         size.checked_mul(512)
             .ok_or_else(|| invalid("trial ESP size overflow"))?,
+        efi::esp_device_path(
+            esp,
+            partition_index,
+            start / sectors_per_block,
+            size / sectors_per_block,
+        )?,
     ))
+}
+
+fn gpt_device(entry: &Entry<'_>) -> io::Result<(PathBuf, u64)> {
+    let (device, bytes, expected) = esp_device(entry.esp)?;
+    let raw = efi_data(&format!("Boot{:04X}", entry.id), ATTRIBUTES)?;
+    efi::require_esp_load_option(&raw, &expected)?;
+    Ok((device, bytes))
+}
+
+pub(crate) fn publish_firmware_esp(esp: &str) -> io::Result<()> {
+    let (_, _, path) = esp_device(esp)?;
+    match publish(Path::new(GUEST_CAPTURE_LOCK), b"") {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+        result => result?,
+    }
+    publish(Path::new(efi::FIRMWARE_ESP), &path)
 }
 
 fn record_directory() -> io::Result<PathBuf> {

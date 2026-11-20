@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 use std::io;
 
+pub mod efi;
 pub mod guest;
 
 pub const APPROVAL_LIMIT: usize = 2048;

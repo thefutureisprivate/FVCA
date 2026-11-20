@@ -85,8 +85,8 @@ fn activate() -> io::Result<()> {
         if guest.is_some() {
             host_update::activate_guest_if_selected()?;
         }
-        if protected_epoch {
-            host_update::activate_firmware_if_selected()?;
+        if protected_epoch && let Some(esp) = esp {
+            host_update::activate_firmware_if_selected(esp)?;
         }
     }
 

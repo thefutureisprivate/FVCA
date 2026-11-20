@@ -1,6 +1,7 @@
 //! Authenticate an exact Host firmware offer and stage its cabinet for qualification.
 
 mod bus;
+mod capsule;
 mod live;
 
 use std::fs::{self, File, Permissions};
@@ -30,6 +31,7 @@ const SIGNATURE: &str = "offer.sig";
 const ARCHIVE: &str = "firmware.cab";
 const ENROLLMENT: &str = "firmware-update";
 const STATUS: &str = "firmware-update-status.json";
+const OBSERVATION_SCHEMA: &str = "fvca-firmware-observation-v2";
 
 #[derive(Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -201,12 +203,16 @@ struct Devices {
     devices: Vec<ObservedDevice>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Esrt {
     guid: String,
     fw_type: u8,
     fw_version: u32,
+    lowest_supported_fw_version: u32,
+    capsule_flags: u32,
+    last_attempt_version: u32,
+    last_attempt_status: u32,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -423,8 +429,13 @@ impl Offer {
         Ok(())
     }
 
-    fn require_observation(&self, policy: &Policy, observed: &Observation, now: i64) -> Result<()> {
-        if observed.schema != "fvca-firmware-observation-v1"
+    fn require_observation<'a>(
+        &self,
+        policy: &Policy,
+        observed: &'a Observation,
+        now: i64,
+    ) -> Result<Option<&'a Esrt>> {
+        if observed.schema != OBSERVATION_SCHEMA
             || observed.platform != policy.platform
             || observed.fwupd_version != policy.fwupd_version
             || observed.observed_at <= 0
@@ -475,8 +486,9 @@ impl Offer {
                     invalid("ESRT does not match the current qualified firmware version").into(),
                 );
             }
+            return Ok(Some(entry));
         }
-        Ok(())
+        Ok(None)
     }
 
     fn check_device(&self, device: &ObservedDevice) -> Result<()> {
@@ -819,12 +831,18 @@ async fn refresh(
     let observe = || match &source {
         SnapshotSource::File(observed, sha256) => {
             offer.require_observation(&policy, observed, require_current()?)?;
-            Ok(sha256.clone())
+            Ok(AdmittedObservation {
+                sha256: sha256.clone(),
+                esrt: None,
+            })
         }
         SnapshotSource::Live(live) => {
             let observed = live.read(&offer.device)?;
-            offer.require_observation(&policy, &observed, require_current()?)?;
-            Ok(digest(&serde_json::to_vec(&observed)?))
+            let esrt = offer.require_observation(&policy, &observed, require_current()?)?;
+            Ok(AdmittedObservation {
+                sha256: digest(&serde_json::to_vec(&observed)?),
+                esrt: esrt.cloned(),
+            })
         }
     };
     observe()?;
@@ -837,7 +855,7 @@ async fn refresh(
         }
         observe()
     };
-    let (staged, observation_sha256) = stage_archive(
+    let (staged, observed) = stage_archive(
         &repo,
         &parent,
         &offer,
@@ -847,6 +865,15 @@ async fn refresh(
         &check_cabinet,
     )
     .await?;
+    let capsule_delivery = if scheduled.is_some() {
+        observed
+            .esrt
+            .zip(offer.to.raw)
+            .map(|(esrt, to)| capsule::inspect(esrt, to))
+    } else {
+        None
+    };
+    require_current()?;
     let vendor_authentication = match offer.qualification.vendor_authentication {
         VendorAuthentication::DeviceSignature => "device-signature",
         VendorAuthentication::IndependentlyVerifiedVendorSignature => {
@@ -858,10 +885,16 @@ async fn refresh(
         archive_sha256: offer.archive.sha256,
         verified_payload_sha256: matches!(source, SnapshotSource::Live(_))
             .then_some(offer.payload_sha256),
-        observation_sha256,
+        observation_sha256: observed.sha256,
+        capsule_delivery,
         qualified_vendor_authentication: vendor_authentication,
         staged,
     }))
+}
+
+struct AdmittedObservation {
+    sha256: String,
+    esrt: Option<Esrt>,
 }
 
 #[derive(Serialize)]
@@ -871,6 +904,8 @@ struct Staged {
     #[serde(skip_serializing_if = "Option::is_none")]
     verified_payload_sha256: Option<String>,
     observation_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capsule_delivery: Option<capsule::Delivery>,
     qualified_vendor_authentication: &'static str,
     staged: PathBuf,
 }
@@ -925,8 +960,8 @@ async fn stage_archive(
     document: &[u8],
     signature: &[u8],
     approval_sha256: &str,
-    check_cabinet: &dyn Fn(&Path) -> Result<String>,
-) -> Result<(PathBuf, String)> {
+    check_cabinet: &dyn Fn(&Path) -> Result<AdmittedObservation>,
+) -> Result<(PathBuf, AdmittedObservation)> {
     let target = TargetName::new(format!("fvca-firmware-{}.cab", offer.archive.sha256))?;
     if check_target(repo, &target, offer.archive.bytes, &offer.archive.sha256)?
         != offer.archive.bytes
@@ -963,7 +998,7 @@ async fn stage_archive(
         file.sync_all()?;
     }
     File::open(path)?.sync_all()?;
-    let observation_sha256 = check_cabinet(&path.join(ARCHIVE))?;
+    let observed = check_cabinet(&path.join(ARCHIVE))?;
     rustix::fs::renameat_with(
         rustix::fs::CWD,
         path,
@@ -972,5 +1007,5 @@ async fn stage_archive(
         rustix::fs::RenameFlags::NOREPLACE,
     )?;
     File::open(parent)?.sync_all()?;
-    Ok((destination, observation_sha256))
+    Ok((destination, observed))
 }
