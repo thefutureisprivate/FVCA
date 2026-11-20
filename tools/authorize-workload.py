@@ -61,8 +61,11 @@ def deployment(args, output):
         raise ValueError("deployment approval is outside its validity period")
     if not 0 < approved["security_epoch"] < 2**63:
         raise ValueError("invalid deployment epoch")
-    if approved["network"] != "none":
-        raise ValueError("the current workload authorization profile requires an offline workload")
+    network = approved["network"]
+    if network != "none":
+        if not isinstance(network, dict) or network.keys() != {"workload"}:
+            raise ValueError("expected a networkless workload or the digest of its Guest network record")
+        oci.digest_hex(network["workload"])
     mapping = approved["id_map"]
     if mapping.keys() != {"uid_base", "gid_base", "size"} or type(mapping["size"]) is not int or mapping["size"] != 65536:
         raise ValueError("deployment requires a complete 16-bit container ID range")

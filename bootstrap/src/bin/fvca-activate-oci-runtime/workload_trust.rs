@@ -10,16 +10,18 @@ const SOURCE: &str = "/usr/lib/fvca";
 const DESTINATION: &str = "/run/fvca/workload-trust";
 const RING: &str = "%:.dm-verity";
 
-pub fn enroll() -> io::Result<()> {
+pub fn enroll() -> io::Result<bool> {
     let certificate = match File::open(WORKLOAD_VERITY_CERTIFICATE) {
         Ok(certificate) => certificate,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
     let policy = Path::new(SOURCE).join("workload-policy.json");
     let deployment = Path::new(SOURCE).join("workload-deployment.der");
     if !policy.is_file() || !deployment.is_file() {
-        return Err(invalid("incomplete signed Guest workload trust configuration"));
+        return Err(invalid(
+            "incomplete signed Guest workload trust configuration",
+        ));
     }
     if fs::read_to_string("/sys/module/dm_verity/parameters/keyring_unsealed")? != "Y\n"
         || fs::read_to_string("/sys/module/dm_verity/parameters/require_signatures")? != "Y\n"
@@ -47,5 +49,5 @@ pub fn enroll() -> io::Result<()> {
         fs::copy(source, destination.join(name))?;
     }
     println!("FVCA_WORKLOAD_KEYRING_SEALED");
-    Ok(())
+    Ok(true)
 }

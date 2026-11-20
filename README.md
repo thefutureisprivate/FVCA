@@ -1069,7 +1069,7 @@ Review `derivation.json` and `launch.json`, then have the deployment authority s
 | `source_index`, `manifest`, `provenance`, `launch` | Exact index digest, platform digest, `PUBLISHER_VERIFIED`, and launch digest from the reviewed derivation |
 | `valid_from`, `expires`, `security_epoch`, `revocation_id` | Unix timestamps, positive epoch and revocation UUID |
 | `id_map` | Approved subordinate `uid_base` and `gid_base`, each mapping a `size` of 65536 IDs from container ID zero |
-| `network`, `limits` | `none` for this offline profile, plus `memory_bytes`, `cpu_percent` and `pids` |
+| `network`, `limits` | `none` or `{"workload":"sha256:<profile digest>"}`, plus `memory_bytes`, `cpu_percent` and `pids` |
 
 The workload-root authority uses a separate key. The authorizer verifies the deployment signature and validity period, verifies the publisher again, and reproduces the candidate byte for byte in a fresh worker before signing the output. The result includes `workload.raw`, the signed authorization and deployment, the launch definition, and the derivation and publisher evidence.
 
@@ -1112,9 +1112,27 @@ For a disposable lab, run `tests/workload-data-lab.sh build/host-storage-lab/gue
 
 ## Guest workload launch
 
-The Guest generates a private Quadlet from the authorized entrypoint, arguments, environment, health check, signal, identity and volume destinations. It starts the generated service only after systemd confirms the expected fragment and permitted OS defaults. Podman uses the verified rootfs read-only, with no network, no added capabilities, and the approved UID/GID mapping. The workload service applies the signed memory, CPU and PID budgets and waits for the approved health check before reporting ready. Each start or restart also requires an unexpired approval and the active verity mount. [Podman Quadlet](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html)
+The Guest generates a private Quadlet from the authorized entrypoint, arguments, environment, health check, signal, identity, network and volume destinations. It starts the generated service only after systemd confirms the expected fragment and permitted OS defaults. Podman uses the verified rootfs read-only, drops all capabilities, and applies the approved UID/GID mapping. The workload service applies the signed memory, CPU and PID budgets and waits for the approved health check before reporting ready. Each start or restart requires an unexpired approval and the active verity mount. [Podman Quadlet](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html)
 
 The Guest keeps each declared persistent volume on Btrfs under `/run/fvca/guest-data/payload/<service>/<digest>`, where `digest` is the SHA-256 of the container mount destination. It creates missing volumes with the mapped workload owner and rejects ownership mismatches on existing data. The container receives only its declared volumes, with `nodev,nosuid,noexec` and a private SELinux label. Podman keeps the container log in volatile storage and caps its size.
+
+### Service Guest workload uplink
+
+The Guest installs a default-deny IPv4 and IPv6 policy in its own network namespace. A scoped workload deployment can get a dedicated virtio NIC in a separate namespace. Pass `--workload-network FILE` to `compose-service-guest.py` with the signed workload trust inputs. The deployment authority sets `network` to `{"workload":"sha256:<profile digest>"}` using the SHA-256 of the exact record. The measured Guest boot and each workload start must agree on that digest.
+
+```text
+FVCA-GUEST-WORKLOAD-NETWORK-1
+pci=0000:00:06.0
+mac=52:54:00:10:20:30
+address=192.168.44.15/24
+gateway=192.168.44.1
+mtu=1400
+dns=192.168.44.53
+ingress=tcp,192.168.44.20,443
+egress=tcp,192.168.44.70,443
+```
+
+Use `gateway=none` for an on-link profile and `dns=none` to omit a configured resolver. Each `ingress` or `egress` rule approves an exact IPv4 peer and TCP or UDP destination port. An enrolled resolver allows TCP and UDP on port 53 to that address. The workload receives the original client address and terminates its own application protocols. The `none` deployment uses Podman's isolated offline network mode. A connected lab must supply the enrolled virtio NIC on an isolated segment. Attachment to the Hypervisor's physical workload uplink requires its own site enrollment and qualification. [Podman networking](https://docs.podman.io/en/latest/markdown/podman-run.1.html) · [nftables reference](https://netfilter.org/projects/nftables/manpage.html)
 
 For Stalwart lifecycle qualification, run `tests/stalwart-lifecycle-initrd.sh` with the development OCI initramfs and a new output file. Use that initramfs when composing the disposable Guest, then add `--stalwart-lifecycle` to the `tests/check-storage.py --workload` invocation. The fixture checks the health endpoint, UID/GID, SELinux label, resource settings, Btrfs file persistence across restart, and clean stop. Stalwart runs in its offline bootstrap mode. Controller-backed freshness and protected updates remain pending. [Stalwart bootstrap mode](https://stalw.art/docs/configuration/bootstrap-mode/)
 

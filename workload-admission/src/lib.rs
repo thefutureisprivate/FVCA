@@ -19,7 +19,7 @@ use openssl::stack::Stack;
 use openssl::x509::X509;
 
 pub use image::{Image, Region};
-use records::{Authorization, Blob, Deployment, Derivation};
+use records::{Authorization, Blob, Deployment, Derivation, Network};
 pub use records::{IdMap, Launch, Limits, Scope};
 
 const RECORD_LIMIT: u64 = 4 * 1024 * 1024;
@@ -94,6 +94,13 @@ impl VerifiedWorkload {
 
     pub fn id_map(&self) -> &IdMap {
         &self.deployment.id_map
+    }
+
+    pub fn network_profile(&self) -> Option<&str> {
+        match &self.deployment.network {
+            Network::None => None,
+            Network::Workload(profile) => Some(profile),
+        }
     }
 
     /// Continue with the file descriptor that was hashed, without reopening the path.
@@ -226,6 +233,7 @@ fn check_deployment(value: &Deployment, scope: &Scope) -> Result<()> {
         || !revocation_id(&value.revocation_id)
         || !(scope.minimum_epoch..=i64::MAX as u64).contains(&value.security_epoch)
         || scope.revoked.contains(&value.revocation_id)
+        || matches!(&value.network, Network::Workload(profile) if !is_digest(profile))
     {
         return Err(invalid(
             "deployment does not match the trusted scope or freshness policy",

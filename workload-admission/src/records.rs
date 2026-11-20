@@ -27,6 +27,7 @@ pub enum Provenance {
 #[serde(rename_all = "snake_case")]
 pub enum Network {
     None,
+    Workload(String),
 }
 
 #[derive(Deserialize)]
@@ -50,8 +51,7 @@ pub struct IdMap {
 pub struct Deployment {
     #[serde(rename = "role")]
     _role: Role,
-    #[serde(rename = "network")]
-    _network: Network,
+    pub network: Network,
     pub schema: String,
     pub guest: String,
     pub service: String,

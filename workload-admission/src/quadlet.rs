@@ -1,6 +1,7 @@
 //! Translate the authenticated launch record into a constrained Quadlet.
 
 use std::fmt::Write;
+use std::net::Ipv4Addr;
 
 use openssl::sha::sha256;
 
@@ -10,6 +11,7 @@ pub const ROOT: &str = "/run/fvca/workload-image/root";
 pub const PAYLOAD: &str = "/run/fvca/guest-data/payload";
 pub const SERVICE: &str = "fvca-workload-payload.service";
 pub const CONTAINER: &str = "fvca-workload-payload";
+pub const NAMESPACE: &str = "/run/netns/fvca-workload";
 
 pub struct Volume {
     pub name: String,
@@ -52,11 +54,21 @@ fn entrypoint(entry: &[String], command: &[String]) -> Result<String> {
     Ok(literal(&serde_json::to_string(&argv)?))
 }
 
-pub fn render(workload: &VerifiedWorkload) -> Result<Definition> {
+pub fn render(workload: &VerifiedWorkload, dns: Option<Ipv4Addr>) -> Result<Definition> {
     let application = workload.launch();
     let map = workload.id_map();
     let limits = workload.limits();
     let expires = workload.expires();
+    let profile = workload.network_profile().unwrap_or("none");
+    let network = if workload.network_profile().is_some() {
+        let dns = dns.map_or_else(
+            || "none\n".into(),
+            |address| format!("{address}\nDNSSearch=.\n"),
+        );
+        format!("Network=ns:{NAMESPACE}\nDNS={dns}")
+    } else {
+        "Network=none\n".into()
+    };
     let payload = format!("{PAYLOAD}/{}", workload.service());
     let entrypoint = entrypoint(&application.entrypoint, &application.command)?;
     let mut source = format!(
@@ -64,7 +76,7 @@ pub fn render(workload: &VerifiedWorkload) -> Result<Definition> {
          [Unit]\nBindsTo=fvca-workload-root.service\nAfter=fvca-workload-root.service\n\
          StartLimitIntervalSec=60s\nStartLimitBurst=3\n\n\
          [Container]\nContainerName={CONTAINER}\nRootfs={ROOT}\n\
-         Network=none\nPull=never\nReadOnly=true\nNoNewPrivileges=true\nDropCapability=all\n\
+         {network}Pull=never\nReadOnly=true\nNoNewPrivileges=true\nDropCapability=all\n\
          RunInit=true\nPodmanArgs=--init-path=/usr/libexec/catatonit/catatonit\n\
          LogDriver=k8s-file\nLogOpt=max-size=1mb\nUser={}\nGroup={}\nUIDMap=0:{}:{}\nGIDMap=0:{}:{}\n\
          PidsLimit={}\nStopSignal={}\nStopTimeout=20\nWorkingDir={}\n",
@@ -129,7 +141,7 @@ pub fn render(workload: &VerifiedWorkload) -> Result<Definition> {
     }
     writeln!(
         source,
-        "\n[Service]\nExecCondition=/usr/lib/fvca/activate-workload check-start {expires}\n\
+        "\n[Service]\nExecCondition=/usr/lib/fvca/activate-workload check-start {expires} {profile}\n\
          NoNewPrivileges=yes\nMemoryDenyWriteExecute=yes\nSystemCallArchitectures=native\n\
          MemoryMax={}\nMemorySwapMax=0\nCPUQuota={}%\nTasksMax={}\n\
          LogRateLimitIntervalSec=30s\nLogRateLimitBurst=500\n\

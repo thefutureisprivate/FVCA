@@ -41,3 +41,6 @@ if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-update-support-v2"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-standing-promotion-v1"
 fi
+if [[ "${FVCA_GUEST_OCI:-}" == yes ]]; then
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/workload-network-v1"
+fi

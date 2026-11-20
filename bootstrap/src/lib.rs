@@ -15,11 +15,13 @@ pub mod direct_boot;
 pub mod guest_boot;
 pub mod guest_resources;
 pub mod host_network;
+mod net_setup;
 pub mod host_update;
 pub mod hypervisor_slot;
 pub mod hypervisor_trial;
 pub mod runtime;
 pub mod selinux;
+pub mod workload_network;
 #[cfg(feature = "libvirt")]
 pub mod vm_confinement;
 

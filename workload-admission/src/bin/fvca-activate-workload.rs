@@ -3,12 +3,13 @@
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
+use std::net::Ipv4Addr;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, chown};
 use std::path::Path;
 use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fvca_workload_admission::quadlet::{self, Definition, PAYLOAD, ROOT, SERVICE};
+use fvca_workload_admission::quadlet::{self, Definition, NAMESPACE, PAYLOAD, ROOT, SERVICE};
 use fvca_workload_admission::{Scope, Trust, read_bounded, verify};
 use openssl::x509::X509;
 
@@ -26,6 +27,7 @@ const QUADLET_DIR: &str = "/run/fvca/workload-image/quadlet";
 const GENERATED_UNIT: &str = "/run/fvca/workload-image/quadlet/units/fvca-workload-payload.service";
 const PUBLISHED_UNIT: &str = "/run/fvca/workload-image/fvca-workload-payload.service";
 const OS_UNIT_DEFAULTS: &str = "/usr/lib/systemd/system/service.d/10-timeout-abort.conf";
+const NETWORK: &str = "/run/fvca/workload-network";
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -171,11 +173,56 @@ fn start_workload() -> Result<()> {
     Ok(())
 }
 
-fn check_start(expires: &str) -> Result<()> {
+fn admitted_network(profile: Option<&str>) -> Result<Option<Ipv4Addr>> {
+    let Some(profile) = profile else {
+        return Ok(None);
+    };
+    let metadata = fs::symlink_metadata(NETWORK)?;
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.mode() & 0o7777 != 0o600
+    {
+        return Err(
+            io::Error::other("expected the protected Guest workload network enrollment").into(),
+        );
+    }
+    let raw = String::from_utf8(read_bounded(Path::new(NETWORK), 128)?)?;
+    let prefix = format!("profile={profile}\ndns=");
+    let dns = raw
+        .strip_prefix(&prefix)
+        .and_then(|value| value.strip_suffix('\n'))
+        .ok_or_else(|| {
+            io::Error::other("the Guest network differs from the approved workload profile")
+        })?;
+    let mounted = Command::new("/usr/bin/findmnt")
+        .env_clear()
+        .args([
+            "--mountpoint",
+            NAMESPACE,
+            "--noheadings",
+            "--raw",
+            "--output",
+            "FSTYPE",
+        ])
+        .output()?;
+    if !mounted.status.success() || mounted.stdout != b"nsfs\n" {
+        return Err(
+            io::Error::other("the approved workload network namespace is unavailable").into(),
+        );
+    }
+    match dns {
+        "none" => Ok(None),
+        address => Ok(Some(address.parse()?)),
+    }
+}
+
+fn check_start(expires: &str, profile: &str) -> Result<()> {
     let expires = expires.parse::<u64>()?;
     if SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() >= expires {
         return Err(io::Error::other("workload deployment has expired").into());
     }
+    admitted_network((profile != "none").then_some(profile))?;
     run(Command::new("/usr/bin/findmnt")
         .args([
             "--mountpoint",
@@ -215,7 +262,8 @@ fn mount_workload() -> Result<()> {
     private_directory(GUEST_DATA)?;
     private_directory(BUNDLE)?;
     let verified = verify(Path::new(BUNDLE), &read_trust()?)?;
-    let definition = quadlet::render(&verified)?;
+    let dns = admitted_network(verified.network_profile())?;
+    let definition = quadlet::render(&verified, dns)?;
     let hash = verified.verity_root_hash().to_owned();
     let service = verified.service().to_owned();
     provision_volumes(&service, &definition)?;
@@ -304,7 +352,7 @@ fn execute() -> Result<()> {
         ["mount"] => mount_workload(),
         ["unmount"] => unmount_workload(),
         ["start"] => start_workload(),
-        ["check-start", expires] => check_start(expires),
+        ["check-start", expires, profile] => check_start(expires, profile),
         _ => Err(io::Error::other("invalid workload activation operation").into()),
     }
 }

@@ -58,7 +58,10 @@ pub fn activate(workload: bool) -> io::Result<()> {
 
     // With no firmware keys, the early kernel can load only modules signed by
     // its own trust anchors. Close module loading before executing systemd.
-    for module in ["virtio_pci", "virtio_blk", "virtio_console", "erofs", "btrfs", "overlay", "loop"] {
+    for module in [
+        "virtio_pci", "virtio_blk", "virtio_console", "virtio_net", "erofs", "btrfs",
+        "overlay", "loop", "nf_tables", "nft_ct",
+    ] {
         run(Command::new("/usr/bin/modprobe").args(["--ignore-install", module]))?;
     }
     fs::write("/proc/sys/kernel/modules_disabled", "1\n")?;

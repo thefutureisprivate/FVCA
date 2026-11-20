@@ -11,12 +11,13 @@ from uuid import UUID
 
 import guest_boot_bundle
 import oci_runtime
+import workload_network
 import workload_oci
 from runtime_boot import (
     BASE_ROOT_OPTIONS, DIRECT_BOOT_FILES, DIRECT_ROOT_OPTIONS, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_LAUNCH_FILES,
     GUEST_CONFIG_CHANGE_SUPPORT, GUEST_CONFIG_KEY, GUEST_VM_SETTINGS, GUEST_VM_SUPPORT,
     HOST_NETWORK_POLICY, HOST_NETWORK_SUPPORT,
-    MANAGEMENT_POLICY, MANAGEMENT_POLICY_SUPPORT, MANAGEMENT_SUPPORT, WORKLOAD_TRUST_FILES,
+    MANAGEMENT_POLICY, MANAGEMENT_POLICY_SUPPORT, MANAGEMENT_SUPPORT, WORKLOAD_NETWORK_SUPPORT, WORKLOAD_TRUST_FILES,
     composition_archive, prepare_core, run, verify_initrd, write_disk,
 )
 DIRECT_BOOT_OPTIONS = ("module.sig_enforce=1", "lockdown=integrity")
@@ -30,6 +31,10 @@ ROLE_BOOT_OPTIONS = (
 )
 ACTIVATION_FILES = (
     "usr/bin/keyctl",
+    "usr/bin/ip",
+    "usr/bin/nft",
+    "usr/bin/nsenter",
+    str(WORKLOAD_NETWORK_SUPPORT),
     "usr/lib/fvca/activate-guest-data",
     "usr/lib/fvca/activate-oci-runtime",
     "usr/lib/fvca/guest-data",
@@ -107,7 +112,8 @@ def assemble(args, work):
         runtime_image = runtime_work / "runtime.raw"
         run("cp", "--reflink=auto", "--sparse=always", "--", args.runtime, runtime_image)
     runtime_hash = verify_runtime(runtime_image, args.runtime_certificate, prepared, runtime_work, oci_runtime)
-    cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS))
+    network, network_arguments = workload_network.selection(args.workload_network, trust, cmdline)
+    cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *network_arguments))
     if args.direct_boot:
         parts = cmdline.split(" ")
         root_option = parts.index(f"systemd.verity_root_options={BASE_ROOT_OPTIONS}")
@@ -123,7 +129,7 @@ def assemble(args, work):
         )
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "service-guest", oci_runtime.IMAGE_ID,
-        extra=trust,
+        extra=(*trust, *network),
     )
     disk, uki = write_disk(args, work, offset, cmdline, uname, composition, direct_boot=args.direct_boot is not None)
     if args.direct_boot is None:
@@ -137,7 +143,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("core", "runtime", "initrd", "boot-certificate", "boot-key", "runtime-certificate"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute(), required=True)
-    for name in ("workload-policy", "deployment-certificate", "workload-certificate"):
+    for name in ("workload-policy", "deployment-certificate", "workload-certificate", "workload-network"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute())
     output = parser.add_mutually_exclusive_group(required=True)
     output.add_argument("--output", type=lambda value: Path(value).absolute(), help="UEFI Secure Boot disk")

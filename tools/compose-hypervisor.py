@@ -22,7 +22,8 @@ from runtime_boot import (
     GUEST_CONFIG_KEY, GUEST_CONFIG_KEY_ARGUMENT, GUEST_LAUNCH_FILES, GUEST_VM_SETTINGS,
     GUEST_VM_SUPPORT, HOST_NETWORK_ARGUMENT, HOST_NETWORK_POLICY, HOST_NETWORK_SUPPORT,
     MANAGEMENT_ADDRESS_ARGUMENT, MANAGEMENT_ARGUMENT, MANAGEMENT_POLICY,
-    MANAGEMENT_POLICY_SUPPORT, MANAGEMENT_SUPPORT, WORKLOAD_TRUST_FILES,
+    MANAGEMENT_POLICY_SUPPORT, MANAGEMENT_SUPPORT, WORKLOAD_NETWORK_ARGUMENT, WORKLOAD_NETWORK_POLICY,
+    WORKLOAD_NETWORK_SUPPORT, WORKLOAD_TRUST_FILES,
     composition_archive, prepare_core, run, verify_initrd, write_disk,
 )
 from runtime_image import verify as verify_runtime
@@ -450,7 +451,8 @@ def assemble(args, work):
         TRIAL_CANDIDATE_FILE, TRIAL_WATCHDOG_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY,
         GUEST_TRIAL_KEY, GUEST_BASE_EPOCH, EPOCH_FILE, *UPDATE_FILES, *GUEST_UPDATE_FILES,
         *FIRMWARE_UPDATE_FILES, UPDATE_PEER, GUEST_VM_SETTINGS, GUEST_CONFIG_KEY, HOST_NETWORK_POLICY, MANAGEMENT_POLICY,
-    ))
+        WORKLOAD_NETWORK_POLICY,
+    )) + (str(WORKLOAD_NETWORK_SUPPORT),)
     required = ACTIVATION_FILES
     required += (str(HOST_NETWORK_SUPPORT), "usr/bin/nft", "usr/bin/ip")
     if args.host_network is not None:
@@ -574,7 +576,7 @@ def assemble(args, work):
     )
     if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT, TRIAL_WATCHDOG_ARGUMENT,
                                     GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_KEY_ARGUMENT, MANAGEMENT_ARGUMENT,
-                                    MANAGEMENT_ADDRESS_ARGUMENT, HOST_NETWORK_ARGUMENT)
+                                    MANAGEMENT_ADDRESS_ARGUMENT, HOST_NETWORK_ARGUMENT, WORKLOAD_NETWORK_ARGUMENT)
            for arg in cmdline.split()):
         raise ValueError("shared core already configures a Hypervisor epoch, trial, Guest configuration or management")
     cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments,

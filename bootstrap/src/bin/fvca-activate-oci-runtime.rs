@@ -6,8 +6,8 @@ use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 
-use fvca_initrd_bootstrap::{direct_boot, invalid};
 use fvca_initrd_bootstrap::runtime::{self, Runtime};
+use fvca_initrd_bootstrap::{direct_boot, invalid, workload_network};
 
 #[path = "fvca-activate-oci-runtime/workload_trust.rs"]
 mod workload_trust;
@@ -27,10 +27,14 @@ fn activate() -> io::Result<()> {
         return Err(invalid("expected a Service Guest core"));
     }
     let runtime_hash = runtime::activate(Runtime::Oci, None)?.extension;
-    workload_trust::enroll()?;
+    let trust = workload_trust::enroll()?;
+    workload_network::activate(&fs::read_to_string("/proc/cmdline")?, trust)?;
     let quadlets = "/run/fvca/oci-probe-quadlet";
     fs::create_dir_all(quadlets)?;
-    fs::write(format!("{quadlets}/fvca-oci-runtime-probe.container"), QUADLET)?;
+    fs::write(
+        format!("{quadlets}/fvca-oci-runtime-probe.container"),
+        QUADLET,
+    )?;
     runtime::install_development_probe("fvca-oci-runtime-probe.service", PROBE)?;
     // Report the bootstrap proof again after the Guest console is established.
     if Path::new(direct_boot::READY_IN_INITRD).is_file() {
