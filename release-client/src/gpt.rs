@@ -2,6 +2,7 @@
 
 mod floor;
 mod layout;
+mod uki;
 
 pub use floor::verify_floor;
 
@@ -171,24 +172,8 @@ fn tool(program: &str, args: &[&Path]) -> Result<()> {
     Ok(())
 }
 
-fn verify_epoch(efi: &Path, expected: &ReleaseEpoch<'_>) -> Result<()> {
-    let mut command = Command::new("/usr/bin/ukify");
-    command.env_clear().args([
-        "--config=/dev/null",
-        "--json=short",
-        "--section=.cmdline:text",
-    ]);
-    if expected.auto_pcr_key.is_some() {
-        command.arg("--section=.pcrsig:text");
-    }
-    let result = command.arg("inspect").arg(efi).output()?;
-    if !result.status.success() {
-        return Err(invalid("ukify could not inspect the signed Hypervisor command line").into());
-    }
-    let metadata: serde_json::Value = serde_json::from_slice(&result.stdout)?;
-    let cmdline = metadata[".cmdline"]["text"].as_str().ok_or_else(|| {
-        invalid("expected one textual command-line section in the signed Hypervisor UKI")
-    })?;
+fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<()> {
+    let uki::Policy { cmdline, pcrsig } = uki::read(efi)?;
     let mut epochs = cmdline
         .split_ascii_whitespace()
         .filter(|arg| arg.split('=').next() == Some(EPOCH_ARGUMENT));
@@ -196,9 +181,7 @@ fn verify_epoch(efi: &Path, expected: &ReleaseEpoch<'_>) -> Result<()> {
         .next()
         .and_then(|arg| arg.split_once('='))
         .and_then(|(_, value)| value.split_once(','));
-    let Some((epoch, policy)) =
-        marker.filter(|_| metadata.get("_profiles").is_none() && epochs.next().is_none())
-    else {
+    let Some((epoch, policy)) = marker.filter(|_| epochs.next().is_none()) else {
         return Err(invalid(
             "expected one epoch and TPM policy in a single-profile Hypervisor UKI",
         )
@@ -216,7 +199,7 @@ fn verify_epoch(efi: &Path, expected: &ReleaseEpoch<'_>) -> Result<()> {
         .into());
     }
     if let Some(fingerprint) = expected.auto_pcr_key {
-        verify_auto_profile(&metadata, fingerprint)?;
+        verify_auto_profile(pcrsig.as_deref(), fingerprint)?;
     }
     if expected.require_trial {
         let mut markers = cmdline
@@ -250,12 +233,9 @@ fn verify_epoch(efi: &Path, expected: &ReleaseEpoch<'_>) -> Result<()> {
     Ok(())
 }
 
-fn verify_auto_profile(uki: &serde_json::Value, fingerprint: &str) -> Result<()> {
+fn verify_auto_profile(pcrsig: Option<&str>, fingerprint: &str) -> Result<()> {
     let invalid_policy = || invalid("Hypervisor UKI lacks the enrolled PIN-less PCR authorization");
-    let raw = uki[".pcrsig"]["text"].as_str().ok_or_else(invalid_policy)?;
-    if raw.len() > 16 * 1024 {
-        return Err(invalid_policy().into());
-    }
+    let raw = pcrsig.ok_or_else(invalid_policy)?;
     let policy: StoragePcrPolicy = serde_json::from_str(raw).map_err(|_| invalid_policy())?;
     let [bank] = policy.sha256;
     if bank.pcrs != [11]
@@ -296,8 +276,8 @@ fn loader(
         "/usr/bin/sbverify",
         &[Path::new("--cert"), &fd_path(cert), &efi],
     )?;
-    verify_epoch(&efi, epoch)?;
     let signed = state::open_regular(&efi)?;
+    verify_epoch(&signed, epoch)?;
     Ok(digest(
         &signed,
         Extent {

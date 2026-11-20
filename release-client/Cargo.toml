@@ -15,6 +15,7 @@ futures-util = "0.3"
 fvca-trial-authorization = { path = "../bootstrap/trial-authorization" }
 hex = "0.4"
 jiff = "0.2"
+object = { version = "=0.41.0", default-features = false, features = ["pe", "read_core", "std"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 rustix = { version = "1", features = ["event", "fs", "process"] }
 serde = { version = "1", features = ["derive"] }
