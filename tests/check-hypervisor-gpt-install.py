@@ -185,7 +185,7 @@ def qualify(args):
         stream.seek(-1, os.SEEK_CUR)
         stream.write(bytes([byte[0] ^ 1]))
     run("damaged-recovery", "next", review | {"active": review["active"] | {"path": str(broken)}},
-        refusal=b"active recovery payload differs")
+        refusal=b"installed Hypervisor payload differs")
     assert sparse_fingerprint(inactive) == initial_candidate
 
     with subprocess.Popen(command("interrupt", "next", review), stdout=subprocess.PIPE,

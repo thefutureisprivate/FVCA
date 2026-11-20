@@ -63,6 +63,7 @@ def qualify(args):
                 )
             if b"Kernel command line:" in output:
                 break
+        output = storage.rejoin_serial_output(output)
         if (b"secureboot: Secure boot enabled" not in output or b"FVCA_SELINUX_ENFORCING" not in output or esp not in output
                 or b"passphrase for disk" in output):
             raise ValueError(f"{name} did not reach the gate through the verified slot")

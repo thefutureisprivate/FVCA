@@ -370,6 +370,7 @@ name = "fvca-release-client"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "aws-lc-rs",
  "futures-util",
  "hex",
  "jiff",

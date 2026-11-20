@@ -1,6 +1,9 @@
 //! Offline installation into a reviewed inactive Hypervisor GPT slot.
 
+mod floor;
 mod layout;
+
+pub use floor::verify_floor;
 
 use std::collections::HashSet;
 use std::fs::{File, Permissions};
@@ -275,6 +278,34 @@ impl Artifact {
         Ok(digest(&target.file, payload)? == self.digests[index] && zeroed(&target.file, tail)?)
     }
 
+    fn verify_installed(
+        &self,
+        disk: &Disk,
+        layout: &Layout<8>,
+        cert: &File,
+        work: &Path,
+        epoch: &ReleaseEpoch<'_>,
+    ) -> Result<()> {
+        self.fits(layout)?;
+        let staged = loader(&self.file, self.layout.regions[0].extent, cert, work, epoch)?;
+        let installed = loader(&disk.file, layout.regions[0].extent, cert, work, epoch)?;
+        if installed != staged {
+            return Err(invalid(
+                "installed Hypervisor EFI loader differs from its approved release",
+            )
+            .into());
+        }
+        for index in 1..SLOT.len() {
+            if !self.matches(disk, layout, index)? {
+                return Err(invalid(
+                    "installed Hypervisor payload differs from its approved release",
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     fn write(&self, target: &Disk, layout: &Layout<8>, index: usize) -> io::Result<()> {
         let extent = self.layout.regions[index].extent;
         let installed = layout.regions[index].extent;
@@ -309,6 +340,27 @@ fn reviewed(disk: &ReviewedDisk, sector: u64, write: bool) -> Result<(Disk, Layo
         return Err(invalid("installed GPT differs from the reviewed disk fingerprint").into());
     }
     Ok((device, layout))
+}
+
+fn require_distinct_disks(first: (&Disk, &Layout<8>), second: (&Disk, &Layout<8>)) -> Result<()> {
+    let (first_disk, first_layout) = first;
+    let (second_disk, second_layout) = second;
+    let identities: HashSet<_> = first_layout
+        .regions
+        .iter()
+        .chain(&second_layout.regions)
+        .map(|part| &part.uuid)
+        .collect();
+    if first_disk.physical != second_disk.physical
+        || first_layout.id == second_layout.id
+        || identities.len() != 16
+    {
+        return Err(invalid(
+            "Hypervisor disks must have distinct partition identities and the same device class",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 pub fn install(plan: &Path, selected: &Selection, incoming: &Path, state_dir: &Path) -> Result<()> {
@@ -351,9 +403,13 @@ pub fn install(plan: &Path, selected: &Selection, incoming: &Path, state_dir: &P
         number: selected.epoch,
         policy: &plan.epoch_policy_sha256,
     };
-    let stable_efi = loader(
-        &stable.file,
-        stable.layout.regions[0].extent,
+    let (active, active_layout) = reviewed(&plan.active, sector, false)?;
+    let (inactive, inactive_layout) = reviewed(&plan.inactive, sector, true)?;
+    require_distinct_disks((&active, &active_layout), (&inactive, &inactive_layout))?;
+    candidate.fits(&inactive_layout)?;
+    stable.verify_installed(
+        &active,
+        &active_layout,
         &cert,
         scratch.path(),
         &active_epoch,
@@ -365,43 +421,6 @@ pub fn install(plan: &Path, selected: &Selection, incoming: &Path, state_dir: &P
         scratch.path(),
         &next_epoch,
     )?;
-
-    let (active, active_layout) = reviewed(&plan.active, sector, false)?;
-    let (inactive, inactive_layout) = reviewed(&plan.inactive, sector, true)?;
-    let identities: HashSet<_> = active_layout
-        .regions
-        .iter()
-        .chain(&inactive_layout.regions)
-        .map(|part| &part.uuid)
-        .collect();
-    if active.physical != inactive.physical
-        || active_layout.id == inactive_layout.id
-        || identities.len() != 16
-    {
-        return Err(invalid(
-            "Hypervisor disks must have distinct partition identities and the same device class",
-        )
-        .into());
-    }
-    stable.fits(&active_layout)?;
-    candidate.fits(&inactive_layout)?;
-    if loader(
-        &active.file,
-        active_layout.regions[0].extent,
-        &cert,
-        scratch.path(),
-        &active_epoch,
-    )? != stable_efi
-    {
-        return Err(invalid("active recovery EFI loader differs from its approved release").into());
-    }
-    for index in 1..SLOT.len() {
-        if !stable.matches(&active, &active_layout, index)? {
-            return Err(
-                invalid("active recovery payload differs from its approved release").into(),
-            );
-        }
-    }
 
     let mut already_installed = true;
     for index in 0..SLOT.len() {

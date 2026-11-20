@@ -344,9 +344,46 @@ policy_sha256=ENROLLED_TPM_POLICY_DIGEST_AS_64_LOWERCASE_HEX_DIGITS
 
 The signed initramfs selects a release epoch and the public authorization policy of TPM NV counter `0x01504656`. The composer writes the same selection into the signed UKI command line for inspection during installation. At boot, the initramfs requires an exact match between the command-line selection and its signed policy. The counter must be initialized, use SHA-256 and eight bytes, and permit writes only through a TPM policy session. The epoch counts from the actual value read after TPM initialization. The initramfs verifies the selected GPT slot first, then reads and checks the counter before activating the VM runtime or prompting for the Host PIN. A missing TPM, missing or uninitialized counter, policy mismatch, or release below the floor stops boot. Restoring disks or EFI variables leaves hardware TPM NV state in place. [TCG TPM 2.0 Library Architecture](https://trustedcomputinggroup.org/wp-content/uploads/TPM-2.0-1.83-Part-1-Architecture.pdf) · [TPM NV attributes](https://tpm2-tools.readthedocs.io/en/latest/man/common/nv-attrs/)
 
-`tests/prepare-hypervisor-epoch-tpm.sh` creates disposable copies of an enrolled software TPM at the initial floor, the next floor, and with an uninitialized counter. It exercises a separate authority for `NV_Increment`, checks an unauthorized increment fails, and checks the old floor precondition after the advance. Compose two signed slots from the generated epoch policies and a third with a different policy digest. Run `tests/check-hypervisor-epoch.py` with those slots, the original TPM-enrolled encrypted members, and the same enrolled firmware. Pass `--paired-slots A B` to also boot both provisioned disks from a successful same-epoch installation at each floor. Each paired slot must carry the higher epoch and its own encrypted member. The test opens its own software TPM copies and captures serial logs for each boot.
+`tests/prepare-hypervisor-epoch-tpm.sh` creates disposable copies of an enrolled software TPM at the initial floor, the next floor, and with an uninitialized counter. The fixture uses `PolicySigned` with a dedicated P-256 key, a per-enrollment policy reference, the live session nonce, a positive expiration, and the command hash for `NV_Increment`. It closes the session on increment and tests unsigned writes, use of the signature in a competing session, and replay after consumption. Compose two signed slots from the generated epoch policies and a third with a different policy digest. Run `tests/check-hypervisor-epoch.py` with those slots, the original TPM-enrolled encrypted members, and the same enrolled firmware. Pass `--paired-slots A B` to also boot both provisioned disks from a successful same-epoch installation at each floor. Each paired slot must carry the higher epoch and its own encrypted member. The test opens its own software TPM copies and captures serial logs for each boot. [TPM 2.0 PolicySigned](https://medias.cdn.trustedcomputinggroup.org/production/Trusted_Platform_Module_2_0_Library_Part_3_Version_184_pub_2337d80b91.pdf) · [tpm2_policysigned](https://github.com/tpm2-software/tpm2-tools/blob/master/man/tpm2_policysigned.1.md)
 
-Production advancement still requires an independent approval that binds the next counter value and the exact candidate and eligible recovery releases. Verify the recovery release before advancing the floor and serialize counter updates. The current implementation enforces the floor during boot, and the disposable fixture exercises TPM authorization separately.
+### Verify the installed pair for a floor approval
+
+Have the independent release authority review the qualification evidence for both boot paths. Bind the evidence digest for each boot, the two staged release manifests, the reviewed GPT records, the exact Secure Boot certificate, and the enrolled TPM policy in one signed approval. `valid_from` and `expires` use Unix seconds on the trusted maintenance clock, with a maximum validity of 24 hours. `next_floor` advances `previous_floor` by one. Both signed releases must meet the next floor.
+
+```json
+{
+  "schema": "fvca-hypervisor-floor-approval-v1",
+  "valid_from": 1795154400,
+  "expires": 1795156200,
+  "sector_size": 4096,
+  "secure_boot_certificate_sha256": "CERTIFICATE_SHA256",
+  "epoch_policy_sha256": "ENROLLED_TPM_POLICY_DIGEST",
+  "previous_floor": 1,
+  "next_floor": 2,
+  "primary": {
+    "epoch": 2,
+    "manifest_sha256": "PRIMARY_MANIFEST_SHA256",
+    "boot_evidence_sha256": "PRIMARY_BOOT_EVIDENCE_SHA256",
+    "disk": {"path": "/dev/disk/by-id/PRIMARY_NVME", "gpt_sha256": "PRIMARY_GPT_SHA256"}
+  },
+  "recovery": {
+    "epoch": 2,
+    "manifest_sha256": "RECOVERY_MANIFEST_SHA256",
+    "boot_evidence_sha256": "RECOVERY_BOOT_EVIDENCE_SHA256",
+    "disk": {"path": "/dev/disk/by-id/RECOVERY_NVME", "gpt_sha256": "RECOVERY_GPT_SHA256"}
+  }
+}
+```
+
+Sign the exact approval bytes with the independent Ed25519 authority. Supply the raw 64-byte signature and the raw 32-byte trusted public key provisioned on the maintenance system. Run the read-only check with both NVMe namespaces unused and both manifests in the private TUF staging directory.
+
+```sh
+fvca-release-client --verify-hypervisor-floor-approval intake-state approval.json approval.sig authority.pub secure-boot.pem
+```
+
+The command independently verifies the approval signature and checks both installed disks against the staged releases. It holds both disk leases, verifies each Secure Boot loader and its signed epoch against the approved enrollment, and reads back all immutable payloads before printing the approval digest. The approving authority retains and verifies the boot evidence referenced by the signed digests. Run `tests/check-hypervisor-floor-approval.py` against the installer output and paired boot logs to qualify the workflow with disposable keys.
+
+Protected advancement requires a live TPM transaction holding both disk leases through the increment. The read-only approval verifier and the disposable one-use TPM session tests qualify those parts separately.
 
 ## Development Service Guest storage
 

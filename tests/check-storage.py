@@ -30,6 +30,10 @@ KERNEL_MOUNT_NOTICE = re.compile(rb"\[ *[0-9]+\.[0-9]+\] (?:BTRFS info|erofs) \(
 OVMF_CODE = Path("/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd")
 
 
+def rejoin_serial_output(output):
+    return KERNEL_MOUNT_NOTICE.sub(b"", KERNEL_AUDIT.sub(b"", output))
+
+
 def image(path):
     path = path.resolve(strict=True)
     if not path.is_file() or "," in str(path):
@@ -144,7 +148,8 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
                         waiting_for_no_echo = False
                         prompt_start = len(output)
                         qemu.stdin.flush()
-                    if ready_marker in output or (direct_cmdline is not None and (DIRECT_MISMATCH in output or INIT_EXIT in output)):
+                    if (ready_marker in output or ready_marker in rejoin_serial_output(output[-4096:])
+                            or (direct_cmdline is not None and (DIRECT_MISMATCH in output or INIT_EXIT in output))):
                         break
                     if not failed_boot and FAIL in output:
                         failed_boot = True
@@ -184,7 +189,7 @@ def check_hypervisor(args):
             prompted, log = boot(options, f"{name}-{attempt}", key, *members, firmware_timeout=36, timeout=105)
             if b"Kernel command line:" in log:
                 break
-        log = KERNEL_MOUNT_NOTICE.sub(b"", KERNEL_AUDIT.sub(b"", log))
+        log = rejoin_serial_output(log)
         return prompted, log
 
     cases = [("healthy", args, member_a, member_b)]
