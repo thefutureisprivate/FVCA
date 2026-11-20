@@ -172,23 +172,29 @@ TRIAL_ARGUMENT = "fvca.hypervisor_trial"
 EPOCH_FILE = "hypervisor-epoch"
 EPOCH_ARGUMENT = "fvca.hypervisor_epoch"
 PROMOTION_KEY = "hypervisor-promotion-key"
-PROMOTION_SUPPORT = "hypervisor-promotion-support-v1"
+PROMOTION_SUPPORT = "hypervisor-promotion-support-v2"
+STANDING_TRIAL_KEY = "hypervisor-trial-key"
+STANDING_TRIAL_SUPPORT = "hypervisor-standing-trial-support-v1"
 
 
-def promotion_selection(args):
-    if args.boot_promotion_public_key is None:
+def approval_keys(args):
+    authorities = [(name, source) for name, source in (
+        (PROMOTION_KEY, args.boot_promotion_public_key), (STANDING_TRIAL_KEY, args.boot_trial_public_key),
+    ) if source is not None]
+    if not authorities:
         return ()
-    key = run("openssl", "pkey", "-pubin", "-in", args.boot_promotion_public_key, "-outform", "DER",
-              capture_output=True).stdout
+    used = {run("openssl", "pkey", "-pubin", "-outform", "DER", input=guest_boot_bundle.public_key(certificate),
+                capture_output=True).stdout
+            for certificate in (args.boot_certificate, args.runtime_certificate, args.guest_release_certificate)}
     prefix = bytes.fromhex("302a300506032b6570032100")
-    if len(key) != len(prefix) + 32 or not key.startswith(prefix):
-        raise ValueError("boot promotion requires an Ed25519 public key")
-    for certificate in (args.boot_certificate, args.runtime_certificate, args.guest_release_certificate):
-        other = run("openssl", "pkey", "-pubin", "-outform", "DER",
-                    input=guest_boot_bundle.public_key(certificate), capture_output=True).stdout
-        if key == other:
-            raise ValueError("boot promotion requires an independent signing key")
-    return ((PROMOTION_KEY, key[len(prefix):]),)
+    selection = []
+    for name, source in authorities:
+        key = run("openssl", "pkey", "-pubin", "-in", source, "-outform", "DER", capture_output=True).stdout
+        if len(key) != len(prefix) + 32 or not key.startswith(prefix) or key in used:
+            raise ValueError("each boot approval authority requires a distinct Ed25519 public key")
+        used.add(key)
+        selection.append((name, key[len(prefix):]))
+    return tuple(selection)
 
 
 def trial_selection(path, ids, guest, *, candidate):
@@ -237,6 +243,8 @@ def assemble(args, work):
     auto = storage is not None and storage.unlock == "tpm2-auto"
     if auto and args.epoch_policy is None:
         raise ValueError("unattended TPM unlock requires a protected Hypervisor epoch")
+    if args.boot_trial_public_key is not None and not auto:
+        raise ValueError("standing boot trial authority requires PIN-less TPM storage")
     digests = [member.token_digest for member in storage.members] if storage is not None else (None, None)
     tpm = digests[0] is not None
     token_paths = (args.tpm_token_a, args.tpm_token_b)
@@ -270,7 +278,7 @@ def assemble(args, work):
         "hypervisor.composition", "vm-runtime.p7s", "host-storage",
         *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, *BACKUP_FILES, BACKUP_JOB_FILE,
         RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE, TRIAL_FILE,
-        TRIAL_CANDIDATE_FILE, PROMOTION_KEY, EPOCH_FILE,
+        TRIAL_CANDIDATE_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY, EPOCH_FILE,
     ))
     required = ACTIVATION_FILES
     if storage is not None:
@@ -286,7 +294,10 @@ def assemble(args, work):
         required += (f"usr/lib/fvca/{TRIAL_SUPPORT}", "usr/lib/fvca/set-boot-next")
     if args.boot_promotion_public_key is not None:
         required += (f"usr/lib/fvca/{PROMOTION_SUPPORT}", "usr/lib/fvca/set-boot-order",
-                     "usr/lib/fvca/verify-boot-promotion")
+                     "usr/lib/fvca/verify-boot-approval")
+    if args.boot_trial_public_key is not None:
+        required += (f"usr/lib/fvca/{STANDING_TRIAL_SUPPORT}", "usr/lib/fvca/set-boot-next",
+                     "usr/lib/fvca/verify-boot-approval")
     if args.boot_trial_candidate is not None:
         recorder = runtime_work / "tree" / vm_runtime.TRIAL_HEALTH
         if recorder.is_symlink() or not recorder.is_file() or recorder.stat().st_mode & 0o111 == 0:
@@ -308,7 +319,7 @@ def assemble(args, work):
                *restore_selection(args.restore_authorization, backup),
                *retention_selection(args.retention_policy, backup),
                *stable_trial, *candidate_trial,
-               *promotion_selection(args)),
+               *approval_keys(args)),
     )
     if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT) for arg in cmdline.split()):
         raise ValueError("shared core already configures a Hypervisor epoch or trial")
@@ -355,6 +366,7 @@ def main():
     trial = parser.add_mutually_exclusive_group()
     trial.add_argument("--boot-trial", type=Path, help="authorize a specific one-shot UEFI trial from the stable GPT slot")
     trial.add_argument("--boot-trial-candidate", type=Path, help="validate readiness during the authorized GPT trial")
+    parser.add_argument("--boot-trial-public-key", type=Path, help="pin the independent Ed25519 standing trial authority")
     parser.add_argument("--boot-promotion-public-key", type=Path, help="pin the independent Ed25519 promotion authority")
     parser.add_argument("--backup-policy", type=Path, help="S3 destination and repository ID to authorize in this UKI")
     parser.add_argument("--backup-ca", type=Path, help="PEM trust bundle for the selected S3 endpoint")
@@ -391,8 +403,13 @@ def main():
         parser.error("a boot trial requires a GPT slot")
     if args.boot_trial_candidate is not None and args.restore_authorization is not None:
         parser.error("a boot trial candidate requires ordinary Guest startup")
+    if args.boot_trial_public_key is not None and (
+        args.epoch_policy is None or args.boot_trial is not None or args.restore_authorization is not None
+    ):
+        parser.error("standing boot trial authority requires an ordinary epoch-protected GPT slot")
     if args.boot_promotion_public_key is not None and (
-        (args.boot_trial is None and args.boot_trial_candidate is None) or args.restore_authorization is not None
+        (args.boot_trial is None and args.boot_trial_candidate is None and args.boot_trial_public_key is None)
+        or args.restore_authorization is not None
     ):
         parser.error("boot promotion authority requires an ordinary stable or candidate trial slot")
     if (args.backup_policy is None) != (args.backup_ca is None) or (

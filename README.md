@@ -330,6 +330,30 @@ python3 tests/check-hypervisor-trial.py \
 
 The test checks that changing a candidate ESP byte leaves the stable slot bootable, that a healthy candidate records its boot ID and runtime, and that cutting power before readiness yields no health record. It also selects the candidate without arming a trial and checks that it refuses to start the Guest. Each armed candidate attempt returns through the original stable order on the next boot.
 
+### Authorize a prepared Hypervisor trial under a standing key
+
+Compose both ordinary slots with `--boot-trial-public-key PUBLIC_KEY_PEM`, authenticated PIN-less TPM storage, and a protected release epoch. Keep the Ed25519 private key with the off-node trial issuer. It must be distinct from the boot, runtime, Guest release, and promotion keys. The candidate uses `--boot-trial-candidate FILE` to bind its transaction and slot pair. The stable UKI pins the trial key and can receive a new authorization through the encrypted Host Btrfs inbox.
+
+The issuer reviews the prepared candidate and the running stable release, then prepends the following header to the exact `FVCA-HYPERVISOR-TRIAL-2` record above. Use the verity root reported by `tools/pack-guest-boot.py` for each Guest bundle field. Use Unix seconds from a trusted clock. The authorization lasts at most 24 hours and both releases must use the named TPM counter policy.
+
+```text
+FVCA-HYPERVISOR-STANDING-TRIAL-1
+not_before=1795154400
+expires=1795156200
+stable_epoch=17
+candidate_epoch=18
+epoch_policy_sha256=ENROLLED_COUNTER_POLICY_SHA256
+stable_core=STABLE_CORE_VERITY_ROOT
+stable_runtime=STABLE_RUNTIME_VERITY_ROOT
+stable_guest_bundle=STABLE_GUEST_BUNDLE_VERITY_ROOT
+```
+
+Sign the complete bytes with Ed25519 and prefix the body with the 64-byte detached signature. The envelope is at most 2048 bytes. Publish it as `boot-trials/pending-trial` through the authorized maintenance path. The directory is root-owned with mode `0700`. Publish a regular root-owned file with mode `0600` via atomic rename and flush the file and directory. [OpenSSL Ed25519 signing](https://docs.openssl.org/3.5/man1/openssl-pkeyutl/)
+
+On the stable boot, the verifier checks the signature, running roots, epoch, TPM policy, EFI entry order and candidate ESP. It persists the exact signed envelope before arming the one-shot boot. The candidate verifies that durable envelope with its pinned key, checks its own epoch and roots, and records health after Guest readiness. Returning to the stable slot consumes the existing transaction record and reports any matching health receipt. An independently authorized promotion can use the original inner trial and health records. Automatic inbox delivery, reboot coordination, and watchdog-backed retries remain release gates.
+
+`tests/check-hypervisor-standing-trial.py` uses a disposable enrolled software TPM, two signed 4Kn boot images and matching authenticated Btrfs members. It exercises signature and expiry refusal, a PIN-less candidate boot through Guest readiness, and replay of the consumed trial.
+
 ### Promote an independently approved Hypervisor trial
 
 Pass the same `--boot-promotion-public-key PUBLIC_KEY_PEM` when composing the stable and candidate slots. Use a dedicated Ed25519 authority and keep its private key off the appliance. After the trial, review the exact health receipt and the recovery release. Capture the candidate disk's installed ESP after the trial so the approval covers any firmware writes during the trial.

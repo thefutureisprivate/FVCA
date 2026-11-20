@@ -10,9 +10,11 @@ use std::process::{Command, Stdio};
 use crate::{find_partition, identity, invalid, recovery, runtime, sys_block};
 
 mod promotion;
+mod standing;
 
 pub const PROMOTION_KEY: &str = "/usr/lib/fvca/hypervisor-promotion-key";
-pub const PROMOTION_LIMIT: usize = 2048;
+pub const TRIAL_KEY: &str = "/usr/lib/fvca/hypervisor-trial-key";
+pub const APPROVAL_LIMIT: usize = 2048;
 const AUTHORIZATION: &str = "/usr/lib/fvca/hypervisor-trial";
 const CANDIDATE: &str = "/usr/lib/fvca/hypervisor-trial-candidate";
 const CANDIDATE_ARGUMENT: &str = "fvca.hypervisor_trial";
@@ -381,7 +383,31 @@ fn read_record(path: &Path) -> io::Result<Vec<u8>> {
     {
         return Err(invalid("boot trial record is not a private Host file"));
     }
-    bounded_read(file, PROMOTION_LIMIT)
+    bounded_read(file, APPROVAL_LIMIT)
+}
+
+fn verify_signature<'a>(purpose: &str, envelope: &'a [u8]) -> io::Result<&'a str> {
+    let mut verifier = Command::new("/usr/lib/fvca/verify-boot-approval")
+        .arg(purpose)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .spawn()?;
+    let written = verifier
+        .stdin
+        .take()
+        .expect("verifier input is piped")
+        .write_all(envelope);
+    let status = verifier.wait()?;
+    written?;
+    if !status.success() {
+        return Err(invalid(&format!(
+            "boot {purpose} requires an independently signed approval"
+        )));
+    }
+    let (_, body) = envelope
+        .split_first_chunk::<64>()
+        .ok_or_else(|| invalid("truncated boot approval"))?;
+    std::str::from_utf8(body).map_err(io::Error::other)
 }
 
 fn publish(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -470,16 +496,45 @@ pub fn arm_if_authorized(
     current_esp: Option<&str>,
     guest: Option<&str>,
     active: &runtime::Activation,
+    epoch: Option<&str>,
 ) -> io::Result<()> {
-    let raw = match read(Path::new(AUTHORIZATION), 1024) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-        Ok(raw) => raw,
+    let dynamic = Path::new(TRIAL_KEY).try_exists()?;
+    let directory;
+    let raw = if dynamic {
+        if Path::new(AUTHORIZATION).try_exists()? {
+            return Err(invalid(
+                "standing trial authority conflicts with an embedded trial",
+            ));
+        }
+        if current_esp.is_none() || guest.is_none() {
+            return Err(invalid(
+                "standing trials require the verified Host GPT and Guest bundle",
+            ));
+        }
+        directory = record_directory()?;
+        match read_record(&directory.join(standing::PENDING)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            result => result?,
+        }
+    } else {
+        match read(Path::new(AUTHORIZATION), 1024) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            result => result?,
+        }
     };
-    let text = std::str::from_utf8(&raw).map_err(io::Error::other)?;
+    let standing = dynamic.then(|| standing::verify(&raw)).transpose()?;
+    let text = match &standing {
+        Some(standing) => standing.attempt,
+        None => std::str::from_utf8(&raw).map_err(io::Error::other)?,
+    };
     let approved = authorization(text)?;
     let trial = &approved.trial;
-    if guest != Some(approved.guest) {
+    if let Some(standing) = &standing {
+        if current_esp == Some(trial.candidate.esp) {
+            return Ok(());
+        }
+        standing.require_stable(active, guest, epoch)?;
+    } else if guest != Some(approved.guest) {
         return Err(invalid(
             "stable boot must use the approved trial Guest bundle",
         ));
@@ -495,7 +550,9 @@ pub fn arm_if_authorized(
         println!("FVCA_PROMOTION_STABLE_RECOVERY {}", trial.transaction);
         return Ok(());
     }
-    if order.first() != Some(&trial.stable.id) {
+    if order.first() != Some(&trial.stable.id)
+        || (dynamic && order.get(1) != Some(&trial.candidate.id))
+    {
         return Err(invalid(
             "the signed stable slot must be booted and first in EFI BootOrder",
         ));
@@ -506,7 +563,14 @@ pub fn arm_if_authorized(
         Ok(prior) if prior == raw => {
             println!("FVCA_TRIAL_PREVIOUSLY_RECORDED {}", trial.transaction);
             if let Some(health) = prior_health(&directory, &approved, &raw)? {
-                promotion::apply(&directory, &approved, &raw, &health, active, &order)?;
+                promotion::apply(
+                    &directory,
+                    &approved,
+                    text.as_bytes(),
+                    &health,
+                    active,
+                    &order,
+                )?;
             }
             return Ok(());
         }
@@ -522,6 +586,9 @@ pub fn arm_if_authorized(
         return Err(invalid("EFI BootNext already requests a boot"));
     }
     verify_candidate_esp(&approved)?;
+    if let Some(standing) = standing {
+        standing.require_fresh()?;
+    }
 
     // Consume the signed authorization durably before asking firmware for the one-shot trial.
     publish(&record, &raw).map_err(|error| {
@@ -555,6 +622,7 @@ pub fn start_candidate(
     guest: Option<&str>,
     active: &runtime::Activation,
     recovering: bool,
+    epoch: Option<&str>,
 ) -> io::Result<()> {
     let mut markers = cmdline
         .split_ascii_whitespace()
@@ -609,7 +677,19 @@ pub fn start_candidate(
         }
     })?;
     verify_arming(&directory, trial.transaction, &attempt)?;
-    let approved = authorization(std::str::from_utf8(&attempt).map_err(io::Error::other)?)?;
+    let standing = Path::new(TRIAL_KEY)
+        .try_exists()?
+        .then(|| standing::verify(&attempt))
+        .transpose()?;
+    let text = match &standing {
+        Some(standing) => {
+            standing.require_candidate(epoch)?;
+            standing.require_fresh()?;
+            standing.attempt
+        }
+        None => std::str::from_utf8(&attempt).map_err(io::Error::other)?,
+    };
+    let approved = authorization(text)?;
     if trial != approved.trial
         || guest != Some(approved.guest)
         || active.core != approved.core

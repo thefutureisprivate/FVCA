@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Exercise the standing Host trial inbox using disposable KVM disks and firmware."""
+
+import argparse
+import gzip
+import hashlib
+import os
+from pathlib import Path
+import runpy
+import shutil
+import struct
+import subprocess
+import tempfile
+import time
+from types import SimpleNamespace
+from uuid import UUID
+
+
+INSTALL = b"""#!/bin/bash
+set -Eeuo pipefail
+export PATH=/usr/bin
+trap 'echo FVCA_TRIAL_FIXTURE_FAILED; poweroff -f' ERR
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+. /lab-ids
+for module in dm_crypt dm_integrity authenc hmac xts; do modprobe "$module"; done
+umask 077
+for side in a b; do
+    [[ $(</sys/block/vd$side/serial) == fvca-trial-$side ]]
+    cryptsetup open --type luks2 --key-file=/storage.key "/dev/vd${side}1" "fvca-trial-$side"
+done
+mount -t btrfs -o device=/dev/mapper/fvca-trial-b /dev/mapper/fvca-trial-a /mnt
+[[ -d /sys/fs/btrfs/$filesystem_uuid ]]
+mkdir -m 0700 /mnt/boot-trials
+cp /envelope /mnt/boot-trials/pending-trial
+chmod 0600 /mnt/boot-trials/pending-trial
+if [[ -b /dev/vdc ]]; then
+    [[ $(</sys/block/vdc/serial) == fvca-trial-seed ]]
+    test -f /mnt/vms/service-guest/data.raw
+    rm -- /mnt/vms/service-guest/data.raw
+    cp --sparse=always /dev/vdc /mnt/vms/service-guest/data.raw
+    chmod 0600 /mnt/vms/service-guest/data.raw
+fi
+sync
+umount /mnt
+echo FVCA_TRIAL_FIXTURE_INSTALLED
+poweroff -f
+"""
+
+
+def install(args, output, members, envelope, seed=None):
+    with tempfile.TemporaryDirectory(prefix="fvca-trial-fixture-") as work:
+        root = Path(work)
+        archive = root / "archive"
+        archive.mkdir()
+        with gzip.open(args.maintenance_initrd, "rb") as source:
+            subprocess.run(["cpio", "--quiet", "-id", "--no-absolute-filenames", "--no-preserve-owner"],
+                           cwd=archive, input=source.read(), check=True)
+        init = archive / "init"
+        init.write_bytes(INSTALL)
+        init.chmod(0o755)
+        (archive / "envelope").write_bytes(envelope)
+        listing = b"".join(os.fsencode(path.relative_to(archive)) + b"\0" for path in sorted(archive.rglob("*")))
+        payload = subprocess.run(["cpio", "--quiet", "-o", "-0", "-H", "newc", "--owner=0:0"],
+                                 cwd=archive, input=listing, stdout=subprocess.PIPE, check=True).stdout
+        initrd = root / "fixture.cpio.gz"
+        initrd.write_bytes(gzip.compress(payload, compresslevel=1, mtime=0))
+        argv = ["qemu-system-x86_64", "-machine", "q35", "-accel", "kvm", "-cpu", "host",
+                "-m", "2048", "-smp", "2", "-display", "none", "-monitor", "none", "-no-reboot", "-nic", "none",
+                "-serial", "stdio", "-kernel", args.kernel, "-initrd", initrd,
+                "-append", "rdinit=/init console=ttyS0 quiet panic=1"]
+        disks = [(label, member, "") for label, member in zip(("a", "b"), members, strict=True)]
+        if seed is not None:
+            disks.append(("seed", seed, ",readonly=on"))
+        for label, path, mode in disks:
+            if "," in str(path):
+                raise ValueError("fixture paths must be comma-free")
+            argv += ["-drive", f"if=none,format=raw,id={label},file={path}{mode}",
+                     "-device", f"virtio-blk-pci,drive={label},serial=fvca-trial-{label}"]
+        with output.open("wb") as log:
+            subprocess.run(argv, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=60)
+        assert b"FVCA_TRIAL_FIXTURE_INSTALLED" in output.read_bytes(), output
+
+
+def qualify(args):
+    here = Path(__file__).parent
+    trial = runpy.run_path(here / "check-hypervisor-trial.py")
+    storage = runpy.run_path(here / "check-storage.py")
+    stable, candidate = (args.fixture / f"{name}.raw" for name in ("stable", "candidate"))
+    first, second = trial["esp"](stable), trial["esp"](candidate)
+    size = second[1]["size"] * 4096
+    sha = hashlib.sha256()
+    with candidate.open("rb") as disk:
+        disk.seek(second[1]["start"] * 4096)
+        for _ in range(0, size, 4096):
+            sha.update(disk.read(4096))
+    ts = int(time.time())
+    tx = str(args.transaction)
+    args.output.mkdir(mode=0o700)
+
+    for label, key, expiry, stable_core, refusal in (
+        ("wrong-signature", args.wrong_key, ts + 1800, args.core,
+         b"boot trial requires an independently signed approval"),
+        ("expired", args.sign_key, ts - 1, args.core, b"standing trial is outside its signed validity interval"),
+        ("different-stable", args.sign_key, ts + 1800, "a" * 64,
+         b"standing trial differs from the running stable composition"),
+        ("approved", args.sign_key, ts + 1800, args.core, None),
+    ):
+        output = args.output / label
+        output.mkdir(mode=0o700)
+        with tempfile.TemporaryDirectory(prefix="disposable-", dir=output) as work:
+            work = Path(work)
+            variables = output / "vars.fd"
+            trial["prepare_vars"](args.variables, variables, first, second)
+            body = work / "payload"
+            body.write_text(
+                f"FVCA-HYPERVISOR-STANDING-TRIAL-1\nnot_before={ts-60}\nexpires={expiry}\n"
+                f"stable_epoch=1\ncandidate_epoch=2\nepoch_policy_sha256={args.epoch_policy}\n"
+                f"stable_core={stable_core}\nstable_runtime={args.runtime}\nstable_guest_bundle={args.guest}\n"
+                f"FVCA-HYPERVISOR-TRIAL-2\ntransaction={tx}\n"
+                f"stable=000a,{first[1]['uuid'].lower()}\ncandidate=000b,{second[1]['uuid'].lower()}\n"
+                f"candidate_esp_sha256={sha.hexdigest()}\ncandidate_esp_bytes={size}\n"
+                f"candidate_core={args.core}\ncandidate_runtime={args.runtime}\nguest_bundle={args.guest}\n",
+                encoding="ascii",
+            )
+            signature = subprocess.check_output(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", key, "-in", body])
+            members = [work / f"member-{side}.raw" for side in ("a", "b")]
+            for member in members:
+                subprocess.run(["cp", "--reflink=auto", "--sparse=always", args.members / member.name, member], check=True)
+            install(args, output / "install.log", members, signature + body.read_bytes(),
+                    args.seed if refusal is None else None)
+            options = SimpleNamespace(disk=stable, runtime=candidate, guest=False, output=output, variables=variables,
+                                      nvme_boot=True, persistent_boot=True, boot_sector_size=4096,
+                                      no_default_devices=True, memory_mib=4096)
+
+            def override():
+                entry = trial["Edk2VarStore"](variables).get_varlist().get("BootNext")
+                return entry.data if entry is not None else None
+
+            def boot(phase, marker):
+                before = override()
+                for retry in range(1, 4):
+                    with storage["software_tpm"](args.tpm_state) as socket:
+                        prompts, log = storage["boot"](options, f"{phase}-{retry}", None, *members,
+                                                        firmware=args.firmware, tpm_socket=socket,
+                                                        firmware_timeout=35, timeout=115, ready_marker=marker)
+                    if b"Kernel command line:" in log or override() != before:
+                        break
+                log = storage["rejoin_serial_output"](log)
+                assert prompts == 0 and marker in log and storage["FAIL"] not in log, (output, phase)
+                assert b"secureboot: Secure boot enabled" in log and b"FVCA_SELINUX_ENFORCING" in log
+                assert b"FVCA_HOST_STORAGE_UNLOCK_PROFILE tpm2-auto" in log
+                order = trial["Edk2VarStore"](variables).get_varlist()["BootOrder"].data
+                assert order[:4] == struct.pack("<HH", trial["STABLE"], trial["CANDIDATE"])
+                return log
+
+            armed = f"FVCA_TRIAL_ARMED {tx}".encode()
+            if refusal is not None:
+                log = boot("stable-refusal", b"FVCA_TRIAL_REFUSED " + refusal)
+                assert armed not in log and override() is None
+            else:
+                boot("stable-arming", armed)
+                assert override() == struct.pack("<H", trial["CANDIDATE"])
+                log = boot("candidate-healthy", f"FVCA_TRIAL_HEALTH_RECORDED {tx}".encode())
+                assert b"FVCA_HYPERVISOR_EPOCH_ACCEPTED 2 1" in log and b"FVCA_SERVICE_GUEST_READY" in log
+                assert override() is None
+                log = boot("stable-replay", f"FVCA_TRIAL_HEALTH_AVAILABLE {tx}".encode())
+                assert armed not in log and override() is None
+        print(f"{label} passed", flush=True)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    for value in ("fixture", "members", "maintenance-initrd", "seed", "kernel", "firmware", "variables",
+                  "tpm-state", "sign-key", "wrong-key", "output"):
+        parser.add_argument(f"--{value}", type=lambda path: Path(path).absolute(), required=True)
+    for value in ("epoch-policy", "core", "runtime", "guest"):
+        parser.add_argument(f"--{value}", required=True)
+    parser.add_argument("--transaction", type=UUID, required=True)
+    os.umask(0o077)
+    qualify(parser.parse_args())

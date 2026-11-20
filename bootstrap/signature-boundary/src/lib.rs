@@ -63,7 +63,7 @@ pub fn verify_ed25519(key: &[u8; 32], signature: &[u8; 64], message: &[u8]) -> i
     };
     let key =
         Key(NonNull::new(key)
-            .ok_or_else(|| io::Error::other("could not load the promotion key"))?);
+            .ok_or_else(|| io::Error::other("could not load the Ed25519 approval key"))?);
     // The returned context is independently owned and drops before the key.
     let context = Context(
         NonNull::new(unsafe { EVP_MD_CTX_new() })
@@ -81,7 +81,7 @@ pub fn verify_ed25519(key: &[u8; 32], signature: &[u8; 64], message: &[u8]) -> i
     } != 1
     {
         return Err(io::Error::other(
-            "could not initialize the promotion signature verifier",
+            "could not initialize the Ed25519 signature verifier",
         ));
     }
     // The input slices stay live and immutable for the duration of the one-shot call.
@@ -97,7 +97,7 @@ pub fn verify_ed25519(key: &[u8; 32], signature: &[u8; 64], message: &[u8]) -> i
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "promotion signature verification failed",
+            "Ed25519 signature verification failed",
         ));
     }
     Ok(())

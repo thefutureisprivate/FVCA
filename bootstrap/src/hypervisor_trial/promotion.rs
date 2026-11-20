@@ -2,13 +2,13 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use super::{
     Authorization, PROMOTION_KEY, Trial, approved_evidence, authorization, boot_next, boot_order,
-    digest, gpt_device, promoted_order, publish, read, read_record,
+    digest, gpt_device, promoted_order, publish, read, read_record, verify_signature,
 };
 use crate::{find_partition, invalid, recovery, run, runtime, sys_block};
 
@@ -30,27 +30,7 @@ fn pair<'a>(line: &'a str, field: &str) -> io::Result<[&'a str; 2]> {
 }
 
 fn verified_approval(envelope: &[u8]) -> io::Result<Approval<'_>> {
-    let mut verifier = Command::new("/usr/lib/fvca/verify-boot-promotion")
-        .env_clear()
-        .stdin(Stdio::piped())
-        .spawn()?;
-    let written = verifier
-        .stdin
-        .take()
-        .expect("verifier input is piped")
-        .write_all(envelope);
-    let status = verifier.wait()?;
-    written?;
-    if !status.success() {
-        return Err(invalid(
-            "boot promotion requires an independently signed approval",
-        ));
-    }
-
-    let (_, body) = envelope
-        .split_first_chunk::<64>()
-        .ok_or_else(|| invalid("truncated promotion envelope"))?;
-    let body = std::str::from_utf8(body).map_err(io::Error::other)?;
+    let body = verify_signature("promotion", envelope)?;
     let (header, rest) = body.split_at(
         body.find("FVCA-HYPERVISOR-TRIAL-2\n")
             .ok_or_else(|| invalid("promotion is missing its trial authorization"))?,

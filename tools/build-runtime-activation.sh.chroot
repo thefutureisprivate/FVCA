@@ -8,7 +8,7 @@ export CARGO_TARGET_DIR="$build_dir/target"
 export RUSTFLAGS="-Dwarnings"
 
 target=x86_64-unknown-linux-gnu
-binaries=(fvca-activate-runtime fvca-check-hypervisor-epoch fvca-set-boot-next fvca-set-boot-order fvca-verify-boot-promotion)
+binaries=(fvca-activate-runtime fvca-check-hypervisor-epoch fvca-set-boot-next fvca-set-boot-order fvca-verify-boot-approval)
 features=(--features promotion)
 if [[ -n "${FVCA_GUEST_DATA_SELECTION:-}" ]]; then
     binaries=(fvca-activate-guest-data)
@@ -29,5 +29,6 @@ if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-storage-tpm-auto-support-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-slot-support-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-trial-support-v3"
-    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-promotion-support-v1"
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-promotion-support-v2"
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-standing-trial-support-v1"
 fi

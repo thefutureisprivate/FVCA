@@ -33,7 +33,7 @@ name = "fvca-trial-health"
 required-features = ["libvirt"]
 
 [[bin]]
-name = "fvca-verify-boot-promotion"
+name = "fvca-verify-boot-approval"
 required-features = ["promotion"]
 
 [profile.release]
