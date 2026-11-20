@@ -374,7 +374,7 @@ impl Session {
         Ok(())
     }
 
-    pub(super) fn verify_cabinet(&self, file: File, offer: &Offer) -> Result<()> {
+    pub(super) fn verify_cabinet(&self, file: File, offer: &Offer) -> Result<u64> {
         let identity = [
             CString::new(offer.archive.sha256.as_str())?,
             CString::new(offer.payload_sha256.as_str())?,
@@ -385,13 +385,17 @@ impl Session {
         ];
         self.require_catalog()?;
         let archive = sealed(c"fvca-firmware-cabinet", file, offer.archive.bytes)?;
-        self.peer.bus.verify_cabinet(
+        let bytes = self.peer.bus.verify_cabinet(
             &self.peer.owner,
             identity.each_ref().map(CString::as_c_str),
             offer.to.raw.unwrap_or(0),
             archive.as_fd(),
         )?;
-        self.require_catalog()
+        self.require_catalog()?;
+        if !(1..=super::ARCHIVE_LIMIT).contains(&bytes) {
+            return Err(invalid("invalid verified firmware payload size").into());
+        }
+        Ok(bytes)
     }
 
     pub(super) fn read(&self, identity: &DeviceIdentity) -> Result<Observation> {
@@ -544,7 +548,7 @@ mod tests {
             cabinet.as_slice(),
             cabinet.len() as u64,
         )?;
-        session.peer.bus.verify_cabinet(
+        let bytes = session.peer.bus.verify_cabinet(
             &session.peer.owner,
             [
                 &archive,
@@ -557,6 +561,7 @@ mod tests {
             65587,
             fd.as_fd(),
         )?;
+        assert_eq!(bytes, 16_908_288);
         fs::write(&mode, "catalog-replaced")?;
         let error = session.require_catalog().err().unwrap();
         assert!(error.to_string().contains("catalog changed during intake"));

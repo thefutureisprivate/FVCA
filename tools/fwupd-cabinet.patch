@@ -21,7 +21,7 @@
 +{
 +	gsize size;
 +	g_autoptr(FuInputStream) stream = fu_dbus_daemon_open_sealed_fd(fd, limit, error);
-@@ -1940 +1945,135 @@
+@@ -1940 +1945,143 @@
 -	return fu_input_stream_read_bytes(stream, 0, (gsize)st.st_size, NULL, error);
 +	if (!fu_input_stream_size(stream, &size, error))
 +		return NULL;
@@ -69,6 +69,7 @@
 +			    const gchar *version,
 +			    guint32 version_raw,
 +			    const gchar *payload_sha256,
++			    gsize *payload_size,
 +			    GError **error)
 +{
 +	g_autoptr(FuCabinet) cabinet = fu_engine_build_cabinet_from_stream(engine, stream, error);
@@ -149,6 +150,13 @@
 +				    "cabinet release has no payload stream");
 +		return FALSE;
 +	}
++	if (!fu_input_stream_size(payload, payload_size, error))
++		return FALSE;
++	if (*payload_size == 0 || *payload_size > 256 * FU_MB) {
++		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
++				    "cabinet payload is outside the approved size bounds");
++		return FALSE;
++	}
 +	digest = fu_input_stream_compute_checksum(payload, G_CHECKSUM_SHA256, error);
 +	if (digest == NULL)
 +		return FALSE;
@@ -158,9 +166,7 @@
 +		return FALSE;
 +	}
 +	return TRUE;
-@@ -1942,0 +2082,62 @@
-+
-+static void
+@@ -1944,0 +2092,63 @@
 +fu_dbus_daemon_method_verify_fvca_cabinet(FuDbusDaemon *self,
 +					GVariant *parameters,
 +					FuEngineRequest *request,
@@ -178,6 +184,7 @@
 +	g_autoptr(GError) error = NULL;
 +	g_autofree gchar *digest = NULL;
 +	gboolean verified;
++	gsize payload_size = 0;
 +
 +	g_variant_get(parameters, "(&s&s&s&s&s&suh)", &archive_sha256, &payload_sha256, &guid,
 +		      &protocol, &version, &format, &version_raw, &handle);
@@ -208,11 +215,11 @@
 +		return;
 +	}
 +	verified = fu_dbus_daemon_verify_cabinet(engine, stream, guid, protocol, version, version_raw,
-+					      payload_sha256, &error);
++					      payload_sha256, &payload_size, &error);
 +	fu_daemon_set_status(FU_DAEMON(self), FWUPD_STATUS_IDLE);
 +	if (!verified)
 +		goto fail;
-+	g_dbus_method_invocation_return_value(invocation, NULL);
++	g_dbus_method_invocation_return_value(invocation, g_variant_new("(t)", (guint64)payload_size));
 +	return;
 +fail:
 +	fu_dbus_daemon_method_invocation_return_gerror(invocation, error);
@@ -221,16 +228,18 @@
 +						      "cabinet verification requires Unix descriptors");
 +#endif
 +}
-@@ -2755,0 +2957 @@
++
++static void
+@@ -2755,0 +2966 @@
 +	    {"VerifyFvcaCabinet", fu_dbus_daemon_method_verify_fvca_cabinet},
-@@ -2780 +2982,3 @@
+@@ -2780 +2991,3 @@
 -	    (g_strcmp0(method_name, "GetUpgrades") != 0 || self->fvca_catalog == NULL)) {
 +	    (self->fvca_catalog == NULL ||
 +	     (g_strcmp0(method_name, "GetUpgrades") != 0 &&
 +	      g_strcmp0(method_name, "VerifyFvcaCabinet") != 0))) {
 --- a/src/org.freedesktop.fwupd.xml
 +++ b/src/org.freedesktop.fwupd.xml
-@@ -770,0 +771,12 @@
+@@ -770,0 +771,13 @@
 +    <method name='VerifyFvcaCabinet'>
 +      <arg type='s' name='archive_sha256' direction='in'/>
 +      <arg type='s' name='payload_sha256' direction='in'/>
@@ -240,6 +249,7 @@
 +      <arg type='s' name='version_format' direction='in'/>
 +      <arg type='u' name='version_raw' direction='in'/>
 +      <arg type='h' name='fd' direction='in'/>
++      <arg type='t' name='payload_size' direction='out'/>
 +    </method>
 +
 +    <!--***********************************************************-->

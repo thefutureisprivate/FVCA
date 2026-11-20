@@ -828,12 +828,13 @@ async fn refresh(
         }
     };
     drop(payloads);
-    let observe = || match &source {
+    let observe = |payload_bytes| match &source {
         SnapshotSource::File(observed, sha256) => {
             offer.require_observation(&policy, observed, require_current()?)?;
             Ok(AdmittedObservation {
                 sha256: sha256.clone(),
                 esrt: None,
+                payload_bytes,
             })
         }
         SnapshotSource::Live(live) => {
@@ -842,18 +843,22 @@ async fn refresh(
             Ok(AdmittedObservation {
                 sha256: digest(&serde_json::to_vec(&observed)?),
                 esrt: esrt.cloned(),
+                payload_bytes,
             })
         }
     };
-    observe()?;
+    observe(None)?;
     let check_cabinet = |path: &Path| {
         require_current()?;
         let file = state::open_regular(path)?;
-        match &source {
-            SnapshotSource::Live(live) => live.verify_cabinet(file, &offer)?,
-            SnapshotSource::File(..) => verify_member(file, &offer.archive)?,
-        }
-        observe()
+        let payload_bytes = match &source {
+            SnapshotSource::Live(live) => Some(live.verify_cabinet(file, &offer)?),
+            SnapshotSource::File(..) => {
+                verify_member(file, &offer.archive)?;
+                None
+            }
+        };
+        observe(payload_bytes)
     };
     let (staged, observed) = stage_archive(
         &repo,
@@ -869,7 +874,8 @@ async fn refresh(
         observed
             .esrt
             .zip(offer.to.raw)
-            .map(|(esrt, to)| capsule::inspect(esrt, to))
+            .zip(observed.payload_bytes)
+            .map(|((esrt, to), bytes)| capsule::inspect(esrt, to, bytes))
     } else {
         None
     };
@@ -883,8 +889,8 @@ async fn refresh(
     Ok(Some(Staged {
         offer_sha256: approval_sha256,
         archive_sha256: offer.archive.sha256,
-        verified_payload_sha256: matches!(source, SnapshotSource::Live(_))
-            .then_some(offer.payload_sha256),
+        verified_payload_sha256: observed.payload_bytes.map(|_| offer.payload_sha256),
+        verified_payload_bytes: observed.payload_bytes,
         observation_sha256: observed.sha256,
         capsule_delivery,
         qualified_vendor_authentication: vendor_authentication,
@@ -895,6 +901,7 @@ async fn refresh(
 struct AdmittedObservation {
     sha256: String,
     esrt: Option<Esrt>,
+    payload_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -903,6 +910,8 @@ struct Staged {
     archive_sha256: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     verified_payload_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified_payload_bytes: Option<u64>,
     observation_sha256: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     capsule_delivery: Option<capsule::Delivery>,

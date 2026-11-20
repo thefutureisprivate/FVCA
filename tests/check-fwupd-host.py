@@ -93,6 +93,7 @@ def check_cabinet(call, owner, cabinet, unsigned):
                       pass_fds=(fd,), check=False)
         if expected is None:
             assert result.returncode == 0, result.stderr
+            assert json.loads(result.stdout) == {"type": "t", "data": [16_908_288]}
         else:
             assert result.returncode != 0 and expected in result.stderr, result.stderr
 

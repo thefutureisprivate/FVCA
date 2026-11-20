@@ -52,7 +52,7 @@ def serve(address, mode):
                     digests.append(sha256(stream.read()).hexdigest())
             self.catalog = "1:" + ":".join(digests)
 
-        @dbus.service.method(interface, in_signature="ssssssuh", out_signature="")
+        @dbus.service.method(interface, in_signature="ssssssuh", out_signature="t")
         def VerifyFvcaCabinet(self, archive, payload, guid, protocol, version, version_format, raw, fd):
             assert payload == "7" * 64
             assert guid == "a1234567-d234-4031-a111-000000000000"
@@ -64,6 +64,7 @@ def serve(address, mode):
                 assert not os.fstat(stream.fileno()).st_mode & 0o111
                 content = stream.read()
                 assert content == b"exact cabinet" and archive == sha256(content).hexdigest()
+            return dbus.UInt64(16_908_288)
 
         @dbus.service.method(interface, in_signature="", out_signature="aa{sv}")
         def GetDevices(self):

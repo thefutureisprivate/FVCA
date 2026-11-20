@@ -273,12 +273,34 @@ fn gpt_device(entry: &Entry<'_>) -> io::Result<(PathBuf, u64)> {
 }
 
 pub(crate) fn publish_firmware_esp(esp: &str) -> io::Result<()> {
-    let (_, _, path) = esp_device(esp)?;
     match publish(Path::new(GUEST_CAPTURE_LOCK), b"") {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
         result => result?,
     }
-    publish(Path::new(efi::FIRMWARE_ESP), &path)
+    let (device, _, path) = esp_device(esp)?;
+    let device_id = fs::metadata(&device)?.rdev();
+    let mountpoint = Path::new(efi::FIRMWARE_ESP);
+    DirBuilder::new().mode(0o700).create(mountpoint)?;
+    crate::run(
+        Command::new("/usr/bin/mount")
+            .args([
+                "--internal-only",
+                "--types",
+                "vfat",
+                "--options",
+                "ro,nodev,nosuid,noexec,umask=0077,codepage=437,iocharset=iso8859-1,utf8",
+            ])
+            .arg(device)
+            .arg(mountpoint),
+    )?;
+    if fs::metadata(mountpoint)?.dev() != device_id {
+        return Err(invalid(
+            "mounted firmware ESP differs from the verified partition",
+        ));
+    }
+    let mut binding = device_id.to_le_bytes().to_vec();
+    binding.extend_from_slice(&path);
+    publish(Path::new(efi::FIRMWARE_ESP_BINDING), &binding)
 }
 
 fn record_directory() -> io::Result<PathBuf> {

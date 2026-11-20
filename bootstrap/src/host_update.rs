@@ -185,8 +185,7 @@ pub fn activate_firmware_if_selected(esp: &str) -> io::Result<()> {
         return Ok(());
     }
     if let Err(error) = crate::hypervisor_trial::publish_firmware_esp(esp) {
-        eprintln!("FVCA_HOST_FIRMWARE_ENROLLMENT_BLOCKED {error}");
-        return Ok(());
+        eprintln!("FVCA_HOST_FIRMWARE_ESP_BLOCKED {error}");
     }
     publish_depot(FIRMWARE_STATE, "fvca-firmware-update", &owner)?;
     enable_timer("fvca-firmware-update")?;

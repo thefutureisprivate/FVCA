@@ -6,7 +6,8 @@ use std::io;
 use crate::{invalid, uuid};
 
 pub const GLOBAL: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
-pub const FIRMWARE_ESP: &str = "/run/fvca/firmware-esp-device-path";
+pub const FIRMWARE_ESP: &str = "/run/fvca/firmware-esp";
+pub const FIRMWARE_ESP_BINDING: &str = "/run/fvca/firmware-esp-binding";
 
 pub fn variable_data(bytes: &[u8], attributes: u32) -> io::Result<&[u8]> {
     let (header, data) = bytes

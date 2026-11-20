@@ -2,9 +2,12 @@
 
 use std::fs::File;
 use std::io::{self, Read};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use fvca_trial_authorization::efi;
+use rustix::fs::{self, CWD, Dir, Mode, OFlags, ResolveFlags, StatVfsMountFlags};
+use rustix::io::Errno;
 use serde::Serialize;
 
 use super::{Esrt, uuid};
@@ -13,6 +16,12 @@ use crate::{Result, channel::digest, handoff, invalid, state};
 const EFIVARS: &str = "/sys/firmware/efi/efivars";
 const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 const EFIVARFS_MAGIC: u64 = 0xde5e81e4;
+const VFAT_MAGIC: u64 = 0x4d44;
+const ESP_PATH_LIMIT: usize = 256;
+const DIRECTORY: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
 const BOOT_RUNTIME: u32 = 6;
 const NON_VOLATILE: u32 = 7;
 const FILE_CAPSULE: u64 = 0x4;
@@ -32,14 +41,16 @@ enum Route {
     Matched {
         boot_entry: u16,
         esp_device_path_sha256: String,
+        esp_available_bytes: u64,
+        esp_required_bytes: u64,
     },
     Blocked {
         reason: String,
     },
 }
 
-pub(super) fn inspect(esrt: Esrt, target: u32) -> Delivery {
-    let (boot_id, route) = match live_route(&esrt, target) {
+pub(super) fn inspect(esrt: Esrt, target: u32, payload_bytes: u64) -> Delivery {
+    let (boot_id, route) = match live_route(&esrt, target, payload_bytes) {
         Ok((boot_id, route)) => (Some(boot_id), route),
         Err(error) => (
             None,
@@ -55,17 +66,21 @@ pub(super) fn inspect(esrt: Esrt, target: u32) -> Delivery {
     }
 }
 
-fn live_route(esrt: &Esrt, target: u32) -> Result<(String, Route)> {
+fn live_route(esrt: &Esrt, target: u32, payload_bytes: u64) -> Result<(String, Route)> {
     let _lease = handoff::lock_install()?;
     handoff::require_idle()?;
-    let path = Path::new(efi::FIRMWARE_ESP);
-    let file = state::open_regular(path)?;
+    let path = Path::new(efi::FIRMWARE_ESP_BINDING);
+    let file = state::open_regular(path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("verified firmware ESP binding: {error}"),
+        )
+    })?;
     handoff::private_file(&file)?;
-    let mut expected = Vec::new();
-    file.take(257).read_to_end(&mut expected)?;
-    if expected.is_empty() || expected.len() > 256 {
-        return Err(invalid("invalid verified EFI System Partition device path").into());
-    }
+    let mut binding = Vec::new();
+    file.take((ESP_PATH_LIMIT + size_of::<u64>() + 1) as u64)
+        .read_to_end(&mut binding)?;
+    let (device_id, expected) = esp_binding(&binding)?;
     let efivars = Path::new(EFIVARS);
     if rustix::fs::fstatfs(File::open(efivars)?)?.f_type as u64 != EFIVARFS_MAGIC {
         return Err(invalid("capsule routing requires the kernel efivarfs mount").into());
@@ -75,7 +90,86 @@ fn live_route(esrt: &Esrt, target: u32) -> Result<(String, Route)> {
         .strip_suffix('\n')
         .filter(|id| uuid(id))
         .ok_or_else(|| invalid("invalid Linux boot identifier"))?;
-    Ok((boot_id.to_owned(), route(efivars, &expected, esrt, target)?))
+    let boot_entry = route(efivars, expected, esrt, target)?;
+    let required = required_space(payload_bytes)?;
+    let available = esp_space(Path::new(efi::FIRMWARE_ESP), device_id)?;
+    if available < required {
+        return Err(invalid(&format!(
+            "firmware ESP has {available} available bytes and requires {required}"
+        ))
+        .into());
+    }
+    Ok((
+        boot_id.to_owned(),
+        Route::Matched {
+            boot_entry,
+            esp_device_path_sha256: digest(expected),
+            esp_available_bytes: available,
+            esp_required_bytes: required,
+        },
+    ))
+}
+
+fn esp_binding(binding: &[u8]) -> io::Result<(u64, &[u8])> {
+    let (device, path) = binding
+        .split_first_chunk::<8>()
+        .ok_or_else(|| invalid("truncated verified firmware ESP binding"))?;
+    let device_id = u64::from_le_bytes(*device);
+    if device_id == 0 || !(1..=ESP_PATH_LIMIT).contains(&path.len()) {
+        return Err(invalid("invalid verified firmware ESP binding"));
+    }
+    Ok((device_id, path))
+}
+
+fn required_space(payload_bytes: u64) -> io::Result<u64> {
+    // Match fwupd's default backup allowance. The extra MiB also covers
+    // filesystem allocation overhead and a capsule header added by fwupd.
+    payload_bytes
+        .checked_mul(2)
+        .and_then(|size| size.checked_add(1024 * 1024))
+        .filter(|_| payload_bytes != 0)
+        .ok_or_else(|| invalid("invalid firmware payload size for ESP reservation"))
+}
+
+fn esp_space(path: &Path, device_id: u64) -> io::Result<u64> {
+    let root = File::from(fs::openat(CWD, path, DIRECTORY, Mode::empty())?);
+    let flags = StatVfsMountFlags::RDONLY
+        | StatVfsMountFlags::NODEV
+        | StatVfsMountFlags::NOSUID
+        | StatVfsMountFlags::NOEXEC;
+    let space = fs::fstatvfs(&root)?;
+    if root.metadata()?.dev() != device_id
+        || fs::fstatfs(&root)?.f_type as u64 != VFAT_MAGIC
+        || !space.f_flag.contains(flags)
+    {
+        return Err(invalid(
+            "firmware ESP is not the verified read-only VFAT mount",
+        ));
+    }
+    require_empty_capsule_directory(&root)?;
+    space
+        .f_bavail
+        .checked_mul(space.f_frsize)
+        .filter(|_| space.f_frsize != 0)
+        .ok_or_else(|| invalid("invalid firmware ESP space accounting"))
+}
+
+fn require_empty_capsule_directory(root: &File) -> io::Result<()> {
+    let resolve = ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV;
+    let efi = fs::openat2(root, "EFI", DIRECTORY, Mode::empty(), resolve)?;
+    let queue = match fs::openat2(&efi, "UpdateCapsule", DIRECTORY, Mode::empty(), resolve) {
+        Ok(queue) => queue,
+        Err(Errno::NOENT) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in Dir::new(queue)? {
+        if !matches!(entry?.file_name().to_bytes(), b"." | b"..") {
+            return Err(invalid(
+                "firmware ESP already contains a queued capsule or foreign entry",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn read(variables: &Path, name: &str) -> io::Result<Vec<u8>> {
@@ -90,7 +184,7 @@ fn mask(raw: &[u8], attributes: u32) -> io::Result<u64> {
     Ok(u64::from_le_bytes(bytes))
 }
 
-fn route(variables: &Path, expected: &[u8], esrt: &Esrt, target: u32) -> Result<Route> {
+fn route(variables: &Path, expected: &[u8], esrt: &Esrt, target: u32) -> Result<u16> {
     if target < esrt.lowest_supported_fw_version {
         return Err(invalid("capsule target is below the device's ESRT firmware floor").into());
     }
@@ -130,10 +224,7 @@ fn route(variables: &Path, expected: &[u8], esrt: &Esrt, target: u32) -> Result<
     }
     let option = read(variables, &format!("Boot{current:04X}"))?;
     efi::require_esp_load_option(efi::variable_data(&option, NON_VOLATILE)?, expected)?;
-    Ok(Route::Matched {
-        boot_entry: current,
-        esp_device_path_sha256: digest(expected),
-    })
+    Ok(current)
 }
 
 #[cfg(test)]
@@ -184,6 +275,56 @@ mod tests {
     }
 
     #[test]
+    fn bounds_space_and_requires_the_selected_read_only_vfat() -> Result<()> {
+        let work = tempfile::tempdir()?;
+        let expected = efi::esp_device_path(ESP, 1, 256, 64_000)?;
+        let device = 0x801u64;
+        let mut binding = device.to_le_bytes().to_vec();
+        binding.extend_from_slice(&expected);
+        assert_eq!(esp_binding(&binding)?, (device, expected.as_slice()));
+        assert!(esp_binding(&binding[..8]).is_err());
+        binding[..8].fill(0);
+        assert!(esp_binding(&binding).is_err());
+        assert_eq!(required_space(16_908_288)?, 34_865_152);
+        assert!(required_space(0).is_err());
+        assert!(required_space(u64::MAX).is_err());
+        let device = fs::metadata(work.path())?.dev();
+        assert!(
+            esp_space(work.path(), device)
+                .unwrap_err()
+                .to_string()
+                .contains("read-only VFAT")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_only_an_empty_or_absent_capsule_directory() -> Result<()> {
+        let work = tempfile::tempdir()?;
+        let root = File::open(work.path())?;
+        let efi = work.path().join("EFI");
+        let queue = efi.join("UpdateCapsule");
+        assert!(require_empty_capsule_directory(&root).is_err());
+        fs::create_dir(&efi)?;
+        require_empty_capsule_directory(&root)?;
+        fs::create_dir(&queue)?;
+        require_empty_capsule_directory(&root)?;
+        let foreign = queue.join(".unknown");
+        fs::write(&foreign, b"foreign capsule")?;
+        assert!(
+            require_empty_capsule_directory(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("queued capsule or foreign entry")
+        );
+        fs::remove_file(foreign)?;
+        fs::remove_dir(&queue)?;
+        std::os::unix::fs::symlink(work.path(), &queue)?;
+        assert!(require_empty_capsule_directory(&root).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn matches_only_the_running_signed_esp_and_an_idle_firmware_route() -> Result<()> {
         let work = tempfile::tempdir()?;
         let dir = work.path();
@@ -195,11 +336,7 @@ mod tests {
         let esrt = baseline();
         let require = || route(dir, &expected, &esrt, TARGET);
         variables(dir, &expected)?;
-        assert!(matches!(require()?, Route::Matched { boot_entry: 2, .. }));
-        assert!(matches!(
-            require()?,
-            Route::Matched { esp_device_path_sha256, .. } if esp_device_path_sha256 == digest(&expected)
-        ));
+        assert_eq!(require()?, 2);
         for (name, attributes, contents, reason) in [
             ("SecureBoot", BOOT_RUNTIME, vec![0], "enabled Secure Boot"),
             ("SetupMode", BOOT_RUNTIME, vec![1], "outside Setup Mode"),

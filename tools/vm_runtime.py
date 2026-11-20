@@ -39,6 +39,7 @@ GUEST_UPDATE_UNITS = tuple(
 FIRMWARE_UPDATE_UNITS = tuple(
     Path(f"usr/lib/systemd/system/fvca-firmware-update.{kind}") for kind in ("service", "timer")
 )
+FIRMWARE_ESP_PREFLIGHT = Path("usr/lib/fvca/firmware-esp-preflight-v1")
 BASE_BINDING = Path("usr/share/fvca/vm-runtime-base.roothash")
 EXTENSION_RELEASE = Path("usr/lib/extension-release.d/extension-release.vm-runtime")
 REQUIRED_FILES = {
@@ -105,6 +106,7 @@ def allowed(path):
         or path in GUEST_TRIAL_FILES
         or path in GUEST_UPDATE_UNITS
         or path in FIRMWARE_UPDATE_UNITS
+        or path == FIRMWARE_ESP_PREFLIGHT
         or path in FIRMWARE_DATA
         or path.is_relative_to("usr/share/licenses")
         or (path.parent == Path("usr/share/libvirt/cpu_map") and path.suffix == ".xml")

@@ -144,14 +144,17 @@ impl Bus {
         identity: [&CStr; 6],
         version_raw: u32,
         cabinet: BorrowedFd<'_>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let call = self.prepare(owner, c"/", c"org.freedesktop.fwupd", c"VerifyFvcaCabinet")?;
         for value in identity {
             call.append(b's', value.as_ptr().cast())?;
         }
         call.append(b'u', std::ptr::from_ref(&version_raw).cast())?;
         call.append_fd(cabinet)?;
-        self.send(&call, CABINET_TIMEOUT)?.finish()
+        let mut reply = self.send(&call, CABINET_TIMEOUT)?;
+        let bytes = reply.u64()?;
+        reply.finish()?;
+        Ok(bytes)
     }
 
     fn prepare(
