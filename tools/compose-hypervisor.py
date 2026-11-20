@@ -280,15 +280,21 @@ def assemble(args, work):
                *promotion_selection(args)),
     )
     cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS))
+    immutable = None
     if ids is None:
         disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)
     else:
-        disk = hypervisor_gpt.pack(args, work, ids, cmdline, uname, composition, pcr_options, data=data)
+        disk, immutable = hypervisor_gpt.pack(args, work, ids, cmdline, uname, composition, pcr_options, data=data)
     if data is not None:
         disk.chmod(0o600)
-    with disk.open("rb") as output:
-        os.fsync(output.fileno())
-    args.output.hardlink_to(disk)
+    outputs = [(disk, args.output)]
+    if immutable is not None:
+        outputs.append((immutable, args.immutable_output))
+    for source, _ in outputs:
+        with source.open("rb") as output:
+            os.fsync(output.fileno())
+    for source, destination in outputs:
+        destination.hardlink_to(source)
     directory = os.open(args.output.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(directory)
@@ -310,6 +316,8 @@ def main():
     parser.add_argument("--host-data-sector-size", type=int, choices=(512, 4096),
                         help="logical sector size of the input Host data image (default 512)")
     parser.add_argument("--gpt-disk-bytes", type=int, help="exact provisioned disk size in bytes")
+    parser.add_argument("--immutable-output", type=lambda path: Path(path).absolute(),
+                        help="save the exact immutable slot separately for release staging")
     trial = parser.add_mutually_exclusive_group()
     trial.add_argument("--boot-trial", type=Path, help="authorize a specific one-shot UEFI trial from the stable GPT slot")
     trial.add_argument("--boot-trial-candidate", type=Path, help="validate readiness during the authorized GPT trial")
@@ -340,6 +348,9 @@ def main():
     if args.gpt_disk_bytes is not None and (args.host_data_disk is None
             or not 0 < args.gpt_disk_bytes < 2**63 or args.gpt_disk_bytes % (args.gpt_sector_size or 4096)):
         parser.error("--gpt-disk-bytes requires integrated Host data and a sector-aligned byte size")
+    if args.immutable_output is not None and (args.host_data_disk is None or args.immutable_output == args.output
+            or args.immutable_output.parent != args.output.parent or args.immutable_output.exists()):
+        parser.error("--immutable-output requires integrated Host data and a new path alongside the disk output")
     if (args.boot_trial is not None or args.boot_trial_candidate is not None) and args.gpt_slot is None:
         parser.error("a boot trial requires a GPT slot")
     if args.boot_trial_candidate is not None and args.restore_authorization is not None:

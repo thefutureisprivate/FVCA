@@ -61,6 +61,33 @@ def verify_readback(image, types, ids, sources, sector_size):
     return sector, parts
 
 
+def write_layout(work, name, args, uki, sources, ids, *, image_size=None):
+    types = PARTITIONS | (DATA_PARTITION if "host_data" in sources else {})
+    logical_sector = args.gpt_sector_size or 4096
+    definitions = work / f"{name}.repart.d"
+    definitions.mkdir()
+    for index, (partition, image) in enumerate(sources.items()):
+        size = image.stat().st_size
+        if size == 0 or size % 4096:
+            raise ValueError(f"Hypervisor slot source {partition} is not 4 KiB aligned")
+        (definitions / f"{index:02}.conf").write_text(
+            f"[Partition]\nType={types[partition]}\nUUID={ids[partition]}\nLabel=fvca-{partition}\n"
+            f"SizeMinBytes={size}\nSizeMaxBytes={size}\nCopyBlocks={image}\n", encoding="utf-8"
+        )
+    disk = work / f"{name}.raw"
+    run("systemd-repart", "--empty=create", "--offline=yes", f"--size={image_size or 'auto'}", "--dry-run=no",
+        f"--sector-size={logical_sector}", f"--seed={args.gpt_slot}", f"--definitions={definitions}", disk)
+    if image_size is not None and image_size != disk.stat().st_size:
+        raise ValueError("the integrated image does not match the requested disk capacity")
+    sector, parts = verify_readback(disk, types, ids, sources, logical_sector)
+    loader = work / f"{name}.efi"
+    run("mcopy", "-i", f"{disk}@@{parts['esp']['start'] * sector}", BOOT_EFI, loader)
+    if loader.read_bytes() != uki.read_bytes():
+        raise ValueError("installed ESP has a different UKI")
+    print(f"FVCA Hypervisor GPT slot verified ESP {ids['esp']}")
+    return disk
+
+
 def pack(args, work, ids, cmdline, uname, composition, pcr_options, *, data=None):
     uki = build_uki(args, work, command_line(cmdline, ids), uname, composition, pcr_options)
     run("sbverify", "--cert", args.boot_certificate, uki)
@@ -83,34 +110,14 @@ def pack(args, work, ids, cmdline, uname, composition, pcr_options, *, data=None
         "runtime": work / "runtime/root", "runtime_verity": work / "runtime/verity",
         "guest": work / "guest/root", "guest_verity": work / "guest/verity",
     }
-    types = PARTITIONS
+    immutable = None
+    if args.immutable_output is not None:
+        immutable = write_layout(work, "immutable-slot", args, uki, sources, ids)
     if data is not None:
         identifier, payload = data
         if identifier in ids.values():
             raise ValueError("the Host data UUID collides with an immutable slot partition")
-        types = PARTITIONS | DATA_PARTITION
         ids = ids | {"host_data": identifier}
         sources["host_data"] = payload
-    definitions = work / "slot.repart.d"
-    definitions.mkdir()
-    for index, (name, image) in enumerate(sources.items()):
-        size = image.stat().st_size
-        if size == 0 or size % 4096:
-            raise ValueError(f"Hypervisor slot source {name} is not 4 KiB aligned")
-        (definitions / f"{index:02}.conf").write_text(
-            f"[Partition]\nType={types[name]}\nUUID={ids[name]}\nLabel=fvca-{name}\n"
-            f"SizeMinBytes={size}\nSizeMaxBytes={size}\nCopyBlocks={image}\n", encoding="utf-8"
-        )
-
-    disk = work / "hypervisor-slot.raw"
-    image_size = args.gpt_disk_bytes or "auto"
-    run("systemd-repart", "--empty=create", "--offline=yes", f"--size={image_size}", "--dry-run=no",
-        f"--sector-size={logical_sector}", f"--seed={args.gpt_slot}", f"--definitions={definitions}", disk)
-    if args.gpt_disk_bytes is not None and args.gpt_disk_bytes != disk.stat().st_size:
-        raise ValueError("the integrated image does not match the requested disk capacity")
-    sector, parts = verify_readback(disk, types, ids, sources, logical_sector)
-    run("mcopy", "-i", f"{disk}@@{parts['esp']['start'] * sector}", BOOT_EFI, work / "installed.efi")
-    if (work / "installed.efi").read_bytes() != uki.read_bytes():
-        raise ValueError("installed ESP has a different UKI")
-    print(f"FVCA Hypervisor GPT slot verified ESP {ids['esp']}")
-    return disk
+    disk = write_layout(work, "hypervisor-slot", args, uki, sources, ids, image_size=args.gpt_disk_bytes)
+    return disk, immutable

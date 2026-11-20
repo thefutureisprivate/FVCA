@@ -81,7 +81,7 @@ fn manifest(directory: &Path) -> Result<(Vec<u8>, Manifest, Identity)> {
     Ok((bytes, release, identity))
 }
 
-fn verify(directory: &Path, role: Role, epoch: u64, digest: &str) -> Result<()> {
+pub(crate) fn verify(directory: &Path, role: Role, epoch: u64, digest: &str) -> Result<()> {
     let (bytes, release, identity) = manifest(directory)?;
     if identity.epoch != epoch || identity.manifest_sha256 != digest {
         return Err(invalid("installed release does not match the approved slot identity").into());

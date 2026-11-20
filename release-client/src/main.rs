@@ -1,12 +1,13 @@
 mod depot;
+mod gpt;
 mod install;
 mod state;
 
 use std::collections::HashSet;
 use std::error::Error;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use futures_util::{TryStreamExt, pin_mut};
@@ -23,6 +24,11 @@ type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 const MANIFEST_BYTES: u64 = 64 * 1024;
 const MANIFEST: &str = "release.json";
 const QUALIFICATION: &str = "qualification.json";
+
+enum Operation<'a> {
+    FileBacked(install::Operation<'a>),
+    HypervisorGpt(&'a Path),
+}
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -378,6 +384,7 @@ async fn stage(repo: &Repository, selection: &Selection, parent: &Path) -> Resul
     } else {
         let temporary = tempfile::Builder::new()
             .prefix(".stage-")
+            .permissions(Permissions::from_mode(0o700))
             .tempdir_in(parent)?;
         let mut file = output_file(&temporary.path().join(MANIFEST))?;
         file.write_all(&manifest)?;
@@ -409,7 +416,7 @@ async fn intake(
     depot: &Path,
     state_dir: &Path,
     selection_path: &Path,
-    operation: Option<install::Operation<'_>>,
+    operation: Option<Operation<'_>>,
 ) -> Result<()> {
     let selection: Selection =
         serde_json::from_slice(&state::read(selection_path, MANIFEST_BYTES)?)?;
@@ -423,8 +430,14 @@ async fn intake(
     let depot = Depot::open(depot, selection.max_release_bytes)?;
     let repo = load_repository(depot, state_dir, root, scratch.path()).await?;
     let location = stage(&repo, &selection, &staging).await?;
-    if let Some(operation) = operation {
-        return install::execute(operation, &selection, state_dir);
+    match operation {
+        Some(Operation::FileBacked(operation)) => {
+            return install::execute(operation, &selection, state_dir);
+        }
+        Some(Operation::HypervisorGpt(plan)) => {
+            return gpt::install(plan, &selection, &location, state_dir);
+        }
+        None => (),
     }
     println!(
         "FVCA_RELEASE_STAGED {} {} {}",
@@ -440,16 +453,27 @@ fn run() -> Result<()> {
         .skip(1)
         .map(PathBuf::from)
         .collect::<Vec<_>>();
+    if let [option, disk, sector] = operands.as_slice()
+        && option.as_os_str() == "--inspect-hypervisor-gpt"
+    {
+        return gpt::inspect(disk, sector.to_str().ok_or_else(usage)?.parse()?);
+    }
     let [root, depot, state, selection, options @ ..] = operands.as_slice() else {
         return Err(usage().into());
     };
     let operation = match options {
         [] => None,
         [option, slots] if option.as_os_str() == "--initialize-slots" => {
-            Some(install::Operation::Initialize(slots))
+            Some(Operation::FileBacked(install::Operation::Initialize(slots)))
         }
         [option, slots, active] if option.as_os_str() == "--prepare-inactive" => {
-            Some(install::Operation::Prepare { slots, active })
+            Some(Operation::FileBacked(install::Operation::Prepare {
+                slots,
+                active,
+            }))
+        }
+        [option, plan] if option.as_os_str() == "--write-inactive-gpt" => {
+            Some(Operation::HypervisorGpt(plan))
         }
         _ => return Err(usage().into()),
     };
@@ -462,7 +486,7 @@ fn run() -> Result<()> {
 
 fn usage() -> io::Error {
     invalid(
-        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD]",
+        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE",
     )
 }
 

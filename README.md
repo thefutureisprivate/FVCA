@@ -126,9 +126,36 @@ release-client/target/release/fvca-release-client trusted-root.json depot.json i
 
 The coordinator verifies the active tuple, then invokes systemd-sysupdate 262.1 with a private alternate root and an exact source digest from the TUF intake. It verifies the installed manifest and every member again, flushes the tuple, and publishes the inactive slot with an atomic directory rename. An identical retry verifies the existing inactive tuple. The active slot remains the recovery path throughout preparation. A forced stop before publication may leave a private `.prepare-*` directory, which can be removed after the installer exits.
 
-This file-backed preparation works with the current Hypervisor and Service Guest bundles in the lab. The physical EFI/GPT slot installer, automated boot selection and health commit, and independently protected epoch remain separate release gates. [systemd-sysupdate transfer definitions](https://www.freedesktop.org/software/systemd/man/latest/sysupdate.d.html)
+This file-backed preparation works with the current Hypervisor and Service Guest bundles in the lab. The offline GPT installer below handles an already provisioned Hypervisor disk. Protected epoch advancement remains a release gate. [systemd-sysupdate transfer definitions](https://www.freedesktop.org/software/systemd/man/latest/sysupdate.d.html)
 
 `tests/check-release-slots.py` uses the same Python TUF environment. Supply two matched `--active-boot`/`--active-guest` and `--next-boot`/`--next-guest` pairs, their `--vm-runtime`, the `--client`, and a new Btrfs `--output` directory on the images' filesystem. The fixture verifies both complete slots after a transfer interruption and after retrying and replacing the inactive tuple.
+
+### Install a Hypervisor release into an inactive GPT slot
+
+Run the release client from an offline maintenance system with both NVMe namespaces unused. Keep the verified recovery slot selected in firmware during installation. The client uses `sfdisk`, `mcopy`, and `sbverify` on the maintenance system. On Fedora, `glibc-gconv-extra` supplies the FAT code-page support that `mcopy` needs. Stage the recovery release into the same private state directory before requesting the update. Use an immutable seven-partition `boot.raw` for each TUF release and keep its separate runtime and Guest bundle targets. The composer can emit this exact reference at initial provisioning with `--immutable-output` alongside the combined disk.
+
+Use `fvca-release-client --inspect-hypervisor-gpt DISK 4096` to obtain each disk record from the reviewed provisioned layout. Record absolute NVMe device paths or private disposable disk-image paths. In this example the active release is epoch 17 and the selected candidate has a higher epoch. Use the Secure Boot certificate approved for the two UKIs.
+
+```json
+{
+  "schema": "fvca-hypervisor-gpt-install-v1",
+  "sector_size": 4096,
+  "boot_certificate": "/etc/fvca/secure-boot.pem",
+  "active_epoch": 17,
+  "active_manifest_sha256": "RECOVERY_MANIFEST_SHA256",
+  "active": {"path": "/dev/disk/by-id/ACTIVE_NVME", "gpt_sha256": "ACTIVE_GPT_SHA256"},
+  "inactive": {"path": "/dev/disk/by-id/INACTIVE_NVME", "gpt_sha256": "INACTIVE_GPT_SHA256"}
+}
+```
+
+```sh
+release-client/target/release/fvca-release-client trusted-root.json depot.json inbox next-release.json \
+  --write-inactive-gpt reviewed-disks.json
+```
+
+The candidate must name the inactive slot's existing UUIDs and fit its allocated partitions. The ESP must match its allocated size. The client checks that the packed runtime and Guest bytes agree with the TUF release members. With exclusive access to both disks, it verifies their reviewed GPT fingerprints and reads back the active recovery EFI loader and payloads before writing. On the inactive disk it clears and flushes the ESP, writes and verifies the six payloads, then installs and verifies the approved ESP. It clears unused capacity inside the payload partitions. Both GPTs and both encrypted Host data partitions are preserved. A repeat verifies an already installed image and can resume an interrupted installation. Boot trial and promotion use their separate authorizations. [Linux exclusive block-device opens](https://man7.org/linux/man-pages/man2/open.2.html) · [util-linux GPT verification](https://github.com/util-linux/util-linux/blob/master/disk-utils/sfdisk.8.adoc)
+
+`tests/check-hypervisor-gpt-install.py` uses the TUF fixture environment to test the same operation on copies of two provisioned disks. Its inputs include both immutable release images, their runtime and Guest targets, and a different runtime for the mixed-release refusal check. Use an inactive image with a payload partition larger than the corresponding candidate partition to exercise tail clearing.
 
 ## Hypervisor runtime candidate
 
@@ -190,9 +217,9 @@ The test attaches the boot images as virtual NVMe devices with the selected logi
 
 Prepare two authenticated LUKS2 members of the same Btrfs RAID1 pool and provide `cryptsetup` on the build workstation. For an isolated test, run `tests/storage-lab.sh --authenticated NEW_LAB GUEST_DATA_RAW` with the approved Guest data image. When composing each GPT slot, add `--host-data-disk` with that slot's prepared member image and use the same signed `--storage` policy for both UKIs. Give each slot a distinct UUID. The member input must be a quiesced regular image with one GPT LUKS2 partition. The input defaults to 512-byte GPT sectors, and `--host-data-sector-size 4096` selects a 4Kn input. The output defaults to 4Kn independently of the input geometry. Pass `--gpt-disk-bytes` with the target's measured capacity to place the backup GPT at the correct final sector. The image keeps the partition sizes of its inputs and leaves unused capacity unallocated.
 
-The assembler checks the member's GPT and LUKS2 UUIDs, authenticated LUKS2 metadata, and selected TPM token when applicable. It appends the exact encrypted bytes alongside the seven immutable partitions and verifies all eight by readback before publishing a private image. The same slot test detects this layout and boots with just the two NVMe images. It checks Guest readiness with each boot slot selected and refuses ordinary startup when a required mirror member is absent or duplicated.
+The assembler checks the member's GPT and LUKS2 UUIDs, authenticated LUKS2 metadata, and selected TPM token when applicable. It appends the exact encrypted bytes alongside the seven immutable partitions and verifies all eight by readback before publishing a private image. With `--immutable-output` it saves the same seven verified partitions in a separate file for the TUF release. The slot test detects the integrated layout and boots with just the two NVMe images. It checks Guest readiness with each boot slot selected and refuses ordinary startup when a required mirror member is absent or duplicated.
 
-Keep the combined images private. They contain the encrypted data from the provisioning inputs. Use them for initial provisioning or authorized recovery. Updates to the installed immutable partitions and qualification on the target physical NVMes remain separate release gates. [systemd GPT partition definitions](https://www.freedesktop.org/software/systemd/man/latest/repart.d.html)
+Keep the combined images private. They contain the encrypted data from the provisioning inputs. Use them for initial provisioning or authorized recovery. Use the separately staged immutable release for offline updates. Qualification on the target physical NVMes remains a release gate. [systemd GPT partition definitions](https://www.freedesktop.org/software/systemd/man/latest/repart.d.html)
 
 ### Exercise a one-shot Hypervisor trial and record health
 
