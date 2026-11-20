@@ -13,8 +13,14 @@ use tough::{IntoVec, Repository, TargetName};
 
 use crate::depot::{CONFIG_BYTES, Depot, METADATA_BYTES};
 use crate::{
-    MANIFEST_BYTES, Result, Role, Selection, invalid, load_repository, stage, state, valid_digest,
+    MANIFEST_BYTES, Result, Role, Selection, gpt, install::Slot, invalid, load_repository, stage,
+    state, valid_digest,
 };
+
+pub enum Operation {
+    Discover,
+    PrepareGpt,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +42,7 @@ struct Policy {
     #[serde(default)]
     maintenance: Window,
     hold: Option<Hold>,
+    hypervisor_gpt: Option<gpt::StandingSite>,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +96,8 @@ struct Hold {
 #[serde(deny_unknown_fields)]
 struct Active {
     role: Role,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slot: Option<Slot>,
     sequence: u64,
     epoch: u64,
     manifest_sha256: String,
@@ -151,6 +160,7 @@ struct Status<'a> {
     channel_sequence: Option<u64>,
     candidate: Option<&'a Candidate>,
     staged: Option<String>,
+    prepared_inactive_slot: Option<Slot>,
     hold_until: Option<i64>,
     security_deadline_missed: bool,
 }
@@ -173,6 +183,7 @@ impl Policy {
             || !valid_digest(&self.compatibility_sha256)
             || !valid_digest(&self.qualification_key_ed25519)
             || self.minimum_epoch == 0
+            || (self.role != Role::Hypervisor && self.hypervisor_gpt.is_some())
             || !(1..u64::MAX).contains(&self.max_release_bytes)
             || self.max_staged_bytes < self.max_release_bytes
             || self.hold.as_ref().is_some_and(|hold| {
@@ -351,6 +362,7 @@ pub async fn discover(
     standing_policy: &Path,
     signature: &Path,
     owner_key: &Path,
+    operation: Operation,
 ) -> Result<()> {
     let _lock = state::lock(directory)?;
     let owner = state::read(owner_key, 32)?;
@@ -385,6 +397,14 @@ pub async fn discover(
     {
         return Err(invalid("active release is outside standing OS update policy").into());
     }
+    let installation = match operation {
+        Operation::Discover => None,
+        Operation::PrepareGpt => Some(
+            policy.hypervisor_gpt.as_ref().zip(active.slot).ok_or_else(|| {
+                invalid("offline preparation requires a signed Hypervisor disk policy and the active slot")
+            })?,
+        ),
+    };
     checkpoint(
         directory,
         "os-policy-checkpoint.json",
@@ -401,6 +421,7 @@ pub async fn discover(
         channel_sequence: None,
         candidate: None,
         staged: None,
+        prepared_inactive_slot: None,
         hold_until: None,
         security_deadline_missed: false,
     };
@@ -454,6 +475,15 @@ pub async fn discover(
     status.fresh_until = Some(expires);
     status.channel_sequence = Some(head.sequence);
     status.candidate = head.release.as_ref();
+    let require_fresh = |now: Timestamp| {
+        if (refreshed.as_second()..expires).contains(&now.as_second()) {
+            Ok(())
+        } else {
+            Err(invalid(
+                "OS update authorization expired or the clock regressed during discovery",
+            ))
+        }
+    };
     status.disposition = match &head.release {
         None => Disposition::NoRelease,
         Some(candidate) if candidate.manifest_sha256 == active.manifest_sha256 => {
@@ -472,22 +502,42 @@ pub async fn discover(
                 manifest_sha256: candidate.manifest_sha256.clone(),
                 max_release_bytes: budget,
             };
-            stage(&repo, &selection, &staging).await?;
+            let staged = stage(&repo, &selection, &staging).await?;
             status.staged = Some(candidate.manifest_sha256.clone());
             let now = Timestamp::now();
-            head.require_scope(&policy, &active, now)?;
-            let (disposition, hold, missed) = eligibility(&policy, candidate, now, zone);
+            require_fresh(now)?;
+            let (disposition, hold, missed) = eligibility(&policy, candidate, now, zone.clone());
+            if let Some((site, slot)) = installation
+                && matches!(disposition, Disposition::Ready)
+            {
+                site.install(
+                    (slot, active.epoch, &active.manifest_sha256),
+                    &selection,
+                    &staged,
+                    directory,
+                    &|| {
+                        let now = Timestamp::now();
+                        require_fresh(now)?;
+                        if !matches!(
+                            eligibility(&policy, candidate, now, zone.clone()).0,
+                            Disposition::Ready
+                        ) {
+                            return Err(invalid(
+                                "Hypervisor release is no longer eligible for offline preparation",
+                            )
+                            .into());
+                        }
+                        Ok(())
+                    },
+                )?;
+                status.prepared_inactive_slot = Some(slot.other());
+            }
             status.hold_until = hold;
             status.security_deadline_missed = missed;
             disposition
         }
     };
-    if !(refreshed.as_second()..expires).contains(&Timestamp::now().as_second()) {
-        return Err(invalid(
-            "OS update authorization expired or the clock regressed during discovery",
-        )
-        .into());
-    }
+    require_fresh(Timestamp::now())?;
     report(directory, &status)
 }
 

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rustix::fs::{self as unix, RenameFlags};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -33,9 +33,9 @@ pub enum Operation<'a> {
     Prepare { slots: &'a Path, active: &'a Path },
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum Slot {
+pub(crate) enum Slot {
     A,
     B,
 }
@@ -48,7 +48,7 @@ impl Slot {
         }
     }
 
-    fn other(self) -> Self {
+    pub(crate) fn other(self) -> Self {
         match self {
             Self::A => Self::B,
             Self::B => Self::A,

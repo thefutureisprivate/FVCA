@@ -167,7 +167,8 @@ def retention_selection(path, backup):
 
 TRIAL_FILE = "hypervisor-trial"
 TRIAL_CANDIDATE_FILE = "hypervisor-trial-candidate"
-TRIAL_SUPPORT = "hypervisor-trial-support-v2"
+TRIAL_SUPPORT = "hypervisor-trial-support-v3"
+TRIAL_ARGUMENT = "fvca.hypervisor_trial"
 EPOCH_FILE = "hypervisor-epoch"
 EPOCH_ARGUMENT = "fvca.hypervisor_epoch"
 PROMOTION_KEY = "hypervisor-promotion-key"
@@ -192,7 +193,7 @@ def promotion_selection(args):
 
 def trial_selection(path, ids, guest, *, candidate):
     if path is None:
-        return ()
+        return (), ()
     uuid = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
     policy = path.read_bytes()
     head = "FVCA-HYPERVISOR-TRIAL-CANDIDATE-1" if candidate else "FVCA-HYPERVISOR-TRIAL-2"
@@ -200,21 +201,21 @@ def trial_selection(path, ids, guest, *, candidate):
         r"candidate_esp_sha256=[0-9a-f]{64}\ncandidate_esp_bytes=([1-9][0-9]{0,9})\n"
         r"candidate_core=[0-9a-f]{64}\ncandidate_runtime=[0-9a-f]{64}\nguest_bundle=([0-9a-f]{64})\n"
     )
-    selected = re.fullmatch(rf"{head}\ntransaction={uuid}\n"
+    selected = re.fullmatch(rf"{head}\ntransaction=({uuid})\n"
                             rf"stable=([0-9a-f]{{4}}),({uuid})\ncandidate=([0-9a-f]{{4}}),({uuid})\n{tail}",
                             policy.decode("ascii"))
     if selected is None or ids is None:
         raise ValueError("invalid Hypervisor boot trial authorization")
-    stable_id, stable, candidate_id, target, *approval = selected.groups()
+    transaction, stable_id, stable, candidate_id, target, *approval = selected.groups()
     if (target if candidate else stable) != ids["esp"] or stable == target or stable_id == candidate_id:
         raise ValueError("trial requires distinct boot entries and the ESP of the slot being composed")
     if candidate:
-        return ((TRIAL_CANDIDATE_FILE, policy),)
+        return ((TRIAL_CANDIDATE_FILE, policy),), (f"{TRIAL_ARGUMENT}={transaction}",)
     size, expected_guest = approval
     size = int(size)
     if not 4096 <= size <= 4 * 1024**3 or size % 4096 or guest != expected_guest:
         raise ValueError("trial requires a bounded candidate ESP and the selected Guest bundle")
-    return ((TRIAL_FILE, policy),)
+    return ((TRIAL_FILE, policy),), ()
 
 
 def epoch_selection(path, storage, tpm):
@@ -298,18 +299,20 @@ def assemble(args, work):
         extra += slot_files
     backup = backup_selection(args)
     guest, guest_hash = guest_selection(args, work)
+    stable_trial, _ = trial_selection(args.boot_trial, ids, guest_hash, candidate=False)
+    candidate_trial, trial_arguments = trial_selection(args.boot_trial_candidate, ids, guest_hash,
+                                                        candidate=True)
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
         extra=(*extra, *epoch, *guest, *backup, *backup_job_selection(args.backup_job, backup),
                *restore_selection(args.restore_authorization, backup),
                *retention_selection(args.retention_policy, backup),
-               *trial_selection(args.boot_trial, ids, guest_hash, candidate=False),
-               *trial_selection(args.boot_trial_candidate, ids, guest_hash, candidate=True),
+               *stable_trial, *candidate_trial,
                *promotion_selection(args)),
     )
-    if any(arg.partition("=")[0] == EPOCH_ARGUMENT for arg in cmdline.split()):
-        raise ValueError("shared core already configures a Hypervisor epoch")
-    cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments))
+    if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT) for arg in cmdline.split()):
+        raise ValueError("shared core already configures a Hypervisor epoch or trial")
+    cmdline = " ".join((cmdline, *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments))
     immutable = None
     if ids is None:
         disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)

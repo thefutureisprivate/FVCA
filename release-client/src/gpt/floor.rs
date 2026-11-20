@@ -297,6 +297,8 @@ pub fn verify_floor(
             &ReleaseEpoch {
                 number: slot.epoch,
                 policy: &approved.epoch_policy_sha256,
+                auto_pcr_key: None,
+                require_trial: false,
             },
         )?;
     }
@@ -320,4 +322,10 @@ pub fn verify_floor(
         approved.previous_floor, approved.next_floor, approval_digest,
     );
     Ok(())
+}
+
+pub(super) fn read_current(policy: &str) -> Result<u64> {
+    let mut index_policy = [0; 32];
+    hex::decode_to_slice(policy, &mut index_policy)?;
+    Ok(tpm::Tpm::open(&index_policy)?.read()?)
 }

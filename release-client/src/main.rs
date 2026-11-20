@@ -485,11 +485,27 @@ fn run() -> Result<()> {
     {
         return gpt::inspect(disk, sector.to_str().ok_or_else(usage)?.parse()?);
     }
-    if let [option, root, depot, state, policy, signature, owner] = operands.as_slice()
+    if let [
+        option,
+        root,
+        depot,
+        state,
+        policy,
+        signature,
+        owner,
+        options @ ..,
+    ] = operands.as_slice()
         && option.as_os_str() == "--discover-os-release"
     {
+        let operation = match options {
+            [] => channel::Operation::Discover,
+            [flag] if flag.as_os_str() == "--prepare-inactive-gpt" => {
+                channel::Operation::PrepareGpt
+            }
+            _ => return Err(usage().into()),
+        };
         return runtime()?.block_on(channel::discover(
-            root, depot, state, policy, signature, owner,
+            root, depot, state, policy, signature, owner, operation,
         ));
     }
     if let [option, state, approval, signature, authority, certificate] = operands.as_slice()
@@ -549,7 +565,7 @@ fn runtime() -> io::Result<tokio::runtime::Runtime> {
 
 fn usage() -> io::Error {
     invalid(
-        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --discover-os-release TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE STANDING_POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE\n       fvca-release-client --verify-hypervisor-floor-approval PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE\n       fvca-release-client --advance-hypervisor-floor PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE INCREMENT_TPM_PUBLIC POLICY_REFERENCE",
+        "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --discover-os-release TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE STANDING_POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY [--prepare-inactive-gpt]\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE\n       fvca-release-client --verify-hypervisor-floor-approval PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE\n       fvca-release-client --advance-hypervisor-floor PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE INCREMENT_TPM_PUBLIC POLICY_REFERENCE",
     )
 }
 

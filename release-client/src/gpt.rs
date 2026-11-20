@@ -6,7 +6,7 @@ mod layout;
 pub use floor::verify_floor;
 
 use std::collections::HashSet;
-use std::fs::{File, Permissions};
+use std::fs::{self, File, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -43,12 +43,30 @@ const DDI: [&str; 3] = [SLOT[1], SLOT[2], "41092b05-9fc8-4523-994f-2def0408b176"
 const CHUNK: usize = 1024 * 1024;
 const MAX_ESP: u64 = 4 * 1024 * 1024 * 1024;
 const EPOCH_ARGUMENT: &str = "fvca.hypervisor_epoch";
+const TRIAL_ARGUMENT: &str = "fvca.hypervisor_trial";
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReviewedDisk {
     path: PathBuf,
     gpt_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StandingSite {
+    sector_size: u64,
+    boot_certificate: PathBuf,
+    boot_certificate_sha256: String,
+    epoch_policy_sha256: String,
+    storage_pcr_key_fingerprint: String,
+    a: ReviewedDisk,
+    b: ReviewedDisk,
+}
+
+struct StandingCheck<'a> {
+    site: &'a StandingSite,
+    authorize: &'a dyn Fn() -> Result<()>,
 }
 
 #[derive(Deserialize)]
@@ -73,6 +91,25 @@ struct Artifact {
 struct ReleaseEpoch<'a> {
     number: u64,
     policy: &'a str,
+    auto_pcr_key: Option<&'a str>,
+    require_trial: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoragePcrPolicy {
+    sha256: [StoragePcrSignature; 1],
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoragePcrSignature {
+    pcrs: [u8; 1],
+    pkfp: String,
+    #[serde(rename = "ref")]
+    purpose: String,
+    pol: String,
+    sig: String,
 }
 
 fn digest(file: &File, extent: Extent) -> io::Result<[u8; 32]> {
@@ -132,16 +169,16 @@ fn tool(program: &str, args: &[&Path]) -> Result<()> {
 }
 
 fn verify_epoch(efi: &Path, expected: &ReleaseEpoch<'_>) -> Result<()> {
-    let result = Command::new("/usr/bin/ukify")
-        .env_clear()
-        .args([
-            "--config=/dev/null",
-            "--json=short",
-            "--section=.cmdline:text",
-            "inspect",
-        ])
-        .arg(efi)
-        .output()?;
+    let mut command = Command::new("/usr/bin/ukify");
+    command.env_clear().args([
+        "--config=/dev/null",
+        "--json=short",
+        "--section=.cmdline:text",
+    ]);
+    if expected.auto_pcr_key.is_some() {
+        command.arg("--section=.pcrsig:text");
+    }
+    let result = command.arg("inspect").arg(efi).output()?;
     if !result.status.success() {
         return Err(invalid("ukify could not inspect the signed Hypervisor command line").into());
     }
@@ -174,6 +211,42 @@ fn verify_epoch(efi: &Path, expected: &ReleaseEpoch<'_>) -> Result<()> {
             "signed Hypervisor UKI TPM policy differs from the reviewed enrollment",
         )
         .into());
+    }
+    if let Some(fingerprint) = expected.auto_pcr_key {
+        verify_auto_profile(&metadata, fingerprint)?;
+    }
+    if expected.require_trial {
+        let mut markers = cmdline
+            .split_ascii_whitespace()
+            .filter(|arg| arg.split('=').next() == Some(TRIAL_ARGUMENT));
+        let transaction = markers
+            .next()
+            .and_then(|arg| arg.split_once('=').map(|(_, id)| id));
+        if !transaction.is_some_and(layout::valid_uuid) || markers.next().is_some() {
+            return Err(invalid(
+                "inactive Hypervisor UKI requires a signed candidate trial marker",
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn verify_auto_profile(uki: &serde_json::Value, fingerprint: &str) -> Result<()> {
+    let invalid_policy = || invalid("Hypervisor UKI lacks the enrolled PIN-less PCR authorization");
+    let raw = uki[".pcrsig"]["text"].as_str().ok_or_else(invalid_policy)?;
+    if raw.len() > 16 * 1024 {
+        return Err(invalid_policy().into());
+    }
+    let policy: StoragePcrPolicy = serde_json::from_str(raw).map_err(|_| invalid_policy())?;
+    let [bank] = policy.sha256;
+    if bank.pcrs != [11]
+        || bank.pkfp != fingerprint
+        || bank.purpose != "fvca-host-storage-auto-v1"
+        || !valid_digest(&bank.pol)
+        || bank.sig.is_empty()
+    {
+        return Err(invalid_policy().into());
     }
     Ok(())
 }
@@ -365,6 +438,69 @@ fn require_distinct_disks(first: (&Disk, &Layout<8>), second: (&Disk, &Layout<8>
 
 pub fn install(plan: &Path, selected: &Selection, incoming: &Path, state_dir: &Path) -> Result<()> {
     let plan: Review = serde_json::from_slice(&state::read(plan, MANIFEST_BYTES)?)?;
+    install_reviewed(
+        &plan,
+        selected,
+        incoming,
+        state_dir,
+        None,
+        &mut io::stdout(),
+    )
+}
+
+impl StandingSite {
+    pub(crate) fn install(
+        &self,
+        active: (install::Slot, u64, &str),
+        selected: &Selection,
+        incoming: &Path,
+        state_dir: &Path,
+        authorize: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        let (stable, recovery) = match active.0 {
+            install::Slot::A => (&self.a, &self.b),
+            install::Slot::B => (&self.b, &self.a),
+        };
+        if !valid_digest(&self.boot_certificate_sha256)
+            || !valid_digest(&self.storage_pcr_key_fingerprint)
+        {
+            return Err(invalid(
+                "standing installation requires pinned boot and storage PCR authorities",
+            )
+            .into());
+        }
+        let plan = Review {
+            schema: "fvca-hypervisor-gpt-install-v2".into(),
+            sector_size: self.sector_size,
+            boot_certificate: self.boot_certificate.clone(),
+            epoch_policy_sha256: self.epoch_policy_sha256.clone(),
+            active_epoch: active.1,
+            active_manifest_sha256: active.2.into(),
+            active: stable.clone(),
+            inactive: recovery.clone(),
+        };
+        install_reviewed(
+            &plan,
+            selected,
+            incoming,
+            state_dir,
+            Some(StandingCheck {
+                site: self,
+                authorize,
+            }),
+            &mut io::stderr(),
+        )
+    }
+}
+
+fn install_reviewed(
+    plan: &Review,
+    selected: &Selection,
+    incoming: &Path,
+    state_dir: &Path,
+    standing: Option<StandingCheck<'_>>,
+    events: &mut impl Write,
+) -> Result<()> {
     check_sector(plan.sector_size)?;
     if selected.role != Role::Hypervisor
         || plan.schema != "fvca-hypervisor-gpt-install-v2"
@@ -390,18 +526,51 @@ pub fn install(plan: &Path, selected: &Selection, incoming: &Path, state_dir: &P
     )?;
     let stable = Artifact::open(&recovery, sector)?;
     let candidate = Artifact::open(incoming, sector)?;
-    let cert = state::open_regular(&plan.boot_certificate)?;
     let scratch = tempfile::Builder::new()
         .prefix(".gpt-")
         .permissions(Permissions::from_mode(0o700))
         .tempdir_in(state_dir)?;
+    let cert = match &standing {
+        None => state::open_regular(&plan.boot_certificate)?,
+        Some(standing) => {
+            let bytes = state::read(&plan.boot_certificate, MANIFEST_BYTES)?;
+            if hex::encode(Sha256::digest(&bytes)) != standing.site.boot_certificate_sha256 {
+                return Err(invalid(
+                    "Secure Boot certificate differs from standing installation policy",
+                )
+                .into());
+            }
+            let certificate = scratch.path().join("secure-boot.pem");
+            fs::write(&certificate, bytes)?;
+            state::open_regular(&certificate)?
+        }
+    };
+    let authorize = || -> Result<()> {
+        if let Some(standing) = &standing {
+            let current = floor::read_current(&plan.epoch_policy_sha256)?;
+            if current == 0 || plan.active_epoch < current || selected.epoch < current {
+                return Err(
+                    invalid("installed recovery or candidate is below the live TPM floor").into(),
+                );
+            }
+            (standing.authorize)()?;
+        }
+        Ok(())
+    };
+    let auto_pcr_key = standing
+        .as_ref()
+        .map(|authority| authority.site.storage_pcr_key_fingerprint.as_str());
     let active_epoch = ReleaseEpoch {
         number: plan.active_epoch,
         policy: &plan.epoch_policy_sha256,
+        auto_pcr_key,
+        require_trial: false,
     };
     let next_epoch = ReleaseEpoch {
         number: selected.epoch,
         policy: &plan.epoch_policy_sha256,
+        auto_pcr_key,
+        require_trial: standing.is_some(),
     };
     let (active, active_layout) = reviewed(&plan.active, sector, false)?;
     let (inactive, inactive_layout) = reviewed(&plan.inactive, sector, true)?;
@@ -429,6 +598,7 @@ pub fn install(plan: &Path, selected: &Selection, incoming: &Path, state_dir: &P
             break;
         }
     }
+    authorize()?;
     if !already_installed {
         let esp = inactive_layout.regions[0].extent;
         clear(&inactive.file, esp)?;
@@ -436,8 +606,12 @@ pub fn install(plan: &Path, selected: &Selection, incoming: &Path, state_dir: &P
         if !zeroed(&inactive.file, esp)? {
             return Err(invalid("inactive EFI System Partition was not cleared").into());
         }
-        println!("FVCA_HYPERVISOR_ESP_INVALIDATED {}", inactive_layout.id);
-        io::stdout().flush()?;
+        writeln!(
+            events,
+            "FVCA_HYPERVISOR_ESP_INVALIDATED {}",
+            inactive_layout.id
+        )?;
+        events.flush()?;
 
         for index in 1..SLOT.len() {
             candidate.write(&inactive, &inactive_layout, index)?;
@@ -448,6 +622,7 @@ pub fn install(plan: &Path, selected: &Selection, incoming: &Path, state_dir: &P
                 return Err(invalid("inactive payload failed its post-write verification").into());
             }
         }
+        authorize()?;
         let publish = (|| -> io::Result<()> {
             candidate.write(&inactive, &inactive_layout, 0)?;
             flush_for_readback(&inactive.file)?;
@@ -473,9 +648,10 @@ pub fn install(plan: &Path, selected: &Selection, incoming: &Path, state_dir: &P
     } else {
         inactive.file.sync_all()?;
     }
-    println!(
+    writeln!(
+        events,
         "FVCA_HYPERVISOR_SLOT_INSTALLED {} {} {}",
         selected.epoch, inactive_layout.id, selected.manifest_sha256
-    );
+    )?;
     Ok(())
 }

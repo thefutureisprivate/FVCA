@@ -15,6 +15,7 @@ pub const PROMOTION_KEY: &str = "/usr/lib/fvca/hypervisor-promotion-key";
 pub const PROMOTION_LIMIT: usize = 2048;
 const AUTHORIZATION: &str = "/usr/lib/fvca/hypervisor-trial";
 const CANDIDATE: &str = "/usr/lib/fvca/hypervisor-trial-candidate";
+const CANDIDATE_ARGUMENT: &str = "fvca.hypervisor_trial";
 const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 const STARTED: &str = "/run/fvca/boot-trial-started";
 const HOST_DATA: &str = "/run/fvca/host-data";
@@ -549,17 +550,29 @@ fn boot_id() -> io::Result<String> {
 }
 
 pub fn start_candidate(
+    cmdline: &str,
     slot: Option<&crate::hypervisor_slot::Slot>,
     guest: Option<&str>,
     active: &runtime::Activation,
     recovering: bool,
 ) -> io::Result<()> {
+    let mut markers = cmdline
+        .split_ascii_whitespace()
+        .filter(|arg| arg.split('=').next() == Some(CANDIDATE_ARGUMENT));
+    let marker = markers.next();
     let raw = match read(Path::new(CANDIDATE), 1024) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && marker.is_none() => return Ok(()),
         Err(error) => return Err(error),
         Ok(raw) => raw,
     };
     let trial = candidate_selection(std::str::from_utf8(&raw).map_err(io::Error::other)?)?;
+    if markers.next().is_some()
+        || marker.and_then(|arg| arg.split_once('=').map(|(_, id)| id)) != Some(trial.transaction)
+    {
+        return Err(invalid(
+            "Hypervisor trial marker differs from the signed candidate policy",
+        ));
+    }
     let slot = slot.ok_or_else(|| invalid("trial candidate requires its verified GPT slot"))?;
     if recovering
         || slot.esp != trial.candidate.esp

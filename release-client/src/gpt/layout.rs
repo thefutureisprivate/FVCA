@@ -82,7 +82,7 @@ pub(super) fn check_sector(sector: u64) -> io::Result<()> {
     Ok(())
 }
 
-fn valid_uuid(uuid: &str) -> bool {
+pub(super) fn valid_uuid(uuid: &str) -> bool {
     uuid.len() == 36
         && uuid.as_bytes().iter().enumerate().all(|(i, byte)| {
             if matches!(i, 8 | 13 | 18 | 23) {

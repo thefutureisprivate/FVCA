@@ -61,6 +61,7 @@ fn activate() -> io::Result<()> {
         guest_boot::activate_if_selected(!recovering, slot.as_ref().map(|slot| &slot.guest))?;
     let esp = slot.as_ref().map(|slot| slot.esp.as_str());
     hypervisor_trial::start_candidate(
+        &cmdline,
         slot.as_ref(),
         guest.as_deref(),
         &verified_runtime,

@@ -212,6 +212,21 @@ After promoting a higher-epoch release, the same installer can write a separatel
 
 `tests/check-hypervisor-gpt-install.py` uses the TUF fixture environment to test the same operation on copies of two provisioned disks. Supply both immutable release images, their runtime and Guest targets, both epochs, and the enrolled counter policy digest. Use matching epoch values to qualify installation of a distinct recovery release at the running release's epoch. Use a different runtime for the mixed-release refusal check, a signed fixture at the next epoch plus four with a different counter policy, and a fixture composed without an epoch. Use an inactive disk with a payload partition larger than the corresponding candidate partition to exercise tail clearing.
 
+### Prepare the inactive Hypervisor slot under standing policy
+
+Add a `hypervisor_gpt` object to the signed Hypervisor update policy. Set `sector_size`, the absolute `boot_certificate` path, `boot_certificate_sha256` over its exact bytes, and the enrolled `epoch_policy_sha256`. Set `storage_pcr_key_fingerprint` to systemd's `pkfp` for the enrolled PIN-less key on both members. For an RSA key, hash the PKCS#1 DER bytes from `openssl rsa -pubin -RSAPublicKey_out -outform DER -in pcr-public.pem` with SHA-256. Supply the reviewed disk records under `a` and `b` using `--inspect-hypervisor-gpt`. The boot controller includes `"slot": "a"` or `"slot": "b"` in the active release record before handing off to maintenance. This identifies the stable recovery disk and the exact recovery manifest that must already be staged. The signed disk policy can be reused across releases.
+
+Use a trusted offline maintenance environment with both NVMe namespaces unused. Keep intake state and staged releases on storage separate from those two namespaces. Use `--boot-trial-candidate` when composing the candidate. Its signed UKI carries a transaction marker that must match its signed initramfs policy at boot. The candidate still requires a recorded authorized trial or a durable promotion record before it can start its Guest. [ukify inspection](https://www.freedesktop.org/software/systemd/man/262/ukify.html)
+
+```sh
+fvca-release-client --discover-os-release trusted-root.json depot.json intake-state \
+  policy.json policy.sig owner.public --prepare-inactive-gpt
+```
+
+For an eligible release, the installer rechecks both boot signatures, the signed epochs, and the enrolled PIN-less PCR signing identity and purpose. It checks the live TPM floor and current channel eligibility immediately before changing the inactive ESP and again before publishing the replacement ESP. If authorization expires after the first check, an interrupted slot stays unbootable until an eligible retry completes it. The installer writes exclusively to the seven immutable partitions of the inactive disk. The receipt reports `prepared_inactive_slot` after durable readback. Reboot coordination and trial arming still require lifecycle orchestration.
+
+`tests/check-standing-hypervisor-install.py` uses the release client built with `swtpm-test`. Its fixture directory contains PIN-less integrated `installed-a.raw` and `installed-b.raw` images at epochs 1 and 2, their exact immutable `boot-a.raw` and `boot-b.raw` images, common `vm-runtime.raw` and `guest-boot.raw` artifacts, and the enrollment hashes in `epoch-policy-fingerprint` and `storage-pcr-fingerprint`. Supply separate software TPM states at each floor and use an output directory on the same filesystem as the fixture.
+
 ## Hypervisor runtime candidate
 
 The separate mkosi recipe builds `vm-runtime.raw`, a signed EROFS system extension. It contains QEMU, the modular libvirt QEMU, log and lock daemons, the selected OVMF firmware and restic. The VMM is built offline from the pinned upstream QEMU release and the build checks that KVM is its only accelerator. The development appliance uses private UNIX sockets for libvirt and requires SELinux confinement for QEMU processes. The build strips Fedora's automatic service hooks and management commands before signing, records the exact core root hash in the extension and checks the shared package versions. [QEMU release archive and signing key](https://www.qemu.org/download/)
