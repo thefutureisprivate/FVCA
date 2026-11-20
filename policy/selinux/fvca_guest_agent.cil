@@ -1,6 +1,9 @@
 ; Preserve the Fedora agent transition under NoNewPrivileges=yes.
 (allow init_t virt_qemu_ga_t (process2 (nnp_transition)))
 
+; PID 1 masks its control socket inside the confined Guest scrub worker.
+(allow init_t init_var_run_t (sock_file (mounton)))
+
 ; PID 1 checks status permission before returning the authorized poweroff target.
 (allow virt_qemu_ga_t power_unit_file_t (service (status)))
 

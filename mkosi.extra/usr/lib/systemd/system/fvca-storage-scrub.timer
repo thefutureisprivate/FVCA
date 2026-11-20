@@ -1,0 +1,9 @@
+[Unit]
+Description=Check whether the FVCA Btrfs scrub is due
+After=fvca-base-ready.service
+ConditionPathExists=/run/fvca/storage-scrub
+
+[Timer]
+OnBootSec=20min
+OnCalendar=weekly
+RandomizedDelaySec=30min

@@ -1,0 +1,38 @@
+[Unit]
+Description=Scrub the verified FVCA Btrfs data pool
+After=fvca-base-ready.service
+ConditionPathExists=/run/fvca/storage-scrub
+ConditionPathIsMountPoint=|/run/fvca/host-data
+ConditionPathIsMountPoint=|/run/fvca/guest-data
+AssertSecurity=selinux
+
+[Service]
+Type=exec
+ExecStart=/usr/libexec/fvca/storage-scrub
+SELinuxContext=system_u:system_r:fvca_storage_scrub_t:s0
+CapabilityBoundingSet=CAP_SYS_ADMIN
+RuntimeMaxSec=24h
+TimeoutStopSec=30s
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=disconnected
+ProtectSystem=strict
+ReadWritePaths=-/run/fvca/host-data -/run/fvca/guest-data
+InaccessiblePaths=-/run/credentials -/run/dbus -/run/systemd/private -/run/libvirt
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+NoExecPaths=/run /tmp /var
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=~@mount @module @raw-io @reboot @swap
+TasksMax=2
+UMask=0077

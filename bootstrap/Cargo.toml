@@ -17,6 +17,11 @@ fvca-watchdog-boundary = { path = "watchdog-boundary" }
 libvirt = ["dep:fvca-btrfs-boundary", "dep:fvca-libvirt-boundary"]
 backup = []
 promotion = ["dep:fvca-signature-boundary"]
+storage-scrub = ["dep:fvca-btrfs-boundary"]
+
+[[bin]]
+name = "fvca-storage-scrub"
+required-features = ["storage-scrub"]
 
 [[bin]]
 name = "fvca-backup-worker"

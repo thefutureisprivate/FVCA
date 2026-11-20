@@ -106,7 +106,8 @@ def assemble(args, work):
         "usr/lib/fvca/firmware-bus-writer.conf", "usr/share/fvca/firmware-build.txt",
     )):
         raise ValueError("Service Guest core carries the Host firmware facility")
-    verify_initrd(args.initrd, uname, ACTIVATION_FILES, FORBIDDEN, "Service Guest")
+    verify_initrd(args.initrd, uname, (*ACTIVATION_FILES, "usr/lib/fvca/storage-scrub-enrollment-v1"),
+                  FORBIDDEN, "Service Guest")
     runtime_work = work / "runtime"
     runtime_work.mkdir()
     runtime_image = args.runtime

@@ -110,6 +110,11 @@ def composition_archive(work, boot_key, boot_certificate, core_hash, runtime_has
 def prepare_core(args, work):
     prepared = work / "core"
     run("python3", TOOLS / "verify-base.py", args.core, args.boot_certificate, "--extract-root", prepared)
+    for path in ("usr/libexec/fvca/storage-scrub", "usr/lib/systemd/system/fvca-storage-scrub.service",
+                 "usr/lib/systemd/system/fvca-storage-scrub.timer"):
+        component = prepared / "root" / path
+        if component.is_symlink() or not component.is_file():
+            raise ValueError(f"the verified core lacks Btrfs scrub support at {path}")
     for path in KERNEL_SERVICE_POLICY:
         policy = prepared / "root" / path
         if policy.is_symlink() or not policy.is_file() or policy.read_bytes() != (

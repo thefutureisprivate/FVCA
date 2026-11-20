@@ -1,0 +1,14 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+build_dir=$(mktemp -d)
+trap 'rm -rf "$build_dir"' EXIT
+export CARGO_HOME="$build_dir/cargo"
+export CARGO_TARGET_DIR="$build_dir/target"
+export RUSTFLAGS="-Dwarnings"
+
+target=x86_64-unknown-linux-gnu
+manifest="$SRCDIR/bootstrap/Cargo.toml"
+cargo build --frozen --release --target "$target" --manifest-path "$manifest" --features storage-scrub --bin fvca-storage-scrub
+source="$CARGO_TARGET_DIR/$target/release/fvca-storage-scrub"
+install -Dm755 "$source" "$DESTDIR/usr/libexec/fvca/storage-scrub"

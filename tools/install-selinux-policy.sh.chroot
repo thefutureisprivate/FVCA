@@ -28,6 +28,7 @@ semodule -n -X 400 -i "$work/systemd.cil" \
     -i "$work/virt.cil" \
     -i "$SRCDIR/policy/selinux/fvca_initrd.cil" \
     -i "$SRCDIR/policy/selinux/fvca_libvirt.cil" \
+    -i "$SRCDIR/policy/selinux/fvca_storage_scrub.cil" \
     -i "$SRCDIR/policy/selinux/fvca_tpm_event_log.cil"
 if [[ "${FVCA_HYPERVISOR_STORAGE:-}" == yes ]]; then
     semodule -n -X 400 -i "$SRCDIR/policy/selinux/fvca_storage.cil" \

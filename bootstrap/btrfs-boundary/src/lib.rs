@@ -22,9 +22,11 @@ const SPACE_INFO: c_ulong = 0xc010_9414;
 const FS_INFO: c_ulong = 0x8400_941f;
 const DEV_INFO: c_ulong = 0xd000_941e;
 const GET_DEV_STATS: c_ulong = 0xc408_9434;
+const SCRUB: c_ulong = 0xc400_941b;
 const READ_ONLY: u64 = 1 << 1;
 const ROOT_READ_ONLY: u64 = 1;
 const RAID1: u64 = 1 << 4;
+const DUP: u64 = 1 << 5;
 const SPACE_GLOBAL_RESERVE: u64 = 1 << 49;
 const MIB: u64 = 1024 * 1024;
 
@@ -100,6 +102,16 @@ struct DevStats {
     reserved: [u64; 121],
 }
 
+#[repr(C)]
+struct ScrubArgs {
+    id: u64,
+    start: u64,
+    end: u64,
+    flags: u64,
+    progress: [u64; 15],
+    reserved: [u64; 109],
+}
+
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 struct Space {
@@ -121,6 +133,7 @@ const _: () = assert!(size_of::<SubvolumeInfo>() == 504);
 const _: () = assert!(size_of::<FsInfo>() == 1024);
 const _: () = assert!(size_of::<DevInfo>() == 4096);
 const _: () = assert!(size_of::<DevStats>() == 1032);
+const _: () = assert!(size_of::<ScrubArgs>() == 1024);
 
 unsafe extern "C" {
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
@@ -223,20 +236,20 @@ pub fn place_subvolume(old_dir: &File, old_name: &CStr, new_dir: &File, new_name
     Ok(())
 }
 
-fn filesystem(pool: &File) -> io::Result<FsInfo> {
+fn filesystem(pool: &File, members: u64) -> io::Result<FsInfo> {
     let mut info = FsInfo { max_id: 0, num_devices: 0, uuid: [0; 16], other: [0; 124] };
     // The fixed-size result layouts are from the Linux Btrfs UAPI.
     if unsafe { ioctl(pool.as_raw_fd(), FS_INFO, &mut info as *mut FsInfo) } < 0 {
         return Err(io::Error::last_os_error());
     }
-    if info.uuid == [0; 16] || info.num_devices != 2 {
-        return Err(io::Error::other("the capture pool requires two Btrfs mirror members"));
+    if info.uuid == [0; 16] || info.num_devices != members {
+        return Err(io::Error::other("unexpected Btrfs filesystem or device count"));
     }
     Ok(info)
 }
 
 pub fn filesystem_uuid(pool: &File) -> io::Result<String> {
-    Ok(uuid(filesystem(pool)?.uuid))
+    Ok(uuid(filesystem(pool, 2)?.uuid))
 }
 
 pub struct Headroom {
@@ -257,12 +270,13 @@ impl Headroom {
     }
 }
 
-fn mirror_devices(pool: &File, info: &FsInfo) -> io::Result<[DevInfo; 2]> {
-    let mut devices = Vec::with_capacity(2);
+fn devices(pool: &File, info: &FsInfo) -> io::Result<Vec<DevInfo>> {
+    let expected = info.num_devices as usize;
+    let mut devices = Vec::with_capacity(expected);
     for entry in fs::read_dir(format!("/sys/fs/btrfs/{}/devinfo", uuid(info.uuid)))? {
         let entry = entry?;
-        if devices.len() == 2 {
-            return Err(io::Error::other("unexpected Btrfs mirror device count"));
+        if devices.len() == expected {
+            return Err(io::Error::other("unexpected Btrfs device count"));
         }
         let id = entry.file_name().to_str().and_then(|name| name.parse().ok())
             .ok_or_else(|| io::Error::other("invalid Btrfs device ID"))?;
@@ -278,11 +292,18 @@ fn mirror_devices(pool: &File, info: &FsInfo) -> io::Result<[DevInfo; 2]> {
         devices.push(device);
     }
     devices.sort_unstable_by_key(|device| device.id);
-    devices.try_into().map_err(|_| io::Error::other("expected two Btrfs mirror members"))
+    if devices.len() != expected {
+        return Err(io::Error::other("Btrfs device list is incomplete"));
+    }
+    Ok(devices)
+}
+
+fn mirror_devices(pool: &File, info: &FsInfo) -> io::Result<[DevInfo; 2]> {
+    devices(pool, info)?.try_into().map_err(|_| io::Error::other("expected two Btrfs mirror members"))
 }
 
 pub fn headroom(pool: &File) -> io::Result<Headroom> {
-    let [first, second] = mirror_devices(pool, &filesystem(pool)?)?;
+    let [first, second] = mirror_devices(pool, &filesystem(pool, 2)?)?;
     let unallocated = (first.total - first.allocated).min(second.total - second.allocated);
     let [data, metadata, system] = raid1_space(pool)?.map(|space| space.total - space.used);
     Ok(Headroom { data, metadata, system, unallocated })
@@ -329,7 +350,7 @@ pub struct MirrorHealth {
 }
 
 pub fn mirror_health(pool: &File) -> io::Result<MirrorHealth> {
-    let info = filesystem(pool)?;
+    let info = filesystem(pool, 2)?;
     let [first, second] = mirror_devices(pool, &info)?;
     let members = [DeviceHealth::read(pool, first)?, DeviceHealth::read(pool, second)?];
     let [data, metadata, system] = raid1_space(pool)?;
@@ -341,6 +362,10 @@ pub fn require_raid1_profiles(pool: &File) -> io::Result<()> {
 }
 
 fn raid1_space(pool: &File) -> io::Result<[SpaceUsage; 3]> {
+    space_usage(pool, [RAID1; 3])
+}
+
+fn space_usage(pool: &File, profiles: [u64; 3]) -> io::Result<[SpaceUsage; 3]> {
     let mut spaces = Spaces {
         slots: 8,
         count: 0,
@@ -360,27 +385,61 @@ fn raid1_space(pool: &File) -> io::Result<[SpaceUsage; 3]> {
         if entry.flags == SPACE_GLOBAL_RESERVE {
             continue;
         }
-        let index = match entry.flags ^ RAID1 {
-            1 => 0, // DATA
-            4 => 1, // METADATA
-            2 => 2, // SYSTEM
-            _ => {
-                return Err(io::Error::other(
-                    "expected only Btrfs RAID1 allocation profiles",
-                ));
-            }
-        };
+        let index = [1, 4, 2].into_iter().zip(profiles)
+            .position(|(kind, profile)| entry.flags == kind | profile)
+            .ok_or_else(|| io::Error::other("Btrfs allocation profile differs from the selected role"))?;
         let selected = SpaceUsage { total: entry.total, used: entry.used };
         if entry.used > entry.total || usage[index].replace(selected).is_some() {
             return Err(io::Error::other(
-                "invalid or duplicate Btrfs RAID1 allocation profile",
+                "invalid or duplicate Btrfs allocation profile",
             ));
         }
     }
     let [Some(data), Some(metadata), Some(system)] = usage else {
-        return Err(io::Error::other("incomplete Btrfs RAID1 space accounting"));
+        return Err(io::Error::other("incomplete Btrfs space accounting"));
     };
     Ok([data, metadata, system])
+}
+
+pub fn scrub_members(pool: &File, fsid: &str, hypervisor: bool) -> io::Result<Vec<u64>> {
+    let (count, profiles) = if hypervisor { (2, [RAID1; 3]) } else { (1, [0, DUP, DUP]) };
+    let info = filesystem(pool, count)?;
+    if uuid(info.uuid) != fsid {
+        return Err(io::Error::other("Btrfs scrub mount differs from verified boot selection"));
+    }
+    space_usage(pool, profiles)?;
+    Ok(devices(pool, &info)?.into_iter().map(|device| device.id).collect())
+}
+
+#[derive(Default)]
+pub struct ScrubProgress {
+    pub data_bytes: u64,
+    pub metadata_bytes: u64,
+    pub no_checksum_blocks: u64,
+    pub corrected_errors: u64,
+    pub uncorrectable_errors: u64,
+    pub allocation_errors: u64,
+}
+
+pub fn scrub(pool: &File, id: u64) -> (ScrubProgress, io::Result<()>) {
+    let mut args = ScrubArgs {
+        id, start: 0, end: u64::MAX, flags: 0, progress: [0; 15], reserved: [0; 109],
+    };
+    // The ioctl has one fixed output buffer and returns partial progress on interruption.
+    let result = if unsafe { ioctl(pool.as_raw_fd(), SCRUB, &mut args as *mut ScrubArgs) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    };
+    let progress = ScrubProgress {
+        data_bytes: args.progress[2],
+        metadata_bytes: args.progress[3],
+        no_checksum_blocks: args.progress[7],
+        corrected_errors: args.progress[12],
+        uncorrectable_errors: args.progress[11],
+        allocation_errors: args.progress[10],
+    };
+    (progress, result)
 }
 
 pub fn require_capture_space(pool: &File, data: u64) -> io::Result<()> {
