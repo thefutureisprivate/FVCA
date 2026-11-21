@@ -5,6 +5,8 @@
 #include <tss2/tss2_esys.h>
 #include <tss2/tss2_tctildr.h>
 
+#include "ak.h"
+
 #define ATTESTATION_KEY UINT32_C(0x81004656)
 #define KEY_ATTRIBUTES (TPMA_OBJECT_FIXEDTPM | TPMA_OBJECT_FIXEDPARENT | \
                         TPMA_OBJECT_SENSITIVEDATAORIGIN | TPMA_OBJECT_ADMINWITHPOLICY | \
@@ -24,12 +26,26 @@ static int expected_key(const TPMT_PUBLIC *key) {
            ecc->scheme.scheme == TPM2_ALG_ECDSA && ecc->scheme.details.ecdsa.hashAlg == TPM2_ALG_SHA256;
 }
 
+TSS2_RC fvca_attestation_key(ESYS_CONTEXT *esys, ESYS_TR *key, TPM2B_NAME *qualified_name) {
+    TPM2B_PUBLIC *public = NULL;
+    TPM2B_NAME *name = NULL;
+    TSS2_RC rc = Esys_TR_FromTPMPublic(esys, ATTESTATION_KEY, ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE, key);
+    if (rc == 0)
+        rc = Esys_ReadPublic(esys, *key, ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE, &public, NULL, &name);
+    if (rc == 0 && (!expected_key(&public->publicArea) || name->size != 34))
+        rc = TSS2_ESYS_RC_BAD_VALUE;
+    if (rc == 0 && qualified_name != NULL)
+        *qualified_name = *name;
+    Esys_Free(public);
+    Esys_Free(name);
+    return rc;
+}
+
 uint32_t fvca_boot_quote(const char *transport, const uint8_t nonce[32], const uint8_t pcrs[3],
                          uint8_t *attest, size_t capacity, size_t *size, uint8_t signature[64]) {
     TSS2_TCTI_CONTEXT *tcti = NULL;
     ESYS_CONTEXT *esys = NULL;
     ESYS_TR key = ESYS_TR_NONE, session = ESYS_TR_NONE;
-    TPM2B_PUBLIC *public = NULL;
     TPM2B_ATTEST *quoted = NULL;
     TPMT_SIGNATURE *signed_quote = NULL;
     TPM2B_DATA qualifying = {.size = 32};
@@ -47,11 +63,7 @@ uint32_t fvca_boot_quote(const char *transport, const uint8_t nonce[32], const u
     if (rc == 0)
         rc = Esys_SetTimeout(esys, 3000);
     if (rc == 0)
-        rc = Esys_TR_FromTPMPublic(esys, ATTESTATION_KEY, ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE, &key);
-    if (rc == 0)
-        rc = Esys_ReadPublic(esys, key, ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE, &public, NULL, NULL);
-    if (rc == 0 && !expected_key(&public->publicArea))
-        rc = TSS2_ESYS_RC_BAD_VALUE;
+        rc = fvca_attestation_key(esys, &key, NULL);
     if (rc == 0)
         rc = Esys_StartAuthSession(esys, ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
                                    ESYS_TR_NONE, NULL, TPM2_SE_POLICY, &symmetric, TPM2_ALG_SHA256, &session);
@@ -74,7 +86,6 @@ uint32_t fvca_boot_quote(const char *transport, const uint8_t nonce[32], const u
             memcpy(signature + 64 - s->size, s->buffer, s->size);
         }
     }
-    Esys_Free(public);
     Esys_Free(quoted);
     Esys_Free(signed_quote);
     if (session != ESYS_TR_NONE)

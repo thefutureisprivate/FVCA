@@ -6,7 +6,11 @@ fn main() {
     for source in sources {
         println!("cargo:rerun-if-changed={source}");
     }
+    println!("cargo:rerun-if-changed=src/attestation/ak.h");
     let mut build = cc::Build::new();
+    if std::env::var_os("CARGO_FEATURE_APPLIANCE").is_none() {
+        build.define("FVCA_FLOOR_ENROLLMENT", None);
+    }
     let libraries = ["tss2-esys", "tss2-mu", "tss2-tctildr"].map(|package| {
         pkg_config::Config::new()
             .cargo_metadata(false)

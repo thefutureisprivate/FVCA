@@ -1,6 +1,8 @@
 //! Independent authorization and readback of an installed Hypervisor boot pair.
 
 mod tpm;
+#[cfg(not(feature = "appliance"))]
+pub(super) mod enroll;
 
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -166,6 +168,16 @@ fn record(directory: &Path, path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn reference(path: &Path) -> Result<[u8; 40]> {
+    let reference: [u8; 40] = state::read(path, 40)?
+        .try_into()
+        .map_err(|_| invalid("expected the 40-byte enrolled TPM policy reference"))?;
+    if !reference.starts_with(POLICY_REFERENCE_PREFIX) || reference[24..] == [0; 16] {
+        return Err(invalid("invalid enrolled TPM policy reference").into());
+    }
+    Ok(reference)
+}
+
 fn advance(
     approved: &Approval,
     state_dir: &Path,
@@ -202,12 +214,7 @@ fn advance(
         }
     } else {
         let key = state::read(increment_authority, 1024)?;
-        let reference: [u8; 40] = state::read(policy_reference, 40)?
-            .try_into()
-            .map_err(|_| invalid("expected the 40-byte enrolled TPM policy reference"))?;
-        if !reference.starts_with(POLICY_REFERENCE_PREFIX) || reference[24..] == [0; 16] {
-            return Err(invalid("invalid enrolled TPM policy reference").into());
-        }
+        let reference = reference(policy_reference)?;
         let seconds = approved.remaining()?;
         let deadline = Instant::now() + Duration::from_secs(u64::from(seconds));
         let message = tpm.challenge(&key, &reference, seconds)?;

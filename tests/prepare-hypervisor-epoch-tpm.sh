@@ -59,7 +59,7 @@ increment() {
   tpm2_nvincrement "$index" -C "$index" -P "session:$1.ctx"
 }
 
-openssl rand -out owner.secret 32
+(printf 'hex:'; openssl rand -hex 32) > owner.secret
 if [[ -n "$fixture_key" ]]; then
   openssl pkey -in "$fixture_key" -out authority.key
 else

@@ -6,6 +6,8 @@ mod repaired;
 mod uki;
 
 pub use floor::verify_floor;
+#[cfg(not(feature = "appliance"))]
+pub use floor::enroll::{enroll_floor, inspect_floor_enrollment};
 pub use repaired::install_repaired;
 
 use std::collections::HashSet;

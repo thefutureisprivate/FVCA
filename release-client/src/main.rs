@@ -421,6 +421,18 @@ fn run() -> Result<()> {
     {
         return gpt::inspect(disk, sector.to_str().ok_or_else(usage)?.parse()?);
     }
+    #[cfg(not(feature = "appliance"))]
+    match operands.as_slice() {
+        [option, key, reference] if option.as_os_str() == "--inspect-hypervisor-floor-enrollment" => {
+            return gpt::inspect_floor_enrollment(key, reference);
+        }
+        [option, state, approval, signature, authority, key, reference, owner]
+            if option.as_os_str() == "--enroll-hypervisor-floor" =>
+        {
+            return gpt::enroll_floor(state, approval, signature, authority, [key, reference, owner]);
+        }
+        _ => (),
+    }
     if let [
         option,
         root,
@@ -580,7 +592,7 @@ fn usage() -> io::Error {
     #[cfg(not(feature = "appliance"))]
     {
         invalid(&format!(
-            "{instructions}\n       fvca-release-client --appraise-remote-boot TRUSTED_REFERENCE TRUSTED_ENROLLMENT TLS_CA TLS_SERVER_NAME OPERATOR_KEY\n       fvca-release-client --prepare-os-channel TRUSTED_SCOPE REQUEST PREPARED_RELEASE APPROVALS\n       fvca-release-client --pack-os-channel TRUSTED_SCOPE REQUEST PREPARED_RELEASE APPROVALS QUALIFICATION_SIGNATURE OUTPUT"
+            "{instructions}\n       fvca-release-client --inspect-hypervisor-floor-enrollment INCREMENT_TPM_PUBLIC POLICY_REFERENCE\n       fvca-release-client --enroll-hypervisor-floor PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY INCREMENT_TPM_PUBLIC POLICY_REFERENCE OWNER_AUTH_FILE\n       fvca-release-client --appraise-remote-boot TRUSTED_REFERENCE TRUSTED_ENROLLMENT TLS_CA TLS_SERVER_NAME OPERATOR_KEY\n       fvca-release-client --prepare-os-channel TRUSTED_SCOPE REQUEST PREPARED_RELEASE APPROVALS\n       fvca-release-client --pack-os-channel TRUSTED_SCOPE REQUEST PREPARED_RELEASE APPROVALS QUALIFICATION_SIGNATURE OUTPUT"
         ))
     }
     #[cfg(feature = "appliance")]

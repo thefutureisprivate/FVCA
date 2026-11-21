@@ -885,6 +885,43 @@ The Hypervisor initramfs omits systemd's stock NvPCR definitions. The storage PC
 
 The shared SELinux policy switches Fedora's PCR measurement domain to enforcing. Both the initramfs and the core verify the domain against the policy loaded in the kernel. On a measured boot, systemd prepares the root-only, separately labeled log at `/run/log/systemd/tpm2-measure.log` before the first userspace PCR measurements.
 
+### Enroll the Hypervisor TPM epoch floor
+
+Use the release client built without the `appliance` feature from trusted maintenance media. Run it on the target appliance with `/dev/tpmrm0` available. Enroll the restricted identity key described in the boot appraisal procedure and keep its qualified name with the independent verifier. Set a unique random 32-byte TPM owner authorization during platform commissioning. When setting it with `tpm2_changeauth`, use `file:` with a private temporary file containing `hex:` followed by the 64 hex digits. Remove the encoded copy when commissioning finishes. Present the same 32 raw bytes to FVCA in a private regular file owned by the invoking account with mode `0400` or `0600`. Keep that credential on separate protected media. [Boot appraisal](#appraise-a-hypervisor-boot-quote) · [TPM authorization formatting](https://tpm2-tools.readthedocs.io/en/latest/man/common/authorizations/)
+
+The independent increment authority supplies its public P-256 `TPM2B_PUBLIC` blob. To export the blob on the authority's TPM workstation, load the public PEM through `tpm2_loadexternal -C o -G ecc` and read it with `tpm2_readpublic --format=tss`. Flush the temporary key after export. The policy reference is the ASCII string `FVCA-HYPERVISOR-FLOOR-1`, followed by a NUL byte and 16 random bytes reserved for this enrollment. Preserve the exact public blob and reference for later advancement. [tpm2_loadexternal](https://tpm2-tools.readthedocs.io/en/latest/man/tpm2_loadexternal.1/) · [TPM NV definition](https://tpm2-tss.readthedocs.io/en/latest/group___esys___n_v___define_space.html)
+
+```sh
+fvca-release-client --inspect-hypervisor-floor-enrollment increment.tpm2b policy-reference.bin
+```
+
+The inspection derives the policy in a TPM trial session and reports the counter's state. For first enrollment, require `absent`. Review `target.ak_qualified_name` against the enrolled identity and confirm the exact increment key and reference. The independent Ed25519 approval authority signs the exact JSON below, using the complete `target` object from the reviewed inspection. Times are UTC Unix seconds and the approval can last up to 24 hours.
+
+```json
+{
+  "schema": "fvca-hypervisor-floor-enrollment-v1",
+  "valid_from": 1795154400,
+  "expires": 1795156200,
+  "target": {
+    "ak_qualified_name": "SHA256_TPM_QUALIFIED_NAME",
+    "epoch_policy_sha256": "TPM_POLICY_SHA256",
+    "increment_key_sha256": "INCREMENT_PUBLIC_BLOB_SHA256",
+    "policy_reference_sha256": "POLICY_REFERENCE_SHA256"
+  }
+}
+```
+
+```sh
+fvca-release-client --enroll-hypervisor-floor PRIVATE_STATE approval.json approval.sig \
+  approval-authority.pub increment.tpm2b policy-reference.bin OWNER_AUTH_FILE
+```
+
+Use a mode `0700` state directory on trusted maintenance storage. Supply the raw 64-byte Ed25519 signature and the raw 32-byte trusted approval key. The command checks the live TPM identity and policy, durably writes its intent, and defines the reserved counter using an owner-bound HMAC session. The counter starts unwritten and permits increments only under its enrolled policy. The command then emits `FVCA_HYPERVISOR_FLOOR_ENROLLMENT_CHALLENGE`. The P-256 authority checks the approval digest, target and message fields as in the advancement ceremony below. It signs the 108-byte message with ECDSA and SHA-256. Enter the 128 hex characters of `r || s` followed by a newline. The initial command hash uses the live counter Name before the TPM sets its `WRITTEN` flag.
+
+On success the command reads the actual floor and creates `PRIVATE_STATE/floor-enrollment/epoch.conf`. Use this file for composition and preserve the enrollment state with the owner's recovery records. After interruption, use the same state directory and enrollment inputs. An unwritten counter needs a fresh nonce signature under a valid approval. An already initialized counter with matching durable records is reconciled by readback. Keep the owner credential with the separate owner authority after definition. TPM replacement or unexpected disappearance of the enrolled counter requires an explicit recovery enrollment.
+
+Run `python3 -B -W error tests/check-hypervisor-floor-enrollment.py CLIENT` with a maintenance client built with `swtpm-test`. The check creates and cleans up its own disposable TPM and credentials.
+
 ### Enforce the Hypervisor epoch floor at boot
 
 Compose the stable slot and its recovery release with `--epoch-policy FILE`, GPT slots, and authenticated TPM storage. Use a dedicated Secure Boot authority for this deployment. Enroll only authorities whose trusted boot paths enforce the epoch gate. Every signed Hypervisor boot path, including recovery, must carry the policy. Keep control of the TPM owner hierarchy separate from release and storage signing.
