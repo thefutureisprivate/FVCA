@@ -47,6 +47,8 @@ pub struct Limits {
     pub memory_bytes: u64,
     pub cpu_percent: u16,
     pub pids: u16,
+    pub read_bytes_per_second: u32,
+    pub write_bytes_per_second: u32,
 }
 
 #[derive(Deserialize, Eq, PartialEq)]

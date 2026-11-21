@@ -4,7 +4,9 @@ use std::error::Error;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::net::Ipv4Addr;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, chown};
+use std::os::unix::fs::{
+    DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, chown,
+};
 use std::path::Path;
 use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -38,6 +40,7 @@ const OS_UNIT_DEFAULTS: &str = "/usr/lib/systemd/system/service.d/10-timeout-abo
 const KERNEL_SERVICE_POLICY: &str =
     "/usr/lib/systemd/system/service.d/60-fvca-kernel-observability.conf";
 const NETWORK: &str = "/run/fvca/workload-network";
+const PAYLOAD_CGROUP: &str = "/system.slice/fvca-workload-payload.service";
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -300,6 +303,8 @@ fn check_start(
     provenance: &str,
     authorization: &str,
     profile: &str,
+    read_bytes_per_second: &str,
+    write_bytes_per_second: &str,
 ) -> Result<()> {
     let valid_from = valid_from.parse::<u64>()?;
     let expires = expires.parse::<u64>()?;
@@ -336,6 +341,10 @@ fn check_start(
             "ro,nodev,nosuid",
         ])
         .stdout(std::process::Stdio::null()))?;
+    require_io_limit(
+        read_bytes_per_second.parse()?,
+        write_bytes_per_second.parse()?,
+    )?;
     Ok(())
 }
 
@@ -358,6 +367,100 @@ fn require_guest_data(options: &str) -> Result<fs::Metadata> {
     Ok(private_directory(GUEST_DATA)?)
 }
 
+fn data_disk() -> Result<(u32, u32)> {
+    // Btrfs's st_dev is a filesystem identifier. Resolve the mounted
+    // partition and its whole block device, where io.max applies.
+    let output = Command::new("/usr/bin/findmnt")
+        .env_clear()
+        .args([
+            "--mountpoint",
+            GUEST_DATA,
+            "--types",
+            "btrfs",
+            "--options",
+            "rw,nodev,nosuid,noexec",
+            "--evaluate",
+            "--nofsroot",
+            "--noheadings",
+            "--raw",
+            "--output",
+            "SOURCE",
+        ])
+        .output()?;
+    let device_error =
+        || io::Error::other("Guest data requires an enrolled virtio block partition");
+    let source = std::str::from_utf8(&output.stdout)?.trim_end_matches('\n');
+    if !output.status.success() || !source.starts_with("/dev/") || source.contains('\n') {
+        return Err(device_error().into());
+    }
+    let metadata = fs::metadata(source)?;
+    if !metadata.file_type().is_block_device() {
+        return Err(device_error().into());
+    }
+    let dev = metadata.rdev();
+    let partition = fs::canonicalize(format!(
+        "/sys/dev/block/{}:{}",
+        rustix::fs::major(dev),
+        rustix::fs::minor(dev)
+    ))?;
+    let disk = partition.parent().ok_or_else(device_error)?;
+    if !partition.join("partition").is_file()
+        || fs::canonicalize(disk.join("device/driver"))?.file_name() != Some("virtio_blk".as_ref())
+    {
+        return Err(device_error().into());
+    }
+    let identity = fs::read_to_string(disk.join("dev"))?;
+    let (major, minor) = identity
+        .trim_end_matches('\n')
+        .split_once(':')
+        .ok_or_else(device_error)?;
+    let (major, minor) = (major.parse()?, minor.parse()?);
+    let selected = fs::metadata(format!("/dev/block/{major}:{minor}"))?;
+    if !selected.file_type().is_block_device()
+        || selected.rdev() != rustix::fs::makedev(major, minor)
+    {
+        return Err(device_error().into());
+    }
+    Ok((major, minor))
+}
+
+fn matches_io_limit(table: &str, device: &str, read: u32, write: u32) -> bool {
+    let read = format!("rbps={read}");
+    let write = format!("wbps={write}");
+    table.lines().any(|row| {
+        let mut fields = row.split_ascii_whitespace();
+        fields.next() == Some(device)
+            && fields.clone().any(|field| field == read)
+            && fields.any(|field| field == write)
+    })
+}
+
+fn require_io_limit(read: u32, write: u32) -> Result<()> {
+    let cgroup = fs::read_to_string("/proc/self/cgroup")?;
+    let path = cgroup
+        .strip_prefix("0::")
+        .and_then(|line| line.strip_suffix('\n'));
+    if path != Some(PAYLOAD_CGROUP)
+        && path.and_then(|path| path.strip_suffix("/control")) != Some(PAYLOAD_CGROUP)
+    {
+        return Err(io::Error::other(
+            "workload start check is outside the expected service cgroup",
+        )
+        .into());
+    }
+    let (major, minor) = data_disk()?;
+    let device = format!("{major}:{minor}");
+    let table = fs::read_to_string(format!("/sys/fs/cgroup{PAYLOAD_CGROUP}/io.max"))?;
+    if !matches_io_limit(&table, &device, read, write) {
+        return Err(io::Error::other(
+            "the kernel did not apply the selected Guest data disk bandwidth limits",
+        )
+        .into());
+    }
+    println!("FVCA_WORKLOAD_IO_LIMIT {device} {read} {write}");
+    Ok(())
+}
+
 fn mount_workload() -> Result<()> {
     let data = require_guest_data("rw,nodev,nosuid,noexec")?;
     mount_verified(&stage::verify_selection(
@@ -369,7 +472,7 @@ fn mount_workload() -> Result<()> {
 
 fn mount_verified(verified: &VerifiedWorkload) -> Result<()> {
     let dns = admitted_network(verified.network_profile())?;
-    let definition = quadlet::render(verified, dns)?;
+    let definition = quadlet::render(verified, dns, data_disk()?)?;
     let hash = verified.verity_root_hash().to_owned();
     let authorization = verified.authorization_digest().to_owned();
     let service = verified.service().to_owned();
@@ -478,9 +581,19 @@ fn execute() -> Result<()> {
         provenance,
         authorization,
         profile,
+        read,
+        write,
     ] = command.as_slice()
     {
-        return check_start(valid_from, expires, provenance, authorization, profile);
+        return check_start(
+            valid_from,
+            expires,
+            provenance,
+            authorization,
+            profile,
+            read,
+            write,
+        );
     }
     if command == ["monitor-permit"] {
         return permit::monitor();
@@ -512,6 +625,16 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requires_both_bandwidth_limits_on_the_same_whole_device() {
+        let table =
+            "253:0 rbps=1048576 wbps=2097152 riops=max wiops=max\n253:16 rbps=1048576 wbps=max\n";
+        assert!(matches_io_limit(table, "253:0", 1048576, 2097152));
+        assert!(!matches_io_limit(table, "253:1", 1048576, 2097152));
+        assert!(!matches_io_limit(table, "253:0", 2097152, 1048576));
+        assert!(!matches_io_limit(table, "253:16", 1048576, 2097152));
+    }
 
     #[test]
     fn workload_unit_requires_the_verified_kernel_policy() {

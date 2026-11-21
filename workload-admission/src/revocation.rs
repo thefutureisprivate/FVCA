@@ -295,6 +295,94 @@ impl Revocation {
     }
 }
 
+impl Trust {
+    pub fn accepts_permit_notices(&self) -> bool {
+        self.scope.unsigned_permit_authority.is_some()
+    }
+
+    /// Clear an interrupted publication while holding the workload lifecycle lease.
+    pub fn clear_partial_permit_notice(&self) -> Result<()> {
+        if let Some(ledger) = &self.revocations {
+            ledger.clear_partial()?;
+        }
+        Ok(())
+    }
+
+    pub fn verify_permit_notice(&self, filename: &str, bytes: &[u8]) -> Result<()> {
+        let record = verify_envelope(bytes, self)?;
+        let permit = record
+            .permit
+            .strip_prefix("sha256:")
+            .expect("validated permit digest");
+        if filename != record.action.filename(permit) {
+            return Err(invalid(
+                "revocation target name differs from its signed permit and action",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Publish authenticated bytes after acquiring the workload lifecycle lease.
+    pub fn retain_permit_notice(&self, filename: &str, bytes: &[u8]) -> Result<bool> {
+        self.verify_permit_notice(filename, bytes)?;
+        self.revocations
+            .as_ref()
+            .ok_or_else(|| {
+                invalid("permit revocation publication requires the selected Guest pool")
+            })?
+            .retain(filename, bytes)
+    }
+
+    /// Attach the authoritative local revocation store to verification on an appliance.
+    pub fn with_permit_revocations(mut self, pool: &Path, device: u64) -> Result<Self> {
+        if self.scope.unsigned_permit_authority.is_some() {
+            self.revocations = Some(Ledger::open(pool, device)?);
+        }
+        Ok(self)
+    }
+
+    pub fn permit_revocation(&self, permit: &PermitIdentity) -> Result<Option<Action>> {
+        if permit.guest != self.scope.guest
+            || permit.service != self.scope.service
+            || !revocation_id(&permit.id)
+            || !is_digest(&permit.permit)
+            || permit.issued_at == 0
+            || permit.issued_at >= permit.expires
+            || permit.expires > i64::MAX as u64
+        {
+            return Err(invalid(
+                "permit identity differs from the authenticated Guest scope",
+            ));
+        }
+        self.permit_authority(&decode(&permit.authority)?)?;
+        if let Some(ledger) = &self.revocations
+            && let Some(action) = ledger.check(permit, self)?
+        {
+            return Ok(Some(action));
+        }
+        Ok(self
+            .scope
+            .revoked
+            .contains(&permit.id)
+            .then_some(Action::BlockNewStarts))
+    }
+
+    pub(crate) fn permit_authority(&self, der: &[u8]) -> Result<X509> {
+        let certificate = X509::from_der(der)?;
+        let key = certificate.public_key()?;
+        if self.scope.unsigned_permit_authority.as_deref() != Some(digest(&sha256(der)).as_str())
+            || certificate.to_der()? != der
+            || self.deployment.public_key()?.public_eq(&key)
+            || self.workload.public_key()?.public_eq(&key)
+        {
+            return Err(invalid(
+                "unsigned permit requires a distinct authority key matching the Guest enrollment",
+            ));
+        }
+        Ok(certificate)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,93 +492,5 @@ mod tests {
             );
         }
         Ok(())
-    }
-}
-
-impl Trust {
-    pub fn accepts_permit_notices(&self) -> bool {
-        self.scope.unsigned_permit_authority.is_some()
-    }
-
-    /// Clear an interrupted publication while holding the workload lifecycle lease.
-    pub fn clear_partial_permit_notice(&self) -> Result<()> {
-        if let Some(ledger) = &self.revocations {
-            ledger.clear_partial()?;
-        }
-        Ok(())
-    }
-
-    pub fn verify_permit_notice(&self, filename: &str, bytes: &[u8]) -> Result<()> {
-        let record = verify_envelope(bytes, self)?;
-        let permit = record
-            .permit
-            .strip_prefix("sha256:")
-            .expect("validated permit digest");
-        if filename != record.action.filename(permit) {
-            return Err(invalid(
-                "revocation target name differs from its signed permit and action",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Publish authenticated bytes after acquiring the workload lifecycle lease.
-    pub fn retain_permit_notice(&self, filename: &str, bytes: &[u8]) -> Result<bool> {
-        self.verify_permit_notice(filename, bytes)?;
-        self.revocations
-            .as_ref()
-            .ok_or_else(|| {
-                invalid("permit revocation publication requires the selected Guest pool")
-            })?
-            .retain(filename, bytes)
-    }
-
-    /// Attach the authoritative local revocation store to verification on an appliance.
-    pub fn with_permit_revocations(mut self, pool: &Path, device: u64) -> Result<Self> {
-        if self.scope.unsigned_permit_authority.is_some() {
-            self.revocations = Some(Ledger::open(pool, device)?);
-        }
-        Ok(self)
-    }
-
-    pub fn permit_revocation(&self, permit: &PermitIdentity) -> Result<Option<Action>> {
-        if permit.guest != self.scope.guest
-            || permit.service != self.scope.service
-            || !revocation_id(&permit.id)
-            || !is_digest(&permit.permit)
-            || permit.issued_at == 0
-            || permit.issued_at >= permit.expires
-            || permit.expires > i64::MAX as u64
-        {
-            return Err(invalid(
-                "permit identity differs from the authenticated Guest scope",
-            ));
-        }
-        self.permit_authority(&decode(&permit.authority)?)?;
-        if let Some(ledger) = &self.revocations
-            && let Some(action) = ledger.check(permit, self)?
-        {
-            return Ok(Some(action));
-        }
-        Ok(self
-            .scope
-            .revoked
-            .contains(&permit.id)
-            .then_some(Action::BlockNewStarts))
-    }
-
-    pub(crate) fn permit_authority(&self, der: &[u8]) -> Result<X509> {
-        let certificate = X509::from_der(der)?;
-        let key = certificate.public_key()?;
-        if self.scope.unsigned_permit_authority.as_deref() != Some(digest(&sha256(der)).as_str())
-            || certificate.to_der()? != der
-            || self.deployment.public_key()?.public_eq(&key)
-            || self.workload.public_key()?.public_eq(&key)
-        {
-            return Err(invalid(
-                "unsigned permit requires a distinct authority key matching the Guest enrollment",
-            ));
-        }
-        Ok(certificate)
     }
 }

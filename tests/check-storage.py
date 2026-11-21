@@ -644,6 +644,8 @@ def check_stalwart_lifecycle(output):
     )
     if not all(marker in output for marker in expected) or b"FVCA_STALWART_UNEXPECTED_CONTAINER" in output:
         raise ValueError("Stalwart resource limits, restart, persistence or stop did not qualify")
+    if re.search(rb"cat\[\d+\]: [0-9]+:[0-9]+ rbps=[1-9][0-9]* wbps=[1-9][0-9]* ", output) is None:
+        raise ValueError("the running workload did not have read and write limits on its Guest data disk")
     values = re.findall(rb"cat\[\d+\]: ([0-9]+(?: [0-9]+)?)\r?\n", output)
     cpu_limits = [list(map(int, value.split())) for value in values if b" " in value]
     if b"536870912" not in values or b"128" not in values or not any(0 < quota == period for quota, period in cpu_limits):

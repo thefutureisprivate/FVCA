@@ -216,6 +216,8 @@ fn compatible(current: &VerifiedMetadata, candidate: &VerifiedMetadata) -> Resul
         || to.limits.memory_bytes > from.limits.memory_bytes
         || to.limits.cpu_percent > from.limits.cpu_percent
         || to.limits.pids > from.limits.pids
+        || to.limits.read_bytes_per_second > from.limits.read_bytes_per_second
+        || to.limits.write_bytes_per_second > from.limits.write_bytes_per_second
     {
         return Err(invalid(
             "candidate workload expands or changes the enrolled network or resource scope",

@@ -46,7 +46,7 @@ def deployment(args, output):
     if approved.keys() != {
         "schema", "role", "guest", "service", "source_index", "manifest", "provenance", "launch",
         "valid_from", "expires", "security_epoch", "revocation_id", "limits", "network", "id_map",
-    } or approved["schema"] != "fvca-workload-deployment-v1":
+    } or approved["schema"] != "fvca-workload-deployment-v2":
         raise ValueError("unexpected deployment approval fields")
     if approved["role"] != "service-guest" or approved["provenance"] not in (PUBLISHER, UNSIGNED):
         raise ValueError("deployment must bind the Service Guest role and reviewed source provenance")
@@ -73,7 +73,10 @@ def deployment(args, output):
     if any(type(mapping[key]) is not int or not 65536 <= mapping[key] < 2**32 - mapping["size"]
            for key in ("uid_base", "gid_base")):
         raise ValueError("deployment ID range must use subordinate host identities")
-    bounds = {"memory_bytes": (32 * 1024**2, 64 * 1024**3), "cpu_percent": (1, 6400), "pids": (1, 4096)}
+    bounds = {
+        "memory_bytes": (32 * 1024**2, 64 * 1024**3), "cpu_percent": (1, 6400), "pids": (1, 4096),
+        "read_bytes_per_second": (1024**2, 512 * 1024**2), "write_bytes_per_second": (1024**2, 512 * 1024**2),
+    }
     if approved["limits"].keys() != bounds.keys() or any(
         type(approved["limits"][key]) is not int or not low <= approved["limits"][key] <= high
         for key, (low, high) in bounds.items()

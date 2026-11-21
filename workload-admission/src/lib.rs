@@ -316,7 +316,7 @@ fn check_time(deployment: &Deployment, now: u64) -> Result<()> {
 }
 
 fn check_deployment(value: &Deployment, scope: &Scope) -> Result<()> {
-    if value.schema != "fvca-workload-deployment-v1"
+    if value.schema != "fvca-workload-deployment-v2"
         || value.guest != scope.guest
         || value.service != scope.service
         || ![&value.source_index, &value.manifest, &value.launch]
@@ -336,6 +336,9 @@ fn check_deployment(value: &Deployment, scope: &Scope) -> Result<()> {
     if !(32 * 1024 * 1024..=64 * 1024 * 1024 * 1024).contains(&limits.memory_bytes)
         || !(1..=6400).contains(&limits.cpu_percent)
         || !(1..=4096).contains(&limits.pids)
+        || ![limits.read_bytes_per_second, limits.write_bytes_per_second]
+            .into_iter()
+            .all(|rate| (1024 * 1024..=512 * 1024 * 1024).contains(&rate))
         || mapping.size != 65536
         || ![mapping.uid_base, mapping.gid_base]
             .iter()

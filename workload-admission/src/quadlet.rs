@@ -54,10 +54,17 @@ fn entrypoint(entry: &[String], command: &[String]) -> Result<String> {
     Ok(literal(&serde_json::to_string(&argv)?))
 }
 
-pub fn render(workload: &VerifiedWorkload, dns: Option<Ipv4Addr>) -> Result<Definition> {
+pub fn render(
+    workload: &VerifiedWorkload,
+    dns: Option<Ipv4Addr>,
+    device: (u32, u32),
+) -> Result<Definition> {
     let application = workload.launch();
     let map = workload.id_map();
     let limits = workload.limits();
+    let read = limits.read_bytes_per_second;
+    let write = limits.write_bytes_per_second;
+    let block_device = format!("/dev/block/{}:{}", device.0, device.1);
     let expires = workload.expires();
     let valid_from = workload.valid_from();
     let provenance = workload.provenance().label();
@@ -79,7 +86,7 @@ pub fn render(workload: &VerifiedWorkload, dns: Option<Ipv4Addr>) -> Result<Defi
          [Unit]\nBindsTo=fvca-workload-root.service\nAfter=fvca-workload-root.service\n\
          StartLimitIntervalSec=60s\nStartLimitBurst=3\n\n\
          [Container]\nContainerName={CONTAINER}\nRootfs={ROOT}\n\
-         {network}Pull=never\nReadOnly=true\nNoNewPrivileges=true\nDropCapability=all\n\
+         {network}CgroupsMode=split\nPull=never\nReadOnly=true\nNoNewPrivileges=true\nDropCapability=all\n\
          RunInit=true\nPodmanArgs=--init-path=/usr/libexec/catatonit/catatonit\n\
          LogDriver=k8s-file\nLogOpt=max-size=1mb\nUser={}\nGroup={}\nUIDMap=0:{}:{}\nGIDMap=0:{}:{}\n\
          PidsLimit={}\nStopSignal={}\nStopTimeout=20\nWorkingDir={}\n",
@@ -144,9 +151,10 @@ pub fn render(workload: &VerifiedWorkload, dns: Option<Ipv4Addr>) -> Result<Defi
     }
     writeln!(
         source,
-        "\n[Service]\nExecCondition=/usr/lib/fvca/activate-workload check-start {valid_from} {expires} {provenance} {authorization} {profile}\n\
+        "\n[Service]\nExecCondition=/usr/lib/fvca/activate-workload check-start {valid_from} {expires} {provenance} {authorization} {profile} {read} {write}\n\
          NoNewPrivileges=yes\nMemoryDenyWriteExecute=yes\nSystemCallArchitectures=native\n\
          MemoryMax={}\nMemorySwapMax=0\nCPUQuota={}%\nTasksMax={}\n\
+         IOReadBandwidthMax={block_device} {read}\nIOWriteBandwidthMax={block_device} {write}\n\
          LogRateLimitIntervalSec=30s\nLogRateLimitBurst=500\n\
          TimeoutStartSec=100s\nTimeoutStopSec=30s\nRestart=on-failure\nRestartSec=5s",
         limits.memory_bytes, limits.cpu_percent, limits.pids,

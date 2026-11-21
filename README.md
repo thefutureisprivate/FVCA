@@ -1366,7 +1366,7 @@ python3 tools/derive-workload.py --policy "$policy" \
   --cosign "$(command -v cosign)" --worker-image "$worker" --output build/stalwart-candidate
 ```
 
-Review `derivation.json` and `launch.json`, then have the deployment authority sign the exact deployment document as detached DER CMS. The `fvca-workload-deployment-v1` document contains these fields.
+Review `derivation.json` and `launch.json`, then have the deployment authority sign the exact deployment document as detached DER CMS. The `fvca-workload-deployment-v2` document contains these fields.
 
 | Fields | Approval scope |
 | --- | --- |
@@ -1374,7 +1374,9 @@ Review `derivation.json` and `launch.json`, then have the deployment authority s
 | `source_index`, `manifest`, `provenance`, `launch` | Exact index digest, platform digest, source classification, and launch digest from the reviewed derivation |
 | `valid_from`, `expires`, `security_epoch`, `revocation_id` | Unix timestamps, positive epoch and revocation UUID |
 | `id_map` | Approved subordinate `uid_base` and `gid_base`, each mapping a `size` of 65536 IDs from container ID zero |
-| `network`, `limits` | `none` or `{"workload":"sha256:<profile digest>"}`, plus `memory_bytes`, `cpu_percent` and `pids` |
+| `network`, `limits` | `none` or `{"workload":"sha256:<profile digest>"}`, plus `memory_bytes`, `cpu_percent`, `pids`, `read_bytes_per_second` and `write_bytes_per_second` |
+
+Both bandwidth limits are integers from 1 MiB/s through 512 MiB/s. The Guest applies them to the whole virtio block disk backing its authorized Btrfs data partition. Podman places the payload and monitor in child cgroups of the bounded service. The start check reads the kernel's `io.max` and requires both exact values. Automatic workload updates may retain or tighten the limits. Reauthorize workload deployments with both limits for this Guest release. [systemd I/O bandwidth controls](https://www.freedesktop.org/software/systemd/man/262/systemd.resource-control.html#IOReadBandwidthMax=device%20bytes) · [Linux cgroup v2 writeback](https://docs.kernel.org/admin-guide/cgroup-v2.html#writeback)
 
 The workload-root authority uses a separate key. The authorizer verifies the deployment signature and validity period, verifies the publisher again, and reproduces the candidate byte for byte in a fresh worker before signing the output. The v2 authorization binds `source-evidence.json`, which contains the exact reviewed source policy bytes and the typed publisher evidence. Reauthorize existing workload bundles before using the v2 verifier.
 

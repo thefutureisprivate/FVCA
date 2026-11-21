@@ -15,7 +15,7 @@ StandardError=journal+console
 ExecStart=/usr/bin/podman --remote=false healthcheck run fvca-workload-payload
 ExecStart=/usr/bin/podman --remote=false inspect "--format=FVCA_STALWART_STATE {{.ProcessLabel}} {{.Config.User}} {{.HostConfig.PidsLimit}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.NetworkMode}} {{.State.Health.Status}}" fvca-workload-payload
 ExecStart=/usr/bin/systemctl show --property=MemoryMax,CPUQuotaPerSecUSec,TasksMax fvca-workload-payload.service
-ExecStart=/usr/bin/cat /sys/fs/cgroup/system.slice/fvca-workload-payload.service/memory.max /sys/fs/cgroup/system.slice/fvca-workload-payload.service/cpu.max /sys/fs/cgroup/system.slice/fvca-workload-payload.service/pids.max
+ExecStart=/usr/bin/cat /sys/fs/cgroup/system.slice/fvca-workload-payload.service/memory.max /sys/fs/cgroup/system.slice/fvca-workload-payload.service/cpu.max /sys/fs/cgroup/system.slice/fvca-workload-payload.service/pids.max /sys/fs/cgroup/system.slice/fvca-workload-payload.service/io.max
 ExecStart=/usr/bin/podman --remote=false exec fvca-workload-payload /usr/bin/touch /var/lib/stalwart/.fvca-lifecycle
 ExecStart=/usr/bin/systemctl restart fvca-workload-payload.service
 ExecStart=/usr/bin/podman --remote=false exec fvca-workload-payload /usr/bin/test -f /var/lib/stalwart/.fvca-lifecycle

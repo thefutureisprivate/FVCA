@@ -90,12 +90,13 @@ class Admission(unittest.TestCase):
             "volumes": ["/etc/test", "/var/lib/test"],
         }
         cls.deployment = {
-            "schema": "fvca-workload-deployment-v1", "role": "service-guest", "guest": "guest-test",
+            "schema": "fvca-workload-deployment-v2", "role": "service-guest", "guest": "guest-test",
             "service": "test", "source_index": digest(b"index"), "manifest": digest(b"manifest"),
             "launch": write(cls.fixture / "launch.json", cls.launch), "provenance": "PUBLISHER_VERIFIED",
             "network": "none", "valid_from": int(time.time()) - 60, "expires": int(time.time()) + 3600,
             "security_epoch": 2, "revocation_id": REVOCATION_ID,
-            "limits": {"memory_bytes": 32 * 1024**2, "cpu_percent": 100, "pids": 128},
+            "limits": {"memory_bytes": 32 * 1024**2, "cpu_percent": 100, "pids": 128,
+                       "read_bytes_per_second": 8 * 1024**2, "write_bytes_per_second": 4 * 1024**2},
             "id_map": {"uid_base": 100000, "gid_base": 100000, "size": 65536},
         }
         root_hash = sha256(b"verity root").hexdigest()
@@ -162,6 +163,23 @@ class Admission(unittest.TestCase):
 
     def test_authorized_bytes(self):
         self.run_check()
+
+    def test_requires_valid_storage_bandwidth_limits(self):
+        path = self.bundle / "deployment.json"
+        for field, value, error in (
+            ("read_bytes_per_second", None, "missing field"),
+            ("read_bytes_per_second", 0, "resource limits"),
+            ("write_bytes_per_second", 512 * 1024**2 + 1, "resource limits"),
+        ):
+            with self.subTest(field=field, value=value):
+                limits = dict(self.deployment["limits"])
+                if value is None:
+                    del limits[field]
+                else:
+                    limits[field] = value
+                write(path, dict(self.deployment, limits=limits))
+                sign(path, self.deploy)
+                self.run_check(error)
 
     def test_wrong_signer(self):
         sign(self.bundle / "authorization.json", self.deploy)
@@ -448,6 +466,21 @@ class Admission(unittest.TestCase):
     def test_transition_rejects_privilege_expansion(self):
         larger = dict(self.deployment["limits"], memory_bytes=64 * 1024**2)
         grant, candidate = self.prepare_transition(deployment={"limits": larger})
+        self.run_transition(grant, candidate, "network or resource scope")
+
+    def test_transition_admits_tighter_bandwidth(self):
+        limits = dict(self.deployment["limits"], read_bytes_per_second=4 * 1024**2, write_bytes_per_second=2 * 1024**2)
+        grant, candidate = self.prepare_transition(deployment={"limits": limits})
+        self.run_transition(grant, candidate)
+
+    def test_transition_refuses_more_read_bandwidth(self):
+        limits = dict(self.deployment["limits"], read_bytes_per_second=16 * 1024**2)
+        grant, candidate = self.prepare_transition(deployment={"limits": limits})
+        self.run_transition(grant, candidate, "network or resource scope")
+
+    def test_transition_refuses_more_write_bandwidth(self):
+        limits = dict(self.deployment["limits"], write_bytes_per_second=8 * 1024**2)
+        grant, candidate = self.prepare_transition(deployment={"limits": limits})
         self.run_transition(grant, candidate, "network or resource scope")
 
     def test_transition_rejects_a_different_publisher_repository(self):
