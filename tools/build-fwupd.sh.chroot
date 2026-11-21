@@ -59,7 +59,7 @@ install -Dm644 /usr/share/licenses/dbus-daemon/COPYING "$DESTDIR/usr/share/licen
     printf '%s\n' 'cabinet_payload_size=v1'
     printf '%s\n' 'operation_history=v1'
     printf '%s\n' 'device_preflight=v1'
-    printf '%s\n' 'capsule_writer=v4'
+    printf '%s\n' 'capsule_writer=v5'
     rpm -q dbus-daemon dbus-libs gcc glib2 libxmlb meson
     sha256sum "$SRCDIR/tools/fwupd-inventory.patch" | cut -d ' ' -f1 | sed 's/^/patch_sha256=/'
     sha256sum "$SRCDIR/tools/fwupd-catalog.patch" | cut -d ' ' -f1 | sed 's/^/catalog_patch_sha256=/'

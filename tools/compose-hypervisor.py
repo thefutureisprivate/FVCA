@@ -548,7 +548,7 @@ def assemble(args, work):
                 or "device_preflight=v1" not in provenance.splitlines()):
             raise ValueError("scheduled Host firmware requires exact native device preflight")
         if (not re.search(r"^capsule_writer_patch_sha256=[0-9a-f]{64}$", provenance, re.MULTILINE)
-                or "capsule_writer=v4" not in provenance.splitlines()):
+                or "capsule_writer=v5" not in provenance.splitlines()):
             raise ValueError("scheduled Host firmware requires the confined native capsule writer")
     if args.boot_trial_candidate is not None:
         recorder = runtime_work / "tree" / vm_runtime.TRIAL_HEALTH

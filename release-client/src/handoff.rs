@@ -1,10 +1,11 @@
 //! Deliver an already authorized approval to the authenticated Host data mount.
 
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use fvca_trial_authorization::{APPROVAL_LIMIT, GUEST_CAPTURE_LOCK, PENDING, guest, guest_config};
@@ -28,6 +29,27 @@ pub(crate) fn mount_id(file: &File) -> io::Result<u64> {
         return Err(invalid("could not identify the Host data mount"));
     }
     Ok(stat.stx_mnt_id)
+}
+
+pub(crate) fn open_child(
+    parent: &File,
+    name: impl AsRef<OsStr>,
+    flags: OFlags,
+) -> io::Result<File> {
+    let name = name.as_ref();
+    if name.is_empty() || name == "." || name == ".." || name.as_encoded_bytes().contains(&b'/') {
+        return Err(invalid("expected one relative path component"));
+    }
+    let file = File::from(fs::openat(
+        parent,
+        name,
+        flags | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )?);
+    if mount_id(&file)? != mount_id(parent)? {
+        return Err(invalid("entry is outside the selected mount"));
+    }
+    Ok(file)
 }
 
 fn private_directory(file: &File) -> io::Result<()> {
@@ -61,13 +83,18 @@ pub(crate) fn host_data() -> Result<(File, u64)> {
 }
 
 pub fn require_pool_directory(path: &Path) -> Result<File> {
-    let (host, id) = host_data()?;
+    let (mut state, _) = host_data()?;
     let relative = path.strip_prefix(HOST_DATA)?;
-    let state = File::from(fs::openat(&host, relative, DIRECTORY, Mode::empty())?);
-    private_directory(&state)?;
-    if mount_id(&state)? != id {
-        return Err(invalid("update state is outside the mounted Btrfs pool").into());
+    if relative.as_os_str().is_empty() {
+        return Err(invalid("expected a directory within the Host pool").into());
     }
+    for entry in relative.components() {
+        let Component::Normal(name) = entry else {
+            return Err(invalid("invalid Host pool directory component").into());
+        };
+        state = open_child(&state, name, DIRECTORY)?;
+    }
+    private_directory(&state)?;
     Ok(state)
 }
 
@@ -287,4 +314,29 @@ pub fn request_unit(unit: &str, release: &str) -> Result<()> {
         .into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn child_open_stays_on_the_parent_mount() -> Result<()> {
+        let work = tempfile::tempdir()?;
+        let root = File::open(work.path())?;
+        std::fs::write(work.path().join("record"), b"receipt")?;
+        std::os::unix::fs::symlink("record", work.path().join("alias"))?;
+        let mut body = String::new();
+        open_child(&root, "record", OFlags::RDONLY)?.read_to_string(&mut body)?;
+        assert_eq!(body, "receipt");
+        for invalid in ["", ".", "..", "alias", "record/child", "/etc/passwd"] {
+            assert!(
+                open_child(&root, invalid, OFlags::RDONLY).is_err(),
+                "{invalid}"
+            );
+        }
+        let err = open_child(&File::open("/")?, "proc", DIRECTORY).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        Ok(())
+    }
 }

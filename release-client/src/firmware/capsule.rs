@@ -7,8 +7,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use fvca_trial_authorization::efi;
-use rustix::fs::{self, CWD, Dir, Mode, OFlags, ResolveFlags, StatFs, StatVfsMountFlags};
-use rustix::io::Errno;
+use rustix::fs::{self, CWD, Dir, Mode, OFlags, StatFs, StatVfsMountFlags};
 use rustix::mount::{MountFlags, mount_remount};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,9 +19,6 @@ const EFIVARS: &str = "/sys/firmware/efi/efivars";
 const EFIVARFS_MAGIC: u64 = 0xde5e81e4;
 const VFAT_MAGIC: u64 = 0x4d44;
 const ESP_PATH_LIMIT: usize = 256;
-const WITHIN_MOUNT: ResolveFlags = ResolveFlags::BENEATH
-    .union(ResolveFlags::NO_SYMLINKS)
-    .union(ResolveFlags::NO_XDEV);
 const X86_EFIVAR_RESERVE: u64 = 5 * 1024;
 // Allow two 128-byte records for setting and restoring OsIndications. Each
 // includes the eight-byte value, UTF-16 name and room for headers and padding.
@@ -175,14 +171,9 @@ pub(super) fn pending_capsule() -> Result<QueuedCapsule> {
     }
     boot_target(&variables, expected)?;
     let esp = verified_esp(Path::new(efi::FIRMWARE_ESP), device, false)?;
-    let queue = fs::openat2(
-        &esp,
-        "EFI/UpdateCapsule",
-        DIRECTORY,
-        Mode::empty(),
-        WITHIN_MOUNT,
-    )?;
-    let queued = queued_identity(&File::from(queue))?;
+    let efi = handoff::open_child(&esp, "EFI", DIRECTORY)?;
+    let queue = handoff::open_child(&efi, "UpdateCapsule", DIRECTORY)?;
+    let queued = queued_identity(&queue)?;
     // Persist the file and its directory entry before recording reboot readiness.
     fs::syncfs(&esp)?;
     Ok(queued)
@@ -211,13 +202,7 @@ fn queued_identity(queue: &File) -> Result<QueuedCapsule> {
         return Err(invalid("expected one native firmware capsule in the ESP queue").into());
     }
     let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY;
-    let input = File::from(fs::openat2(
-        queue,
-        file,
-        flags,
-        Mode::empty(),
-        WITHIN_MOUNT,
-    )?);
+    let input = handoff::open_child(queue, file, flags)?;
     let metadata = input.metadata()?;
     if !metadata.is_file() || !(1..=QUEUED_LIMIT).contains(&metadata.len()) {
         return Err(invalid("queued firmware capsule is outside its size bound").into());
@@ -358,17 +343,11 @@ fn esp_space(path: &Path, device_id: u64) -> Result<u64> {
 }
 
 fn require_empty_capsule_directory(root: &File) -> io::Result<()> {
-    let efi = fs::openat2(root, "EFI", DIRECTORY, Mode::empty(), WITHIN_MOUNT)?;
-    let queue = match fs::openat2(
-        &efi,
-        "UpdateCapsule",
-        DIRECTORY,
-        Mode::empty(),
-        WITHIN_MOUNT,
-    ) {
+    let efi = handoff::open_child(root, "EFI", DIRECTORY)?;
+    let queue = match handoff::open_child(&efi, "UpdateCapsule", DIRECTORY) {
         Ok(queue) => queue,
-        Err(Errno::NOENT) => return Ok(()),
-        Err(error) => return Err(error.into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
     };
     for entry in Dir::new(queue)? {
         if !matches!(entry?.file_name().to_bytes(), b"." | b"..") {
@@ -383,13 +362,7 @@ fn require_empty_capsule_directory(root: &File) -> io::Result<()> {
 fn read(variables: &File, name: &str) -> io::Result<Vec<u8>> {
     let fetch = || -> io::Result<_> {
         let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY;
-        let file = File::from(fs::openat2(
-            variables,
-            format!("{name}-{}", efi::GLOBAL).as_str(),
-            flags,
-            Mode::empty(),
-            WITHIN_MOUNT,
-        )?);
+        let file = handoff::open_child(variables, format!("{name}-{}", efi::GLOBAL), flags)?;
         if !file.metadata()?.is_file() {
             return Err(invalid("expected a regular EFI variable file"));
         }

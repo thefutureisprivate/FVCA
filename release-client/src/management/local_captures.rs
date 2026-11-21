@@ -6,8 +6,7 @@ use std::os::unix::fs::MetadataExt;
 
 use fvca_btrfs_boundary as btrfs;
 use fvca_trial_authorization::capture::{Manifest, RECORD_BYTES, expiry_record};
-use rustix::fs::{self, Dir, Mode, OFlags};
-use rustix::io::Errno;
+use rustix::fs::{Dir, OFlags};
 use serde::{Deserialize, Serialize};
 
 use super::protocol::{Refusal, current_time};
@@ -51,25 +50,11 @@ struct Finalized {
 }
 
 fn child(parent: &File, path: &str, flags: OFlags) -> io::Result<Option<File>> {
-    if path.is_empty() || matches!(path, "." | "..") || path.contains('/') {
-        return Err(invalid("expected a single capture path component"));
-    }
-    match fs::openat(
-        parent,
-        path,
-        flags | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    ) {
-        Ok(file) => {
-            let file = File::from(file);
-            if handoff::mount_id(&file)? != handoff::mount_id(parent)? {
-                return Err(invalid("capture entry is outside the selected Host mount"));
-            }
-            Ok(Some(file))
-        }
-        Err(Errno::NOENT) => Ok(None),
+    match handoff::open_child(parent, path, flags) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io::Error::new(
-            io::Error::from(error).kind(),
+            error.kind(),
             format!("could not open capture entry {path}: {error}"),
         )),
     }

@@ -4,14 +4,15 @@ use std::fs::File;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 
-use rustix::fs::{self, Mode, OFlags, ResolveFlags};
+use rustix::fs::OFlags;
 use serde::Serialize;
 
 use super::{
-    Esrt, HEAD_SCHEMA, Head, OFFER, Offer, Version, activation::Activation, boot, boot_id, capsule,
-    live, qualification, transition, uuid,
+    Esrt, HEAD_SCHEMA, Head, OFFER, Offer, Version,
+    activation::{self, Activation},
+    boot, boot_id, capsule, live, qualification, transition, uuid,
 };
-use crate::{MANIFEST_BYTES, Result, Role, channel::digest, invalid};
+use crate::{MANIFEST_BYTES, Result, Role, channel::digest, handoff, invalid};
 
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "kebab-case")]
@@ -50,14 +51,10 @@ impl Evidence {
             return Err(invalid("firmware completion requires a different verified boot").into());
         };
         require_success(assessment, boot_transition, &observed.fwupd_history)?;
-        let bytes = staged_record(directory, activation, OFFER, MANIFEST_BYTES)?;
+        let staged = activation::staged_offer(directory, &activation.offer_sha256)?;
+        let bytes = staged_record(&staged, OFFER, MANIFEST_BYTES)?;
         let (_, offer) = parse_offer(&bytes, &activation.offer_sha256, &activation.device_id)?;
-        let reboot = staged_record(
-            directory,
-            activation,
-            qualification::REBOOT_FILE,
-            qualification::LIMIT,
-        )?;
+        let reboot = staged_record(&staged, qualification::REBOOT_FILE, qualification::LIMIT)?;
         qualification::Reboot::require_capsule_reboot(&reboot, &offer)?;
         capsule::require_clear_queue()
     }
@@ -151,16 +148,12 @@ fn collect(
     directory: &File,
     activation: &Activation,
 ) -> Result<(Assessment, Observed, boot::Policy, qualification::Recovery)> {
-    let bytes = staged_record(directory, activation, OFFER, MANIFEST_BYTES)?;
+    let staged = activation::staged_offer(directory, &activation.offer_sha256)?;
+    let bytes = staged_record(&staged, OFFER, MANIFEST_BYTES)?;
     let (head, offer) = parse_offer(&bytes, &activation.offer_sha256, &activation.device_id)?;
-    let evidence = staged_record(directory, activation, transition::FILE, transition::LIMIT)?;
+    let evidence = staged_record(&staged, transition::FILE, transition::LIMIT)?;
     let qualified = transition::Transition::parse(&evidence, &head, &offer)?;
-    let recovery = staged_record(
-        directory,
-        activation,
-        qualification::RECOVERY_FILE,
-        qualification::LIMIT,
-    )?;
+    let recovery = staged_record(&staged, qualification::RECOVERY_FILE, qualification::LIMIT)?;
     let recovery = qualification::Recovery::parse(&recovery, &offer)?;
     require_baseline(&offer, activation.esrt_before.as_ref())?;
     let observed = live::read_result(&offer, &head.system_uuid, &head.fwupd_version, activation)?;
@@ -168,20 +161,12 @@ fn collect(
     Ok((assessment, observed, qualified.after, recovery))
 }
 
-fn staged_record(
-    directory: &File,
-    activation: &Activation,
-    name: &str,
-    limit: u64,
-) -> Result<Vec<u8>> {
-    let relative = format!("staged/{}/{name}", activation.offer_sha256);
-    let file = File::from(fs::openat2(
+fn staged_record(directory: &File, name: &str, limit: u64) -> Result<Vec<u8>> {
+    let file = handoff::open_child(
         directory,
-        relative.as_str(),
-        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
-        Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
-    )?);
+        name,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY,
+    )?;
     let meta = file.metadata()?;
     if !meta.is_file()
         || meta.uid() != 0

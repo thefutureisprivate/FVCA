@@ -1,19 +1,67 @@
+diff --git a/libfwupdplugin/fu-fvca-fs-private.h b/libfwupdplugin/fu-fvca-fs-private.h
+new file mode 100644
+index 0000000..a30bf0d
+--- /dev/null
++++ b/libfwupdplugin/fu-fvca-fs-private.h
+@@ -0,0 +1,42 @@
++/*
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ */
++
++#pragma once
++
++#include <errno.h>
++#include <fcntl.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++/* Open one component and keep each descriptor on its parent's mount. */
++static inline int
++fu_fvca_open_child(int parent, const char *name, int flags)
++{
++	struct statx parent_mount;
++	struct statx child_mount;
++	int fd;
++	int saved_errno;
++
++	if (name[0] == '\0' || strcmp(name, ".") == 0 || strcmp(name, "..") == 0 ||
++	    strchr(name, '/') != NULL) {
++		errno = EINVAL;
++		return -1;
++	}
++	fd = openat(parent, name, flags | O_CLOEXEC | O_NOFOLLOW);
++	if (fd < 0)
++		return -1;
++	if (statx(parent, "", AT_EMPTY_PATH, STATX_MNT_ID, &parent_mount) != 0 ||
++	    statx(fd, "", AT_EMPTY_PATH, STATX_MNT_ID, &child_mount) != 0) {
++		saved_errno = errno;
++	} else if ((parent_mount.stx_mask & child_mount.stx_mask & STATX_MNT_ID) == 0 ||
++		   parent_mount.stx_mnt_id != child_mount.stx_mnt_id) {
++		saved_errno = EXDEV;
++	} else {
++		return fd;
++	}
++	close(fd);
++	errno = saved_errno;
++	return -1;
++}
 diff --git a/plugins/uefi-capsule/fu-uefi-cod-device.c b/plugins/uefi-capsule/fu-uefi-cod-device.c
-index 67cc691..80b8bab 100644
+index 67cc691..e97c35e 100644
 --- a/plugins/uefi-capsule/fu-uefi-cod-device.c
 +++ b/plugins/uefi-capsule/fu-uefi-cod-device.c
-@@ -8,0 +9,6 @@
+@@ -8,0 +9,5 @@
 +#include <dirent.h>
 +#include <errno.h>
 +#include <fcntl.h>
 +#include <glib-unix.h>
 +#include <linux/magic.h>
-+#include <linux/openat2.h>
-@@ -9,0 +16,3 @@
+@@ -9,0 +15,4 @@
 +#include <sys/statfs.h>
-+#include <sys/syscall.h>
 +#include <unistd.h>
-@@ -242,0 +252,84 @@ fu_uefi_cod_device_get_filename(FuUefiCapsuleDevice *self, GError **error)
++
++#include "fu-fvca-fs-private.h"
+@@ -242,0 +252,80 @@ fu_uefi_cod_device_get_filename(FuUefiCapsuleDevice *self, GError **error)
 +static gboolean
 +fu_uefi_cod_device_require_idle_efi(FuEfivars *efivars, GError **error)
 +{
@@ -57,18 +105,14 @@ index 67cc691..80b8bab 100644
 +static gboolean
 +fu_uefi_cod_device_require_empty_queue(gint esp, GError **error)
 +{
-+	struct open_how how = {
-+	    .flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC,
-+	    .resolve = RESOLVE_BENEATH | RESOLVE_NO_XDEV | RESOLVE_NO_SYMLINKS,
-+	};
-+	g_autofd gint efi = syscall(SYS_openat2, esp, "EFI", &how, sizeof(how));
++	g_autofd gint efi = fu_fvca_open_child(esp, "EFI", O_RDONLY | O_DIRECTORY);
 +	g_autofd gint queue = -1;
 +	DIR *directory;
 +	struct dirent *entry;
 +
 +	if (efi < 0)
 +		goto unreadable;
-+	queue = syscall(SYS_openat2, efi, "UpdateCapsule", &how, sizeof(how));
++	queue = fu_fvca_open_child(efi, "UpdateCapsule", O_RDONLY | O_DIRECTORY);
 +	if (queue < 0 && errno == ENOENT)
 +		return TRUE;
 +	if (queue < 0)
@@ -98,16 +142,16 @@ index 67cc691..80b8bab 100644
 +	return FALSE;
 +}
 +
-@@ -252,0 +346,2 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
+@@ -252,0 +342,2 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
 +	FuVolume *volume = fu_uefi_capsule_device_get_esp(self);
 +	g_autofree gchar *esp_path = NULL;
-@@ -253,0 +349 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
+@@ -253,0 +345 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
 +	g_autofree gchar *directory = NULL;
-@@ -255,0 +352,3 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
+@@ -255,0 +348,3 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
 +	g_autofd gint esp = -1;
 +	struct statfs fs;
 +	const guint64 indications = GUINT64_TO_LE(EFI_OS_INDICATIONS_FILE_CAPSULE_DELIVERY_SUPPORTED);
-@@ -257,6 +356,6 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
+@@ -257,6 +352,14 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
 -	/* ensure we have the existing state */
 -	if (fu_uefi_capsule_device_get_guid(self) == NULL) {
 -		g_set_error_literal(error,
@@ -120,29 +164,29 @@ index 67cc691..80b8bab 100644
 +	    fu_device_has_private_flag(device, FU_UEFI_CAPSULE_DEVICE_FLAG_COD_DELL_RECOVERY)) {
 +		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_NOT_SUPPORTED,
 +				    "FVCA capsule writer requires the qualified native delivery route");
-@@ -264,0 +364,11 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
++		return FALSE;
++	}
 +	esp_path = fu_volume_get_mount_point(volume);
 +	if (g_strcmp0(esp_path, "/run/fvca/firmware-esp") != 0 ||
 +	    (esp = open(esp_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)) < 0 ||
 +	    fstatfs(esp, &fs) != 0 || fs.f_type != MSDOS_SUPER_MAGIC) {
 +		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
 +				    "FVCA capsule device lost its verified ESP");
-+		return FALSE;
-+	}
+@@ -264,0 +368,3 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
 +	if (!fu_uefi_cod_device_require_idle_efi(efivars, error) ||
 +	    !fu_uefi_cod_device_require_empty_queue(esp, error))
 +		return FALSE;
-@@ -266 +376 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
+@@ -266 +372 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
 -	/* copy the capsule */
 +	/* Retain fwupd's firmware fixup and native filename selection. */
-@@ -276,2 +386,4 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
+@@ -276,2 +382,4 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
 -	g_info("using %s", cod_path);
 -	if (!fu_volume_write_file(fu_uefi_capsule_device_get_esp(self), cod_path, fixed_fw, error))
 +	directory = g_path_get_dirname(cod_path);
 +	if (g_strcmp0(directory, "/run/fvca/firmware-esp/EFI/UpdateCapsule") != 0) {
 +		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE,
 +				    "FVCA capsule path is outside the selected ESP queue");
-@@ -279,44 +390,0 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
+@@ -279,44 +386,0 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
 -
 -	/*
 -	 * NOTE: The EFI spec requires setting OsIndications!
@@ -187,7 +231,7 @@ index 67cc691..80b8bab 100644
 -			g_prefix_error_literal(error, "Could not set OsIndications: ");
 -			return FALSE;
 -		}
-@@ -324,3 +392,15 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
+@@ -324,3 +388,15 @@ fu_uefi_cod_device_write_firmware(FuDevice *device,
 -
 -	/* success */
 -	return TRUE;
@@ -207,7 +251,7 @@ index 67cc691..80b8bab 100644
 +				       FU_EFI_VARIABLE_ATTR_RUNTIME_ACCESS,
 +				   error);
 diff --git a/src/fu-dbus-daemon.c b/src/fu-dbus-daemon.c
-index 8768a8b..097c4b3 100644
+index 8768a8b..11ff9b3 100644
 --- a/src/fu-dbus-daemon.c
 +++ b/src/fu-dbus-daemon.c
 @@ -30,0 +31 @@
@@ -396,10 +440,10 @@ index 8768a8b..097c4b3 100644
 +
 diff --git a/src/fu-fvca-capsule.c b/src/fu-fvca-capsule.c
 new file mode 100644
-index 0000000..14d0cd2
+index 0000000..8122799
 --- /dev/null
 +++ b/src/fu-fvca-capsule.c
-@@ -0,0 +1,417 @@
+@@ -0,0 +1,415 @@
 +/*
 + * SPDX-License-Identifier: LGPL-2.1-or-later
 + */
@@ -411,15 +455,14 @@ index 0000000..14d0cd2
 +#include <fcntl.h>
 +#include <glib-unix.h>
 +#include <linux/magic.h>
-+#include <linux/openat2.h>
 +#include <sys/file.h>
 +#include <sys/stat.h>
 +#include <sys/statfs.h>
 +#include <sys/statvfs.h>
-+#include <sys/syscall.h>
 +#include <unistd.h>
 +
 +#include "fu-context-private.h"
++#include "fu-fvca-fs-private.h"
 +#include "fu-fvca-capsule.h"
 +#include "fu-volume-private.h"
 +
@@ -427,7 +470,6 @@ index 0000000..14d0cd2
 +#define FU_FVCA_POOL FU_FVCA_RUN "/host-data"
 +#define FU_FVCA_HISTORY FU_FVCA_POOL "/firmware-update/history"
 +#define FU_FVCA_ESP_BINDING "firmware-esp-binding"
-+#define FU_FVCA_DRAIN_RECEIPT "firmware-activation/guest-drained"
 +#define FU_FVCA_LEASE "guest-capture.lock"
 +#define FU_FVCA_FILE_FLAGS (O_RDONLY | O_NOCTTY | O_NONBLOCK | O_CLOEXEC)
 +#define FU_FVCA_DIR_FLAGS (O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)
@@ -437,16 +479,6 @@ index 0000000..14d0cd2
 +{
 +	g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_PERMISSION_DENIED, message);
 +	return FALSE;
-+}
-+
-+static gint
-+fu_fvca_openat(gint parent, const gchar *name, guint64 flags)
-+{
-+	struct open_how how = {
-+	    .flags = flags,
-+	    .resolve = RESOLVE_BENEATH | RESOLVE_NO_XDEV | RESOLVE_NO_SYMLINKS,
-+	};
-+	return syscall(SYS_openat2, parent, name, &how, sizeof(how));
 +}
 +
 +static gboolean
@@ -465,7 +497,7 @@ index 0000000..14d0cd2
 +		gboolean durable,
 +		GError **error)
 +{
-+	g_autofd gint fd = fu_fvca_openat(parent, name, FU_FVCA_FILE_FLAGS);
++	g_autofd gint fd = fu_fvca_open_child(parent, name, FU_FVCA_FILE_FLAGS);
 +	struct stat st;
 +	g_autofree guint8 *data = NULL;
 +
@@ -689,13 +721,15 @@ index 0000000..14d0cd2
 +	g_autofd gint lock = -1;
 +	g_autofd gint pool = -1;
 +	g_autofd gint directory = -1;
++	g_autofd gint drain_directory = -1;
++	g_autofd gint staging = -1;
++	g_autofd gint offer_directory = -1;
 +	g_autoptr(GBytes) activation = NULL;
 +	g_autoptr(GBytes) drained = NULL;
 +	g_autoptr(GBytes) offer = NULL;
 +	g_autoptr(FwupdJsonObject) record = NULL;
 +	g_autofree gchar *boot_id = NULL;
 +	g_autofree gchar *expected_drain = NULL;
-+	g_autofree gchar *offer_path = NULL;
 +	struct stat lock_stat;
 +	struct stat lease_stat;
 +	struct stat dir_stat;
@@ -706,7 +740,7 @@ index 0000000..14d0cd2
 +
 +	if (run < 0)
 +		return fu_fvca_deny(error, "FVCA firmware runtime directory is unavailable");
-+	lock = fu_fvca_openat(run, FU_FVCA_LEASE, FU_FVCA_FILE_FLAGS);
++	lock = fu_fvca_open_child(run, FU_FVCA_LEASE, FU_FVCA_FILE_FLAGS);
 +	if (lock < 0 || !fu_fvca_private(lock, S_IFREG | 0600, &lock_stat) ||
 +	    !fu_fvca_private(lease, S_IFREG | 0600, &lease_stat) ||
 +	    lock_stat.st_dev != lease_stat.st_dev || lock_stat.st_ino != lease_stat.st_ino ||
@@ -721,7 +755,7 @@ index 0000000..14d0cd2
 +	    (run_mount.stx_mask & pool_mount.stx_mask & STATX_MNT_ID) == 0 ||
 +	    run_mount.stx_mnt_id == pool_mount.stx_mnt_id)
 +		return fu_fvca_deny(error, "FVCA firmware activation requires the private Btrfs Host pool");
-+	directory = fu_fvca_openat(pool, "firmware-update", FU_FVCA_DIR_FLAGS);
++	directory = fu_fvca_open_child(pool, "firmware-update", FU_FVCA_DIR_FLAGS);
 +	if (directory < 0 || !fu_fvca_private(directory, S_IFDIR | 0700, &dir_stat))
 +		return fu_fvca_deny(error, "FVCA firmware activation directory is unavailable");
 +	activation = fu_fvca_record(directory, "activation.json", 0600, 1024, TRUE, error);
@@ -744,7 +778,10 @@ index 0000000..14d0cd2
 +	    !fu_fvca_match(record, "device_id", identity->device_id))
 +		return fu_fvca_deny(error, "FVCA firmware request differs from the durable flashing operation");
 +
-+	drained = fu_fvca_record(run, FU_FVCA_DRAIN_RECEIPT, 0600, 256, FALSE, error);
++	drain_directory = fu_fvca_open_child(run, "firmware-activation", FU_FVCA_DIR_FLAGS);
++	if (drain_directory < 0)
++		return fu_fvca_deny(error, "FVCA firmware drain directory is unavailable");
++	drained = fu_fvca_record(drain_directory, "guest-drained", 0600, 256, FALSE, error);
 +	if (drained == NULL)
 +		return FALSE;
 +	expected_drain = g_strdup_printf("FVCA-FIRMWARE-DRAIN-1\nboot_id=%s\ntransaction=%s\noffer_sha256=%s\n",
@@ -753,8 +790,13 @@ index 0000000..14d0cd2
 +	    memcmp(g_bytes_get_data(drained, NULL), expected_drain, strlen(expected_drain)) != 0)
 +		return fu_fvca_deny(error, "FVCA firmware writer requires the matching Guest drain receipt");
 +
-+	offer_path = g_build_filename("staged", offer_sha256, "offer.json", NULL);
-+	offer = fu_fvca_record(directory, offer_path, 0400, 64 * FU_KB, FALSE, error);
++	staging = fu_fvca_open_child(directory, "staged", FU_FVCA_DIR_FLAGS);
++	if (staging < 0)
++		return fu_fvca_deny(error, "FVCA firmware staging directory is unavailable");
++	offer_directory = fu_fvca_open_child(staging, offer_sha256, FU_FVCA_DIR_FLAGS);
++	if (offer_directory < 0)
++		return fu_fvca_deny(error, "FVCA active offer directory is unavailable");
++	offer = fu_fvca_record(offer_directory, "offer.json", 0400, 64 * FU_KB, FALSE, error);
 +	return offer != NULL && fu_fvca_match_offer(offer, identity, offer_sha256, catalog, error);
 +}
 +
@@ -819,7 +861,7 @@ index 0000000..14d0cd2
 +}
 diff --git a/src/fu-fvca-capsule.h b/src/fu-fvca-capsule.h
 new file mode 100644
-index 0000000..de05c59
+index 0000000..ff5f56f
 --- /dev/null
 +++ b/src/fu-fvca-capsule.h
 @@ -0,0 +1,40 @@

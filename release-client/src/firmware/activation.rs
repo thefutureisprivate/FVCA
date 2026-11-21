@@ -1,12 +1,12 @@
 //! Reconcile interrupted activation before renewing or retiring firmware staging.
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{self, Read};
 
 use fvca_trial_authorization::firmware::{
     ACTIVATION, DRAIN_RECEIPT, RUN_DIRECTORY, activation_pending,
 };
-use rustix::fs::{self, Mode, OFlags, ResolveFlags};
+use rustix::fs::{self, OFlags};
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 
@@ -18,13 +18,8 @@ const LIMIT: u64 = 1024;
 const RESULT_SCHEMA: &str = "fvca-firmware-activation-result-v1";
 const RESULT_LIMIT: u64 = 8192;
 const VERIFIED_SUCCESS: &str = "verified-success";
-const PRIVATE_READ: OFlags = OFlags::RDONLY
-    .union(OFlags::NONBLOCK)
-    .union(OFlags::NOCTTY)
-    .union(OFlags::CLOEXEC);
-const WITHIN_POOL: ResolveFlags = ResolveFlags::BENEATH
-    .union(ResolveFlags::NO_SYMLINKS)
-    .union(ResolveFlags::NO_XDEV);
+const PRIVATE_READ: OFlags = OFlags::RDONLY.union(OFlags::NONBLOCK).union(OFlags::NOCTTY);
+const DIRECTORY: OFlags = OFlags::RDONLY.union(OFlags::DIRECTORY);
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -194,15 +189,8 @@ impl Activation {
         }
         let name = format!("activation-aborted-{}.json", self.transaction);
         let bytes = serde_json::to_vec(&self)?;
-        match fs::openat2(
-            pool,
-            name.as_str(),
-            PRIVATE_READ,
-            Mode::empty(),
-            WITHIN_POOL,
-        ) {
-            Ok(fd) => {
-                let file = File::from(fd);
+        match handoff::open_child(pool, &name, PRIVATE_READ) {
+            Ok(file) => {
                 handoff::private_file(&file)?;
                 if Self::read(file)? != *self {
                     return Err(invalid(
@@ -211,7 +199,9 @@ impl Activation {
                     .into());
                 }
             }
-            Err(Errno::NOENT) => handoff::publish_record(pool, &name, &bytes, &|| Ok(()))?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                handoff::publish_record(pool, &name, &bytes, &|| Ok(()))?
+            }
             Err(error) => return Err(error.into()),
         }
         if self.guest_was_active && current_boot == self.boot_id {
@@ -224,9 +214,9 @@ impl Activation {
 }
 
 pub(super) fn pending(pool: &File) -> Result<Option<Activation>> {
-    let file = match fs::openat2(pool, ACTIVATION, PRIVATE_READ, Mode::empty(), WITHIN_POOL) {
-        Ok(fd) => File::from(fd),
-        Err(Errno::NOENT) => return Ok(None),
+    let file = match handoff::open_child(pool, ACTIVATION, PRIVATE_READ) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     handoff::private_file(&file)?;
@@ -315,15 +305,8 @@ fn commit_verified(
     evidence: &serde_json::Value,
 ) -> Result<()> {
     let name = format!("activation-result-{}.json", activation.transaction);
-    match fs::openat2(
-        pool,
-        name.as_str(),
-        PRIVATE_READ,
-        Mode::empty(),
-        WITHIN_POOL,
-    ) {
-        Ok(fd) => {
-            let file = File::from(fd);
+    match handoff::open_child(pool, &name, PRIVATE_READ) {
+        Ok(file) => {
             handoff::private_file(&file)?;
             let mut bytes = Vec::new();
             (&file).take(RESULT_LIMIT + 1).read_to_end(&mut bytes)?;
@@ -357,7 +340,7 @@ fn commit_verified(
             file.sync_all()?;
             pool.sync_all()?;
         }
-        Err(Errno::NOENT) => {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let bytes = serde_json::to_vec(&VerifiedResult {
                 schema: RESULT_SCHEMA,
                 disposition: VERIFIED_SUCCESS,
@@ -379,17 +362,15 @@ fn commit_verified(
     Ok(())
 }
 
+pub(super) fn staged_offer(pool: &File, digest: &str) -> io::Result<File> {
+    let staged = handoff::open_child(pool, "staged", DIRECTORY)?;
+    handoff::open_child(&staged, digest, DIRECTORY)
+}
+
 fn retire_archive(pool: &File, activation: &Activation) -> Result<()> {
-    let path = format!("staged/{}", activation.offer_sha256);
-    let stage = match fs::openat2(
-        pool,
-        path.as_str(),
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-        WITHIN_POOL,
-    ) {
-        Ok(fd) => File::from(fd),
-        Err(Errno::NOENT) => return Ok(()),
+    let stage = match staged_offer(pool, &activation.offer_sha256) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
     match fs::unlinkat(&stage, ARCHIVE, fs::AtFlags::empty()) {
