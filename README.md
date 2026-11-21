@@ -76,6 +76,17 @@ python3 obs/prepare-build.py COMMIT build/allocator-upstream/hardened_malloc-14.
 
 Prepare the Guest vendor directory with the locked `cargo vendor --versioned-dirs` command in the release-client section below. The source preparer checks the Cargo lockfiles from the selected commit and packages the exact crate set for both Guest binaries. Commit every generated file to its corresponding OBS package. The worker uses the OBS project's staging certificate for its UKI and verity signatures. Decompress the disk and its package manifest so they share a basename with `.raw` and `.manifest` extensions. Run `tools/verify-base.py` with the staging certificate, `--extract-root` for the runtime build input, and `--extract-initrd` for the embedded initramfs. Production authorization requires independent evidence and production keys. [OBS mkosi build documentation](https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-package-formats#sec-obs-mkosi)
 
+Verify the OBS manifest's signed checksum, save `_buildenv` for that same candidate, and collect the exact Fedora RPM archives named by the core and runtime manifests. Run the package review on the independent review system with RPM 6 and the Fedora 45 public signing key.
+
+```sh
+python3 obs/review-rpms.py hypervisor \
+  --core-manifest CORE.manifest.gz --runtime-manifest vm-runtime.manifest \
+  --buildenv HYPERVISOR_BUILDENV.xml --rpm-directory FEDORA_RPMS \
+  --fedora-key RPM-GPG-KEY-fedora-45-primary --output hypervisor-rpm-review.json
+```
+
+Use `service-guest` with `oci-runtime.manifest` for the Guest. The report records exact package identities, archive SHA-256 digests, source RPM names, and licenses. It matches the core RPMs to the recorded OBS worker inputs and checks shared package versions across each core and runtime. Keep the report with the separate image-content and custom-binary build evidence. [Fedora package signing keys](https://fedoraproject.org/security/) · [RPM verification policy](https://rpm.org/docs/latest/man/rpmkeys.8.html)
+
 On the separate signing system, pass the reviewed digests of the uncompressed disk and package manifest to the core authorizer.
 
 ```sh
