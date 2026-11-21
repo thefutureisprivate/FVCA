@@ -79,7 +79,8 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
     media_access = "snapshot=on" if nvme else "readonly=on"
     command = [
         "qemu-system-x86_64", *devices, "-machine", machine, "-accel", "kvm", "-cpu", cpu,
-        "-m", str(getattr(args, "memory_mib", 4096 if nested is not None else 2048)), "-smp", "2", *loader,
+        "-m", str(getattr(args, "memory_mib", 4096 if nested is not None else 2048)),
+        "-smp", str(getattr(args, "vcpus", 2)), *loader,
         "-drive", f"if=none,id=fvca-boot,format=raw,{media_access},file={image(args.disk)}",
         "-device", f"{boot_device}{geometry}" + ("" if persistent else ",bootindex=1"),
     ]
@@ -246,6 +247,52 @@ def check_hypervisor(args):
         print(f"{name} passed")
 
 
+def require_nested_guest_ready(log, required, expected_launches):
+    guest_ready = b"FVCA_SERVICE_GUEST_READY"
+    guest_agent = b"FVCA_SERVICE_GUEST_AGENT_READY"
+    guests = re.findall(rb"launch-guest\[[0-9]+\]: FVCA_KVM_GUEST_CONFINED", log)
+    probe = re.search(rb"qualify-libvirt\[[0-9]+\]: FVCA_KVM_GUEST_CONFINED", log)
+    mandatory = (HOST_PROFILES, ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", guest_agent, guest_ready, READY)
+    if len(guests) != expected_launches or probe is None or FAIL in log or any(
+        marker not in log for marker in (*mandatory, *required)
+    ):
+        raise ValueError("the Hypervisor did not reach readiness with its authorized nested Guest")
+    if not 0 <= log.find(KERNEL_SEALED) < log.find(guest_agent) < log.find(guest_ready) < log.find(READY):
+        raise ValueError("the Hypervisor did not seal its policy and verify Guest agent readiness in order")
+
+
+def check_nested_guest_tpm_auto(args):
+    """Qualify a self-contained slot with freshly copied software TPM state."""
+    args.output.mkdir(mode=0o700)
+    args.nvme_boot = True
+    args.boot_sector_size = 4096
+    args.no_default_devices = True
+    args.memory_mib = 8192
+    args.vcpus = 4
+    members = [args.lab / f"member-{side}.raw" for side in ("a", "b")]
+    for attempt in range(1, 4):
+        with software_tpm(args.tpm_state) as socket:
+            prompts, log = boot(
+                args, f"nested-tpm-auto-{attempt}", None, *members, firmware=args.firmware,
+                tpm_socket=socket, firmware_timeout=30, timeout=155, ready_marker=READY,
+            )
+        if b"Kernel command line:" in log:
+            break
+    log = rejoin_serial_output(log)
+    if prompts or PROMPT.search(log):
+        raise ValueError("the unattended Hypervisor requested storage input")
+    epoch = b"FVCA_HYPERVISOR_EPOCH_ACCEPTED"
+    unlocked = b"FVCA_HOST_STORAGE_TPM_UNLOCKED"
+    required = (
+        b"secureboot: Secure boot enabled", b"FVCA_HYPERVISOR_SLOT_VERIFIED", epoch, HOST_AUTHENTICATED,
+        b"FVCA_HOST_STORAGE_UNLOCK_PROFILE tpm2-auto", unlocked,
+    )
+    require_nested_guest_ready(log, required, expected_launches=1)
+    if not 0 <= log.find(epoch) < log.find(unlocked) < log.find(ACTIVE):
+        raise ValueError("the Hypervisor did not enforce its TPM epoch before publishing storage")
+    print("nested-guest-tpm-auto passed")
+
+
 def check_nested_guest(args):
     args.output.mkdir(mode=0o700)
     lab = args.lab
@@ -268,22 +315,18 @@ def check_nested_guest(args):
                         ready_marker=finished)
     # Kernel audit printing can interrupt a userspace line on the shared console.
     # Validate the reconstructed markers and retain the original log on disk.
-    log = KERNEL_AUDIT.sub(b"", log)
-    required = (HOST_PROFILES, ACTIVE, b"FVCA_LIBVIRT_LIFECYCLE_OK", b"FVCA_SERVICE_GUEST_AGENT_READY", guest_ready, READY)
+    log = rejoin_serial_output(log)
+    required = ()
     if args.nested_guest_shutdown:
         required += (b"FVCA_SERVICE_GUEST_STOPPED", finished)
     if args.nested_guest_capture:
         required += (b"FVCA_SERVICE_GUEST_STOPPED", finished)
     if args.nested_guest_live_capture or args.nested_guest_restore:
         required += (finished,)
-    guests = re.findall(rb"launch-guest\[[0-9]+\]: FVCA_KVM_GUEST_CONFINED", log)
-    probe = re.search(rb"qualify-libvirt\[[0-9]+\]: FVCA_KVM_GUEST_CONFINED", log)
     expected_launches = 4 if args.nested_guest_restore else (2 if args.nested_guest_capture else 1)
-    if (prompts != 2 or len(guests) != expected_launches or probe is None
-            or FAIL in log or any(marker not in log for marker in required)):
-        raise ValueError("the Hypervisor did not reach readiness with its authorized nested Guest")
-    if not 0 <= log.find(KERNEL_SEALED) < log.find(guest_ready):
-        raise ValueError("the Hypervisor launched the nested Guest before sealing its kernel policy")
+    require_nested_guest_ready(log, required, expected_launches)
+    if prompts != 2:
+        raise ValueError("the passphrase Hypervisor did not unlock the two expected members")
     print("nested-guest passed")
     if args.nested_guest_shutdown:
         print("nested-guest-shutdown passed")
@@ -521,6 +564,8 @@ if __name__ == "__main__":
     role.add_argument("--runtime", type=Path, help="signed Hypervisor runtime")
     role.add_argument("--guest", action="store_true", help="qualify the Service Guest data disk")
     role.add_argument("--oci-runtime", type=Path, help="signed Service Guest OCI runtime")
+    role.add_argument("--nested-guest-tpm-auto", action="store_true",
+                      help="qualify a signed 4 KiB Hypervisor GPT slot with unattended TPM unlock and its integrated Guest")
     parser.add_argument("--replacement-disk", type=Path, help="Hypervisor boot disk authorizing the lab replacement")
     parser.add_argument("--nested-guest", type=Path, help="Guest bundle to launch inside the disposable Hypervisor")
     qualification = parser.add_mutually_exclusive_group()
@@ -566,7 +611,10 @@ if __name__ == "__main__":
         args.guest = True
         args.runtime = args.oci_runtime
     tpm_options = (args.tpm_state, args.pin_file, args.firmware)
-    if any(tpm_options) and (args.guest or not all(tpm_options)):
+    if args.nested_guest_tpm_auto:
+        if not args.tpm_state or not args.firmware or args.pin_file or args.replacement_disk or args.nested_guest:
+            parser.error("nested TPM auto-unlock requires --tpm-state and --firmware for an integrated GPT slot")
+    elif any(tpm_options) and (args.guest or not all(tpm_options)):
         parser.error("the Hypervisor TPM test requires --tpm-state, --pin-file and --firmware")
     if args.replacement_disk is not None and (args.guest or any(tpm_options)):
         parser.error("--replacement-disk requires the Hypervisor development passphrase test")
@@ -576,7 +624,9 @@ if __name__ == "__main__":
             or args.nested_guest_restore) and args.nested_guest is None:
         parser.error("nested Guest qualification requires --nested-guest")
     try:
-        if args.tpm_state is not None:
+        if args.nested_guest_tpm_auto:
+            check_nested_guest_tpm_auto(args)
+        elif args.tpm_state is not None:
             check_tpm(args)
         elif args.workload:
             check_guest_workload(args)

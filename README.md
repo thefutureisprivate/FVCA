@@ -789,6 +789,16 @@ python3 tools/compose-hypervisor.py \
 
 After unlocking both Host members, the Hypervisor mounts the selected Guest boot disk read-only and checks its authorized bytes before creating the VM through private libvirt. The registered VM uses a single Btrfs subvolume at `/run/fvca/host-data/vms/service-guest` with one private writable `data.raw`. The launcher checks the Btrfs CoW and data-checksum flags on the directory and disk. It exposes one disk attachment and keeps the pool directory private. The runtime checks that the libvirt management domain and the QEMU sVirt domain are enforcing in the loaded SELinux policy.
 
+Qualify a self-contained 4 KiB GPT slot with the disposable authenticated mirror and its enrolled software TPM state.
+
+```sh
+python3 tests/check-storage.py --nested-guest-tpm-auto \
+  --disk HOST_GPT_SLOT --variables ENROLLED_OVMF_VARS --firmware OVMF_SECBOOT_CODE \
+  --lab HOST_MIRROR_FIXTURE --tpm-state STOPPED_SWTPM_STATE --output NEW_OUTPUT_DIRECTORY
+```
+
+Seed the Guest Btrfs disk to match the selected release. A workload-bearing release requires its signed workload files and provisioned volumes before the Guest can reach readiness. The check requires the Host epoch gate, unattended unlock, authenticated RAID1, an enforcing sVirt Guest and Guest agent readiness before the Host reports ready.
+
 To configure CPU and RAM for the registered VM, pass `--guest-vm-settings PATH` when composing the Hypervisor. The file accepts this JSON object.
 
 ```json
