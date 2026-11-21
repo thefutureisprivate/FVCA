@@ -242,6 +242,9 @@ enum Outcome {
     HostBackupStatus {
         scheduled: Option<storage_health::ScheduledBackup>,
     },
+    OsReleaseStatus {
+        os_release: Box<channel::UpdateObservation>,
+    },
     HostFirmwareStatus {
         firmware: Box<crate::firmware::StatusSnapshot>,
     },
@@ -289,6 +292,18 @@ async fn dispatch(
         Operation::HostBackupStatus {} => {
             let scheduled = storage_health::backup().await?;
             Ok(Outcome::HostBackupStatus { scheduled })
+        }
+        Operation::OsReleaseStatus { role } => {
+            let now = protocol::current_time()
+                .ok()
+                .and_then(|value| i64::try_from(value).ok())
+                .filter(|&value| value > 0)
+                .ok_or(Refusal::OsReleaseStatusUnavailable)?;
+            let os_release = channel::UpdateObservation::read(*role, now)
+                .map_err(|_| Refusal::OsReleaseStatusUnavailable)?;
+            Ok(Outcome::OsReleaseStatus {
+                os_release: Box::new(os_release),
+            })
         }
         Operation::HostFirmwareStatus {} => {
             let firmware = firmware_status::request()

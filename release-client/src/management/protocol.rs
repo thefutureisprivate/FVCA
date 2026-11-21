@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::local_captures::Cursor;
-use crate::{Result, channel, invalid, valid_digest, valid_uuid};
+use crate::{Result, Role, channel, invalid, valid_digest, valid_uuid};
 
 pub(super) const REQUEST_BYTES: usize = 2048;
 pub(super) const RESPONSE_BYTES: usize = 4096;
@@ -85,6 +85,9 @@ pub(super) enum Operation {
     Status {},
     HostStorageHealth {},
     HostBackupStatus {},
+    OsReleaseStatus {
+        role: Role,
+    },
     HostFirmwareStatus {},
     HostFirmwareInventory {
         after: Option<crate::firmware::InventoryCursor>,
@@ -182,6 +185,7 @@ pub(super) fn authorize(enrollment: &Enrollment, packet: &[u8], now: u64) -> Res
         Operation::Status {}
         | Operation::HostStorageHealth {}
         | Operation::HostBackupStatus {}
+        | Operation::OsReleaseStatus { .. }
         | Operation::HostFirmwareStatus {}
         | Operation::HostFirmwareInventory { .. }
         | Operation::HostLocalCaptures { .. }
@@ -254,6 +258,7 @@ pub(super) enum Refusal {
     BootQuoteUnavailable,
     HostStorageHealthUnavailable,
     HostBackupStatusUnavailable,
+    OsReleaseStatusUnavailable,
     HostFirmwareStatusUnavailable,
     HostFirmwareInventoryUnavailable,
     FirmwareInventoryChanged,

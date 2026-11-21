@@ -168,7 +168,7 @@ pub(super) fn reconcile(directory: &Path, active: Active, authorized_key: &[u8])
     }
     let running = current(active.clone(), &key, epoch, &launch()?)?;
     if running.active != active {
-        save(directory, "active-os-release.json", &running.active)?;
+        save(directory, super::ACTIVE_RELEASE, &running.active)?;
     }
     let store = Path::new(boot::STORE);
     if let Some(packet) = pending(store)?

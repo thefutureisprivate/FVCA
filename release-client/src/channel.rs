@@ -1,6 +1,9 @@
 //! Discover exact OS compositions under standing owner and qualification authority.
 
 mod guest;
+mod observation;
+
+pub(super) use observation::{ObservedRelease, UpdateObservation, observed_host_release};
 
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -126,51 +129,6 @@ struct Active {
     manifest_sha256: String,
 }
 
-#[derive(Serialize)]
-pub(super) struct ObservedRelease {
-    epoch: u64,
-    sequence: u64,
-    manifest_sha256: String,
-}
-
-pub(super) fn observed_host_release() -> Result<Option<ObservedRelease>> {
-    let directory = Path::new("/run/fvca/host-data/os-update");
-    let pinned = match handoff::require_pool_directory(directory) {
-        Ok(pinned) => pinned,
-        Err(error)
-            if error
-                .downcast_ref::<io::Error>()
-                .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) =>
-        {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
-    use std::os::fd::AsRawFd;
-    let path = std::path::PathBuf::from(format!("/proc/self/fd/{}", pinned.as_raw_fd()))
-        .join("active-os-release.json");
-    let data = match state::read(&path, MANIFEST_BYTES) {
-        Ok(data) => data,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    let active: Active = serde_json::from_slice(&data)?;
-    if active.role != Role::Hypervisor
-        || active.epoch == 0
-        || active.sequence == 0
-        || active.slot.is_none()
-        || active.guest_bundle.is_some()
-        || !valid_digest(&active.manifest_sha256)
-    {
-        return Err(invalid("invalid observed Host release record").into());
-    }
-    Ok(Some(ObservedRelease {
-        epoch: active.epoch,
-        sequence: active.sequence,
-        manifest_sha256: active.manifest_sha256,
-    }))
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Head {
@@ -184,7 +142,7 @@ struct Head {
     release: Option<Candidate>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Candidate {
     epoch: u64,
@@ -198,21 +156,21 @@ struct Candidate {
     guest_configuration_change: Option<Member>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(tag = "urgency", rename_all = "kebab-case", deny_unknown_fields)]
 enum Activation {
     Routine,
     Security { activate_by: i64 },
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Checkpoint {
+pub(super) struct Checkpoint {
     sequence: u64,
     sha256: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum Disposition {
     Disabled,
@@ -224,16 +182,24 @@ enum Disposition {
     Exhausted,
 }
 
-#[derive(Serialize)]
-struct Status<'a> {
-    schema: &'static str,
-    active: &'a Active,
-    channel: &'a str,
+const STATUS_SCHEMA: &str = "fvca-os-update-status-v2";
+const POLICY_CHECKPOINT: &str = "os-policy-checkpoint.json";
+const UPDATE_STATUS: &str = "os-update-status.json";
+const ACTIVE_RELEASE: &str = "active-os-release.json";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Status {
+    schema: String,
+    active: Active,
+    channel: String,
+    policy_checkpoint: Checkpoint,
+    head_sha256: Option<String>,
     disposition: Disposition,
     last_refresh: Option<i64>,
     fresh_until: Option<i64>,
     channel_sequence: Option<u64>,
-    candidate: Option<&'a Candidate>,
+    candidate: Option<Candidate>,
     staged: Option<String>,
     prepared_inactive_slot: Option<Slot>,
     delivered_trial: Option<String>,
@@ -248,17 +214,24 @@ fn valid_now(start: i64, end: i64, now: Timestamp) -> bool {
     start > 0 && (start..end).contains(&now.as_second())
 }
 
+fn valid_channel(channel: &str) -> bool {
+    (1..=32).contains(&channel.len())
+        && channel.as_bytes()[0].is_ascii_lowercase()
+        && channel
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
+
+fn channel_stem(role: Role, channel: &str) -> String {
+    format!("fvca-os-{}-{channel}", role.prefix())
+}
+
 impl Policy {
     fn validate(&self, now: Timestamp) -> Result<TimeZone> {
         if self.schema != "fvca-os-update-policy-v1"
             || !valid_now(self.valid_from, self.expires, now)
             || self.revision == 0
-            || !(1..=32).contains(&self.channel.len())
-            || !self
-                .channel
-                .bytes()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-            || !self.channel.as_bytes()[0].is_ascii_lowercase()
+            || !valid_channel(&self.channel)
             || !valid_digest(&self.compatibility_sha256)
             || !valid_digest(&self.qualification_key_ed25519)
             || self.minimum_epoch == 0
@@ -434,7 +407,7 @@ fn reconcile_promotion(directory: &Path, active: Active) -> Result<Active> {
             )
             .into());
         }
-        save(directory, "active-os-release.json", &promoted)?;
+        save(directory, ACTIVE_RELEASE, &promoted)?;
         println!(
             "FVCA_PROMOTED_RELEASE_COMMITTED {}",
             promotion.candidate_manifest
@@ -443,7 +416,12 @@ fn reconcile_promotion(directory: &Path, active: Active) -> Result<Active> {
     Ok(promoted)
 }
 
-pub(super) fn checkpoint(path: &Path, name: &str, sequence: u64, bytes: &[u8]) -> Result<()> {
+pub(super) fn checkpoint(
+    path: &Path,
+    name: &str,
+    sequence: u64,
+    bytes: &[u8],
+) -> Result<Checkpoint> {
     let next = Checkpoint {
         sequence,
         sha256: digest(bytes),
@@ -458,13 +436,14 @@ pub(super) fn checkpoint(path: &Path, name: &str, sequence: u64, bytes: &[u8]) -
                 return Err(invalid("signed update sequence rollback or equivocation").into());
             }
             if next.sequence == previous.sequence {
-                return Ok(());
+                return Ok(next);
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => (),
         Err(error) => return Err(error.into()),
     }
-    save(path, name, &next)
+    save(path, name, &next)?;
+    Ok(next)
 }
 
 fn staging_budget(directory: &Path, candidate: &str, policy: &Policy) -> Result<u64> {
@@ -549,7 +528,7 @@ pub async fn discover(
 ) -> Result<()> {
     let _lock = state::lock(directory)?;
     let active: Active = serde_json::from_slice(&state::read(
-        &directory.join("active-os-release.json"),
+        &directory.join(ACTIVE_RELEASE),
         MANIFEST_BYTES,
     )?)?;
     let active = if matches!(
@@ -614,12 +593,7 @@ pub async fn discover(
     {
         return Err(invalid("trial delivery requires a pinned standing trial authority").into());
     }
-    checkpoint(
-        directory,
-        "os-policy-checkpoint.json",
-        policy.revision,
-        &file,
-    )?;
+    let policy_checkpoint = checkpoint(directory, POLICY_CHECKPOINT, policy.revision, &file)?;
     let active = if matches!(operation, Operation::ScheduleGuest(_)) {
         guest::reconcile(
             directory,
@@ -635,9 +609,11 @@ pub async fn discover(
         return Err(invalid("observed active release is outside standing OS update policy").into());
     }
     let mut status = Status {
-        schema: "fvca-os-update-status-v1",
-        active: &active,
-        channel: &policy.channel,
+        schema: STATUS_SCHEMA.into(),
+        active: active.clone(),
+        channel: policy.channel.clone(),
+        policy_checkpoint,
+        head_sha256: None,
         disposition: Disposition::Disabled,
         last_refresh: None,
         fresh_until: None,
@@ -673,7 +649,7 @@ pub async fn discover(
     }) {
         return Err(invalid("TUF and OS policy authorities must use distinct keys").into());
     }
-    let stem = format!("fvca-os-{}-{}", policy.role.prefix(), policy.channel);
+    let stem = channel_stem(policy.role, &policy.channel);
     let contents = target(&repo, format!("{stem}.json"), MANIFEST_BYTES).await?;
     let signature = target(&repo, format!("{stem}.sig"), 64).await?;
     verify(
@@ -699,7 +675,7 @@ pub async fn discover(
     if !valid_now(policy.valid_from, expires, refreshed) {
         return Err(invalid("OS update authorization expired during discovery").into());
     }
-    checkpoint(
+    let head_checkpoint = checkpoint(
         directory,
         &format!("{stem}-checkpoint.json"),
         head.sequence,
@@ -707,8 +683,9 @@ pub async fn discover(
     )?;
     status.last_refresh = Some(refreshed.as_second());
     status.fresh_until = Some(expires);
-    status.channel_sequence = Some(head.sequence);
-    status.candidate = head.release.as_ref();
+    status.channel_sequence = Some(head_checkpoint.sequence);
+    status.head_sha256 = Some(head_checkpoint.sha256);
+    status.candidate.clone_from(&head.release);
     let require_fresh = |now: Timestamp| {
         if (refreshed.as_second()..expires).contains(&now.as_second()) {
             Ok(())
@@ -1013,8 +990,8 @@ pub async fn discover(
     request_result
 }
 
-fn report(directory: &Path, status: &Status<'_>) -> Result<()> {
-    save(directory, "os-update-status.json", status)?;
+fn report(directory: &Path, status: &Status) -> Result<()> {
+    save(directory, UPDATE_STATUS, status)?;
     println!("{}", serde_json::to_string(status)?);
     Ok(())
 }

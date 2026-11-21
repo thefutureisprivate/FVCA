@@ -167,22 +167,23 @@ type release struct {
 }
 
 type response struct {
-	Schema                string          `json:"schema"`
-	Nonce                 string          `json:"nonce"`
-	Host                  string          `json:"host"`
-	Guest                 string          `json:"guest"`
-	Result                string          `json:"result"`
-	Code                  string          `json:"code"`
-	BootConfiguration     *settings       `json:"boot_configuration"`
-	ConfigurationEnrolled *bool           `json:"configuration_enrolled"`
-	HostTrial             *bool           `json:"host_trial"`
-	Observed              *release        `json:"observed_release"`
-	Firmware              *firmwareStatus `json:"firmware"`
-	Inventory             *inventoryPage  `json:"inventory"`
-	Configuration         *settings       `json:"configuration"`
-	Activation            string          `json:"activation"`
-	OperationID           string          `json:"operation_id"`
-	OperationState        string          `json:"state"`
+	Schema                string           `json:"schema"`
+	Nonce                 string           `json:"nonce"`
+	Host                  string           `json:"host"`
+	Guest                 string           `json:"guest"`
+	Result                string           `json:"result"`
+	Code                  string           `json:"code"`
+	BootConfiguration     *settings        `json:"boot_configuration"`
+	ConfigurationEnrolled *bool            `json:"configuration_enrolled"`
+	HostTrial             *bool            `json:"host_trial"`
+	Observed              *release         `json:"observed_release"`
+	OSRelease             *osReleaseStatus `json:"os_release"`
+	Firmware              *firmwareStatus  `json:"firmware"`
+	Inventory             *inventoryPage   `json:"inventory"`
+	Configuration         *settings        `json:"configuration"`
+	Activation            string           `json:"activation"`
+	OperationID           string           `json:"operation_id"`
+	OperationState        string           `json:"state"`
 }
 
 type request struct {
@@ -262,6 +263,8 @@ func (c *client) signedExchange(ctx context.Context, host, guest string, operati
 			return response{}, errors.New("Host firmware inventory changed during observation")
 		case "host-firmware-inventory-unavailable":
 			return response{}, errors.New("Host live firmware inventory is unavailable")
+		case "os-release-status-unavailable":
+			return response{}, errors.New("Host OS release observation is unavailable")
 		case "outside-machine-profile", "configuration-authority-unavailable", "configuration-exhausted",
 			"host-state-unavailable", "expired-configuration-plan", "invalid-configuration-plan",
 			"configuration-operation-pending", "lifecycle-busy", "outside-host-capacity":
@@ -289,7 +292,7 @@ func (c *client) status(ctx context.Context, host, guest string) (response, erro
 	}
 	if status.Result != "status" || status.BootConfiguration == nil || !status.BootConfiguration.valid(guest) ||
 		status.ConfigurationEnrolled == nil || status.HostTrial == nil || status.Code != "" ||
-		status.Configuration != nil || status.Activation != "" || status.Firmware != nil || status.Inventory != nil ||
+		status.Configuration != nil || status.Activation != "" || status.Firmware != nil || status.Inventory != nil || status.OSRelease != nil ||
 		status.OperationID != "" || status.OperationState != "" ||
 		(status.Observed != nil && (status.Observed.Epoch < 1 || status.Observed.Sequence < 1 || !isDigest(status.Observed.SHA256))) {
 		return response{}, errors.New("invalid boot configuration or release in Host status")
@@ -319,7 +322,7 @@ func (c *client) preflight(ctx context.Context, host, guest string, cpu, memory 
 	if !*status.ConfigurationEnrolled || *status.HostTrial || approval.Result != "preflight" || approval.Configuration == nil ||
 		!approval.Configuration.valid(guest) || approval.Code != "" || approval.BootConfiguration != nil ||
 		approval.ConfigurationEnrolled != nil || approval.HostTrial != nil || approval.Observed != nil ||
-		approval.OperationState != "" || approval.OperationID != "" || approval.Firmware != nil || approval.Inventory != nil {
+		approval.OperationState != "" || approval.OperationID != "" || approval.Firmware != nil || approval.Inventory != nil || approval.OSRelease != nil {
 		return plan{}, errors.New("invalid Host preflight result")
 	}
 	next := *approval.Configuration

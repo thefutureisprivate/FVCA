@@ -93,7 +93,7 @@ func (c *client) inventory(ctx context.Context, host string) ([]inventoryDeviceM
 		if view.Result != "host-firmware-inventory" || view.Code != "" || !page.valid(after) ||
 			view.BootConfiguration != nil || view.ConfigurationEnrolled != nil || view.HostTrial != nil ||
 			view.Observed != nil || view.Configuration != nil || view.Activation != "" ||
-			view.OperationID != "" || view.OperationState != "" || view.Firmware != nil ||
+			view.OperationID != "" || view.OperationState != "" || view.Firmware != nil || view.OSRelease != nil ||
 			(first != nil && page.Version != first.Version) {
 			return nil, nil, errors.New("Host returned an invalid firmware inventory page")
 		}

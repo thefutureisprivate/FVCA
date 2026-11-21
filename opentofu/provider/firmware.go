@@ -146,7 +146,7 @@ func (c *client) firmware(ctx context.Context, host string) (*firmwareStatus, er
 	if err != nil {
 		return nil, err
 	}
-	if view.Result != "host-firmware-status" || !view.Firmware.valid() || view.Inventory != nil || view.Code != "" ||
+	if view.Result != "host-firmware-status" || !view.Firmware.valid() || view.Inventory != nil || view.OSRelease != nil || view.Code != "" ||
 		view.BootConfiguration != nil || view.ConfigurationEnrolled != nil || view.HostTrial != nil ||
 		view.Observed != nil || view.Configuration != nil || view.Activation != "" ||
 		view.OperationID != "" || view.OperationState != "" {

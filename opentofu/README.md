@@ -1,6 +1,8 @@
 # FVCA OpenTofu provider
 
-The off-node provider `registry.opentofu.org/thefutureisprivate/fvca` version `0.5.0` implements the `fvca_guest_configuration_plan` data source and the `fvca_guest_configuration` resource for an enrolled Service Guest. The `fvca-appliance` module preflights typed CPU and memory settings by default. Set `manage_guest = true` to track the settings in OpenTofu and submit them on apply. Automatic Host release observations remain separate from the desired configuration revision.
+The off-node provider `registry.opentofu.org/thefutureisprivate/fvca` version `0.6.0` implements the `fvca_guest_configuration_plan` data source and the `fvca_guest_configuration` resource for an enrolled Service Guest. The `fvca-appliance` module preflights typed CPU and memory settings by default. Set `manage_guest = true` to track the settings in OpenTofu and submit them on apply. Automatic release observations remain separate from the desired configuration revision.
+
+Use the `fvca_os_release` data source with the enrolled `host_id` and a `role` of `hypervisor` or `service-guest`. The data source reports the recorded active manifest and the last update check, including its candidate, staged digest and freshness. All release observations are computed fields. A superseded check is retained for diagnosis after the updater accepts a new checkpoint or reconciles a different active release.
 
 Use the `fvca_host_firmware` data source with the enrolled `host_id` to observe firmware independently of Guest configuration. Its computed attributes include enrollment, current activation, and the last discovery or recovery check. The data source uses the existing management read key and TLS pin.
 
@@ -12,7 +14,7 @@ The example uses OpenTofu `1.13.9`, a Linux amd64 runner and a locally built pro
 
 ## Build and install the locked provider
 
-Use Go `1.27.4` and Python 3 on the off-node runner. Build from a verified revision of this repository.
+Use Go `1.27.4` and Python 3 on the off-node runner. Build from a verified revision of this repository. Inject `TF_VAR_state_passphrase` from the runner's secret store before initializing the encrypted example.
 
 ```sh
 mirror=$(mktemp -d)

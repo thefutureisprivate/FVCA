@@ -115,7 +115,7 @@ impl Selection {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Member {
     bytes: u64,

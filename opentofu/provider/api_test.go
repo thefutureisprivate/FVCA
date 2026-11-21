@@ -6,6 +6,37 @@ import (
 	"testing"
 )
 
+func TestOSReleaseFreshnessAndRole(t *testing.T) {
+	enrolled, missed := true, false
+	slot, staged := "a", strings.Repeat("b", 64)
+	refresh, expiry, deadline := int64(100), int64(300), int64(200)
+	sequence := uint64(3)
+	view := osReleaseStatus{
+		Schema: "fvca-os-release-observation-v1", Role: "hypervisor", Enrolled: &enrolled, ObservedAt: expiry,
+		Active: &recordedOSRelease{
+			release: release{Epoch: 1, Sequence: 2, SHA256: strings.Repeat("a", 64)}, Role: "hypervisor", Slot: &slot,
+		},
+		Check: &osCheck{
+			Channel: "stable", PolicyRevision: 1, Disposition: "ready", Freshness: "expired",
+			LastRefresh: &refresh, FreshUntil: &expiry, ChannelSequence: &sequence, Staged: &staged,
+			Candidate:              &osCandidate{Epoch: 2, SHA256: staged, Urgency: "security", ActivateBy: &deadline},
+			SecurityDeadlineMissed: &missed,
+		},
+	}
+	if !view.valid("hypervisor") || view.valid("service-guest") {
+		t.Fatal("expected an expired observation scoped to its requested role")
+	}
+	view.Check.Freshness = "fresh"
+	if view.valid("hypervisor") {
+		t.Fatal("accepted a report at the exclusive expiry boundary as fresh")
+	}
+	view.Check.Freshness = "superseded"
+	view.Active = nil
+	if !view.valid("hypervisor") {
+		t.Fatal("rejected a historical check after its active record disappeared")
+	}
+}
+
 func TestFirmwareStatusKeepsPendingAndRecordedOperationSeparate(t *testing.T) {
 	enrolled, unavailable := true, false
 	operation := &firmwareActivation{

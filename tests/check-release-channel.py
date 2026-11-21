@@ -72,8 +72,9 @@ def qualify(client, output):
         path = output / name
         path.mkdir(mode=0o700)
         active = active_digest if role == "hypervisor" else active_guest["manifest_sha256"]
+        placement = {"slot": "a"} if role == "hypervisor" else {"guest_bundle": "d" * 64}
         intake["write_json"](path / "active-os-release.json",
-                             {"role": role, "epoch": 7, "manifest_sha256": active, "sequence": 1})
+                             {"role": role, "epoch": 7, "manifest_sha256": active, "sequence": 1} | placement)
         return path
 
     def head(selection, sequence, *, security=None, role="hypervisor", **overrides):
@@ -133,6 +134,17 @@ def qualify(client, output):
             response = json.loads(result.stdout)
             persisted = json.loads((directory / "os-update-status.json").read_bytes())
             intake["require"](response == persisted and response["disposition"] == expected, f"{name}: {response}")
+            checkpoint = json.loads((directory / "os-policy-checkpoint.json").read_bytes())
+            assert response["schema"] == "fvca-os-update-status-v2"
+            assert response["policy_checkpoint"] == checkpoint == {
+                "sequence": settings["revision"], "sha256": intake["sha256"](policy_file)}
+            if settings["enabled"]:
+                head_file = directory / f"fvca-os-{settings['role']}-{settings['channel']}-checkpoint.json"
+                head_record = json.loads(head_file.read_bytes())
+                assert response["channel_sequence"] == head_record["sequence"]
+                assert response["head_sha256"] == head_record["sha256"]
+            else:
+                assert response["head_sha256"] is None
         print(f"{name} passed", flush=True)
         return response
 
@@ -178,13 +190,17 @@ def qualify(client, output):
     discover("signed-disabled", "disabled", settings=policy | {"revision": 3, "enabled": False})
 
     full = state("full")
+    discover("before-staging-failure", "no-release", directory=full, settings=policy)
+    prior_check = (full / "os-update-status.json").read_bytes()
     (full / "staged").mkdir(mode=0o700)
     retained = full / "staged" / active_digest
     retained.mkdir(mode=0o700)
     (retained / "retained.raw").write_bytes(b"x" * 1024)
     publish(head(next_host, 7))
     discover("quota-preserves-retained-tuple", "staging quota is exhausted", directory=full,
-             settings=policy | {"max_release_bytes": 1024, "max_staged_bytes": 1024}, error=True)
+             settings=policy | {"revision": 2, "max_release_bytes": 1024, "max_staged_bytes": 1024}, error=True)
+    assert (full / "os-update-status.json").read_bytes() == prior_check
+    assert json.loads((full / "fvca-os-hypervisor-stable-checkpoint.json").read_bytes())["sequence"] == 7
     assert list((full / "staged").iterdir()) == [retained]
 
     guest = state("guest", "service-guest")
