@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod channel;
 mod image;
 mod launch;
 pub mod quadlet;
@@ -23,14 +24,15 @@ pub use image::{Image, Region};
 use records::{Authorization, Blob, Deployment, Derivation, Network};
 pub use records::{IdMap, Launch, Limits, Scope};
 pub use transition::{
-    VerifiedTransition, verify_committed, verify_transition, verify_transition_from,
+    TRANSITION_MEMBERS, VerifiedOffer, VerifiedTransition, verify_committed, verify_transition,
+    verify_transition_from, verify_transition_offer,
 };
 
 const RECORD_LIMIT: u64 = 4 * 1024 * 1024;
 const SIGNATURE_LIMIT: u64 = 16 * 1024;
-const ARTIFACT_LIMIT: u64 = 660 * 1024 * 1024;
+pub const ARTIFACT_LIMIT: u64 = 660 * 1024 * 1024;
 
-type Result<T> = std::result::Result<T, Box<dyn Error>>;
+pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub struct Trust {
     scope: Scope,
@@ -61,54 +63,71 @@ impl Trust {
             workload,
         })
     }
+
+    pub fn from_directory(path: &Path) -> Result<Self> {
+        let scope = serde_json::from_slice(&read_bounded(&path.join("policy.json"), 1024 * 1024)?)?;
+        let deployment = X509::from_der(&read_bounded(
+            &path.join("deployment.der"),
+            SIGNATURE_LIMIT,
+        )?)?;
+        let workload = X509::from_der(&read_bounded(&path.join("verity.der"), SIGNATURE_LIMIT)?)?;
+        Self::new(scope, deployment, workload)
+    }
+
+    pub fn identifies(&self, guest: &str, service: &str) -> bool {
+        self.scope.guest == guest && self.scope.service == service
+    }
+}
+
+struct VerifiedMetadata {
+    deployment: Deployment,
+    launch: Launch,
+    derivation: Derivation,
+    authorization: Authorization,
+    authorization_digest: String,
 }
 
 pub struct VerifiedWorkload {
-    deployment: Deployment,
-    launch: Launch,
-    source: records::Source,
-    root_digest: String,
-    authorization: Authorization,
-    authorization_digest: String,
+    metadata: VerifiedMetadata,
     artifact: File,
     image: Image,
 }
 
 impl VerifiedWorkload {
     pub fn service(&self) -> &str {
-        &self.deployment.service
+        &self.metadata.deployment.service
     }
 
     pub fn digest(&self) -> &str {
-        &self.authorization.artifact.digest
+        &self.metadata.authorization.artifact.digest
     }
 
     pub fn authorization_digest(&self) -> &str {
-        &self.authorization_digest
+        &self.metadata.authorization_digest
     }
 
     pub fn verity_root_hash(&self) -> &str {
-        &self.authorization.verity_root_hash
+        &self.metadata.authorization.verity_root_hash
     }
 
     pub fn launch(&self) -> &Launch {
-        &self.launch
+        &self.metadata.launch
     }
 
     pub fn limits(&self) -> &Limits {
-        &self.deployment.limits
+        &self.metadata.deployment.limits
     }
 
     pub fn expires(&self) -> u64 {
-        self.deployment.expires
+        self.metadata.deployment.expires
     }
 
     pub fn id_map(&self) -> &IdMap {
-        &self.deployment.id_map
+        &self.metadata.deployment.id_map
     }
 
     pub fn network_profile(&self) -> Option<&str> {
-        match &self.deployment.network {
+        match &self.metadata.deployment.network {
             Network::None => None,
             Network::Workload(profile) => Some(profile),
         }
@@ -360,6 +379,16 @@ fn verify_for_source(
     source_policy: &str,
     expected_authorization: Option<&str>,
 ) -> Result<VerifiedWorkload> {
+    let metadata = verify_metadata(directory, trust, source_policy, expected_authorization)?;
+    complete_bundle(directory, metadata, trust)
+}
+
+fn verify_metadata(
+    directory: &Path,
+    trust: &Trust,
+    source_policy: &str,
+    expected_authorization: Option<&str>,
+) -> Result<VerifiedMetadata> {
     let deployment_bytes = verified_record(directory, "deployment", &trust.deployment)?;
     let deployment = serde_json::from_slice(&deployment_bytes)?;
     check_deployment(&deployment, &trust.scope)?;
@@ -378,6 +407,7 @@ fn verify_for_source(
         || authorization.workload_certificate != digest(&sha256(&trust.workload.to_der()?))
         || !root_hash(&authorization.verity_root_hash)
         || !is_digest(&authorization.artifact.digest)
+        || !(1..=ARTIFACT_LIMIT).contains(&authorization.artifact.size)
     {
         return Err(invalid(
             "workload authorization does not bind these signer pins and deployment",
@@ -398,16 +428,33 @@ fn verify_for_source(
     let launch: Launch =
         serde_json::from_slice(&bound_record(directory, "launch.json", &deployment.launch)?)?;
     launch.validate()?;
-    let mut artifact = verify_artifact(&directory.join("workload.raw"), &authorization.artifact)?;
-    let image = image::verify_image(&mut artifact, &authorization, &derivation, &trust.workload)?;
-    check_time(&deployment, current_time()?)?;
-    Ok(VerifiedWorkload {
+    Ok(VerifiedMetadata {
         deployment,
         launch,
-        source: derivation.source,
-        root_digest: derivation.root.digest,
+        derivation,
         authorization,
         authorization_digest,
+    })
+}
+
+fn complete_bundle(
+    directory: &Path,
+    metadata: VerifiedMetadata,
+    trust: &Trust,
+) -> Result<VerifiedWorkload> {
+    let mut artifact = verify_artifact(
+        &directory.join("workload.raw"),
+        &metadata.authorization.artifact,
+    )?;
+    let image = image::verify_image(
+        &mut artifact,
+        &metadata.authorization,
+        &metadata.derivation,
+        &trust.workload,
+    )?;
+    check_time(&metadata.deployment, current_time()?)?;
+    Ok(VerifiedWorkload {
+        metadata,
         artifact,
         image,
     })

@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -41,7 +42,11 @@ def certificate(directory, name, authority=None):
     issuer, signing_key = authority or (subject, key)
     builder = builder.issuer_name(issuer)
     if authority:
-        builder = builder.add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]), critical=False)
+        try:
+            identity = x509.IPAddress(ipaddress.ip_address(name))
+        except ValueError:
+            identity = x509.DNSName(name)
+        builder = builder.add_extension(x509.SubjectAlternativeName([identity]), critical=False)
     pem = directory / f"{name}.pem"
     pem.write_bytes(builder.sign(signing_key, algorithm=None).public_bytes(serialization.Encoding.PEM))
     secret = directory / f"{name}.key"
@@ -107,15 +112,23 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class Server(ThreadingHTTPServer):
+    def get_request(self):
+        try:
+            return super().get_request()
+        except ssl.SSLError as error:
+            self.handshake_failures.append(str(error))
+            raise
+
     def handle_error(self, request, client_address):
         if not isinstance(sys.exception(), (BrokenPipeError, ConnectionResetError, ssl.SSLError)):
             super().handle_error(request, client_address)
 
 
 @contextmanager
-def serve(depot, tls=None):
-    with Server(("127.0.0.1", 0), Handler) as server:
+def serve(depot, tls=None, listen=("127.0.0.1", 0)):
+    with Server(listen, Handler) as server:
         server.requests = []
+        server.handshake_failures = []
         server.depot = depot
         server.failures = {}
         server.redirect = None

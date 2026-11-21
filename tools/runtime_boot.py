@@ -16,6 +16,11 @@ DISABLE_AUTOMATIC_EXTENSIONS = (
     "systemd.mask=systemd-sysext.socket", "systemd.mask=systemd-confext.socket",
 )
 WORKLOAD_TRUST_FILES = ("workload-policy.json", "workload-deployment.der", "workload-verity.der")
+WORKLOAD_CHANNEL_FILES = (
+    "workload-channel-policy.json", "workload-channel-root.json",
+    "workload-channel-depot.json", "workload-channel-ca.pem",
+)
+WORKLOAD_CHANNEL_SUPPORT = "usr/lib/fvca/workload-channel-enrollment-v1"
 BASE_ROOT_OPTIONS = "panic-on-corruption,root-hash-signature=auto"
 DIRECT_ROOT_OPTIONS = "panic-on-corruption,root-hash-signature=/usr/lib/fvca/direct-root.p7s"
 DIRECT_BOOT_FILES = ("direct-boot.cmdline", "direct-verity.der", "direct-root.p7s", "direct-boot-ready")

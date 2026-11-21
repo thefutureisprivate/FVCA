@@ -1,4 +1,7 @@
 fn main() {
+    if std::env::var_os("CARGO_FEATURE_HOST").is_none() {
+        return;
+    }
     let sources = ["src/gpt/floor/tpm.c", "src/attestation/quote.c"];
     for source in sources {
         println!("cargo:rerun-if-changed={source}");

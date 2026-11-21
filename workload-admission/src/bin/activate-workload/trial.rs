@@ -5,11 +5,11 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::Command;
 
-use fvca_workload_admission::authorization_identity;
+use fvca_workload_admission::{authorization_identity, channel, read_bounded};
 use rustix::fs::{CWD, RenameFlags, renameat_with};
 
 use super::{
-    Result, SERVICE, SYSTEMCTL, check_workload_unit, mount_verified, read_trust,
+    Result, SERVICE, SYSTEMCTL, TRUST, check_workload_unit, mount_verified, read_trust,
     require_guest_data, run as checked_run, stage, start_workload, stop_workload, unmount_workload,
 };
 
@@ -59,6 +59,14 @@ pub(super) fn run() -> Result<()> {
     check_workload_unit()?;
     checked_run(Command::new(SYSTEMCTL).args(["is-active", "--quiet", SERVICE]))?;
     let transition = stage::verify_staged(store, &staged, &mounted, &read_trust()?, data.dev())?;
+    let channel_permit = if Path::new(TRUST).join(channel::POLICY).try_exists()? {
+        let ready: channel::Permit =
+            serde_json::from_slice(&read_bounded(Path::new(channel::READY), 4096)?)?;
+        ready.authorize(&transition)?;
+        Some(ready)
+    } else {
+        None
+    };
     let repeated = stage::attempted(store, data.dev())?.as_deref()
         == Some(transition.approval_digest.as_str());
 
@@ -73,6 +81,9 @@ pub(super) fn run() -> Result<()> {
     }
     stage::record_attempt(store, &directory, &transition.approval_digest)?;
     transition.require_fresh()?;
+    if let Some(permit) = &channel_permit {
+        permit.require_fresh()?;
+    }
     println!(
         "FVCA_WORKLOAD_TRIAL_STARTED {} {} {}",
         transition.approval_digest,
@@ -85,6 +96,9 @@ pub(super) fn run() -> Result<()> {
     println!("FVCA_WORKLOAD_TRIAL_MOUNTED {}", transition.approval_digest);
     start_workload(true)?;
     transition.require_fresh()?;
+    if let Some(permit) = &channel_permit {
+        permit.require_fresh()?;
+    }
 
     // The selected name is the only boot authority. A power cut before this
     // step leaves the old executable selected. Both outcomes keep all data.

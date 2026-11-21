@@ -10,8 +10,7 @@ use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fvca_workload_admission::quadlet::{self, Definition, NAMESPACE, PAYLOAD, ROOT, SERVICE};
-use fvca_workload_admission::{Scope, Trust, VerifiedWorkload, read_bounded};
-use openssl::x509::X509;
+use fvca_workload_admission::{Trust, VerifiedWorkload, channel, read_bounded};
 
 #[path = "activate-workload/stage.rs"]
 mod stage;
@@ -231,6 +230,9 @@ fn start_workload(replace: bool) -> Result<()> {
 }
 
 fn boot_workload() -> Result<()> {
+    if Path::new(TRUST).join(channel::POLICY).try_exists()? {
+        make_directory(stage::STORE)?;
+    }
     start_workload(false)?;
     trial::recover()
 }
@@ -314,12 +316,7 @@ fn check_start(expires: &str, profile: &str) -> Result<()> {
 
 fn read_trust() -> Result<Trust> {
     private_directory(TRUST)?;
-    let directory = Path::new(TRUST);
-    let scope: Scope =
-        serde_json::from_slice(&read_bounded(&directory.join("policy.json"), 1024 * 1024)?)?;
-    let deployment = X509::from_der(&read_bounded(&directory.join("deployment.der"), 16 * 1024)?)?;
-    let workload = X509::from_der(&read_bounded(&directory.join("verity.der"), 16 * 1024)?)?;
-    Trust::new(scope, deployment, workload)
+    Trust::from_directory(Path::new(TRUST))
 }
 
 fn require_guest_data(options: &str) -> Result<fs::Metadata> {

@@ -6,8 +6,9 @@ AssertSecurity=|uefi-secureboot
 AssertPathExists=|/run/fvca/direct-boot-ready
 AssertSecurity=selinux
 Requisite=fvca-workload-root.service fvca-workload-start.service
+Requires=fvca-discover-workload.service
 Wants=fvca-stage-workload.service
-After=fvca-workload-root.service fvca-workload-start.service fvca-stage-workload.service
+After=fvca-workload-root.service fvca-workload-start.service fvca-discover-workload.service fvca-stage-workload.service
 
 [Service]
 Type=oneshot

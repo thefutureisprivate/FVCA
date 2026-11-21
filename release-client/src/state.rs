@@ -65,7 +65,7 @@ pub fn lock(path: &Path) -> io::Result<File> {
     if !lock.metadata()?.is_file() {
         return Err(invalid("invalid release state lock"));
     }
-    lock.try_lock().map_err(io::Error::other)?;
+    lock.try_lock().map_err(io::Error::from)?;
     Ok(lock)
 }
 

@@ -18,6 +18,12 @@
     (system_u object_r fvca_workload_stage_t ((s0) (s0))))
 (allow init_t fvca_workload_stage_t (dir (add_name create mounton remove_name rename rmdir write)))
 (allow init_t fvca_workload_stage_t (file (create open read rename unlink write)))
+(filecon "/run/fvca-workload-channel(/.*)?" any
+    (system_u object_r init_var_run_t ((s0) (s0))))
+
+; The discovery unit joins the workload namespace and connects to its pinned
+; HTTPS endpoint through the corresponding signed egress rule.
+(allow init_t http_port_t (tcp_socket (name_connect)))
 
 (filecon "/run/fvca/workload-image/fvca-workload-payload\.service" file
     (system_u object_r systemd_unit_file_t ((s0) (s0))))

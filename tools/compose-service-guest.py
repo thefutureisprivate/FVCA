@@ -8,6 +8,7 @@ import re
 import subprocess
 import tempfile
 from uuid import UUID
+from urllib.parse import urlsplit
 
 import guest_boot_bundle
 import oci_runtime
@@ -19,7 +20,8 @@ from runtime_boot import (
     HOST_NETWORK_POLICY, HOST_NETWORK_SUPPORT,
     HOST_WORKLOAD_GUEST, HOST_WORKLOAD_POLICY, HOST_WORKLOAD_SUPPORT,
     MANAGEMENT_POLICY, MANAGEMENT_POLICY_SUPPORT, MANAGEMENT_SUPPORT, WORKLOAD_NETWORK_SUPPORT, WORKLOAD_TRUST_FILES,
-    KERNEL_POLICY_SUPPORT, SECURE_KERNEL_OPTIONS, add_kernel_policy, composition_archive, prepare_core, run,
+    KERNEL_POLICY_SUPPORT, SECURE_KERNEL_OPTIONS, WORKLOAD_CHANNEL_FILES, WORKLOAD_CHANNEL_SUPPORT,
+    add_kernel_policy, composition_archive, prepare_core, run,
     verify_initrd, write_disk,
 )
 from runtime_image import verify as verify_runtime
@@ -48,7 +50,8 @@ ACTIVATION_FILES = (
 )
 FORBIDDEN = tuple(f"usr/lib/fvca/{name}" for name in (
     "activate-runtime", "hypervisor.composition", "host-storage", "vm-runtime.p7s",
-    "service-guest.composition", "oci-runtime.p7s", *WORKLOAD_TRUST_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES,
+    "service-guest.composition", "oci-runtime.p7s", *WORKLOAD_TRUST_FILES, *WORKLOAD_CHANNEL_FILES,
+    *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES,
     GUEST_VM_SETTINGS, GUEST_CONFIG_KEY, HOST_NETWORK_POLICY, HOST_WORKLOAD_POLICY, HOST_WORKLOAD_GUEST, MANAGEMENT_POLICY,
 )) + tuple(map(str, (GUEST_VM_SUPPORT, GUEST_CONFIG_CHANGE_SUPPORT, HOST_NETWORK_SUPPORT, HOST_WORKLOAD_SUPPORT,
                     MANAGEMENT_POLICY_SUPPORT, MANAGEMENT_SUPPORT)))
@@ -88,12 +91,50 @@ def workload_trust(args, boot_public, runtime_public):
     return tuple(zip(WORKLOAD_TRUST_FILES, (policy, *certs), strict=True))
 
 
+def workload_channel(args):
+    files = (args.workload_channel_policy, args.workload_channel_root,
+             args.workload_channel_depot, args.workload_channel_ca)
+    if files == (None, None, None, None):
+        return ()
+    if None in files or args.workload_policy is None or args.workload_network is None:
+        raise ValueError("workload channel enrollment requires all four inputs, workload trust and a signed uplink")
+    policy, root, depot, ca = (workload_oci.read_bytes(path, limit) for path, limit in
+                              zip(files, (65536, 1048576, 65536, 65536), strict=True))
+    scope = workload_oci.parse_json(workload_oci.read_bytes(args.workload_policy, 1024 * 1024))
+    body = workload_oci.parse_json(policy)
+    fields = {"schema", "guest", "service", "channel", "tuf_root_sha256", "depot_config_sha256", "max_artifact_bytes"}
+    if (not isinstance(body, dict) or body.keys() != fields
+            or body["schema"] != "fvca-workload-channel-policy-v1"
+            or body["guest"] != scope["guest"] or body["service"] != scope["service"]
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,31}", body["channel"]) is None
+            or type(body["max_artifact_bytes"]) is not int or not 0 < body["max_artifact_bytes"] <= 660 * 1024**2
+            or body["tuf_root_sha256"] != workload_oci.sha256(root).removeprefix("sha256:")
+            or body["depot_config_sha256"] != workload_oci.sha256(depot).removeprefix("sha256:")):
+        raise ValueError("workload channel policy differs from the pinned workload, root or depot")
+    config = workload_oci.parse_json(depot)
+    if (not isinstance(config, dict) or config.keys() != {"transport", "base_url", "ca_file", "deadline_seconds"}
+            or config["transport"] != "https" or config["ca_file"] != "/run/fvca/workload-trust/channel-ca.pem"
+            or type(config["deadline_seconds"]) is not int or not 0 < config["deadline_seconds"] <= 900):
+        raise ValueError("the Guest workload depot requires enrolled HTTPS and a bounded deadline")
+    url = urlsplit(config["base_url"])
+    endpoint = workload_network.ipv4(url.hostname or "")
+    if (url.scheme != "https" or url.netloc not in (str(endpoint), f"{endpoint}:443")
+            or not url.path.endswith("/") or url.query or url.fragment):
+        raise ValueError("the Guest workload depot requires a numeric IPv4 HTTPS directory on port 443")
+    uplink = workload_oci.read_bytes(args.workload_network, 4096).decode("ascii")
+    if f"egress=tcp,{endpoint},443" not in uplink.splitlines():
+        raise ValueError("the signed workload uplink lacks an exact egress rule for the depot")
+    run("openssl", "x509", "-noout", input=ca, capture_output=True)
+    return tuple(zip(WORKLOAD_CHANNEL_FILES, (policy, root, depot, ca), strict=True))
+
+
 def assemble(args, work):
     boot_key = guest_boot_bundle.public_key(args.boot_certificate)
     runtime_key = guest_boot_bundle.public_key(args.runtime_certificate)
     if boot_key == runtime_key:
         raise ValueError("Secure Boot and the OCI runtime require separate signing keys")
     trust = workload_trust(args, boot_key, runtime_key)
+    channel = workload_channel(args)
     if args.direct_boot is not None:
         guest_boot_bundle.require_authority(args.release_certificate, args.deployment_certificate,
                                             args.workload_certificate, boot_key, runtime_key)
@@ -107,8 +148,12 @@ def assemble(args, work):
         "usr/lib/userdb/fvca-firmware-reader.user", "usr/lib/userdb/fvca-firmware-reader.group",
     )):
         raise ValueError("Service Guest core carries the Host firmware facility")
-    verify_initrd(args.initrd, uname, (*ACTIVATION_FILES, "usr/lib/fvca/storage-scrub-enrollment-v1"),
-                  FORBIDDEN, "Service Guest")
+    if channel and not (root / "usr/lib/fvca/workload-channel").is_file():
+        raise ValueError("the Guest core lacks workload channel support")
+    required = (*ACTIVATION_FILES, "usr/lib/fvca/storage-scrub-enrollment-v1")
+    if channel:
+        required += (WORKLOAD_CHANNEL_SUPPORT,)
+    verify_initrd(args.initrd, uname, required, FORBIDDEN, "Service Guest")
     runtime_work = work / "runtime"
     runtime_work.mkdir()
     runtime_image = args.runtime
@@ -132,7 +177,7 @@ def assemble(args, work):
         )
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "service-guest", oci_runtime.IMAGE_ID,
-        extra=(*trust, *network),
+        extra=(*trust, *network, *channel),
     )
     disk, uki = write_disk(args, work, offset, cmdline, uname, composition, direct_boot=args.direct_boot is not None)
     if args.direct_boot is None:
@@ -147,6 +192,8 @@ def main():
     for name in ("core", "runtime", "initrd", "boot-certificate", "boot-key", "runtime-certificate"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute(), required=True)
     for name in ("workload-policy", "deployment-certificate", "workload-certificate", "workload-network"):
+        parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute())
+    for name in ("workload-channel-policy", "workload-channel-root", "workload-channel-depot", "workload-channel-ca"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute())
     output = parser.add_mutually_exclusive_group(required=True)
     output.add_argument("--output", type=lambda value: Path(value).absolute(), help="UEFI Secure Boot disk")

@@ -6,11 +6,26 @@ use openssl::sha::sha256;
 use serde::Deserialize;
 
 use super::{
-    Result, SIGNATURE_LIMIT, Trust, VerifiedWorkload, check_time, current_time, digest, invalid,
-    is_digest, read_bounded, verify, verify_for_source, verify_signature,
+    ARTIFACT_LIMIT, RECORD_LIMIT, Result, SIGNATURE_LIMIT, Trust, VerifiedMetadata,
+    VerifiedWorkload, check_time, complete_bundle, current_time, digest, invalid, is_digest,
+    read_bounded, verify, verify_for_source, verify_metadata, verify_signature,
 };
 
 const TRANSITION_LIMIT: u64 = 4096;
+
+/// Names and upper bounds of the exact files in a transported transition.
+pub const TRANSITION_MEMBERS: [(&str, u64); 10] = [
+    ("transition.json", TRANSITION_LIMIT),
+    ("transition.p7s", SIGNATURE_LIMIT),
+    ("candidate/authorization.json", RECORD_LIMIT),
+    ("candidate/authorization.p7s", SIGNATURE_LIMIT),
+    ("candidate/deployment.json", RECORD_LIMIT),
+    ("candidate/deployment.p7s", SIGNATURE_LIMIT),
+    ("candidate/derivation.json", RECORD_LIMIT),
+    ("candidate/launch.json", RECORD_LIMIT),
+    ("candidate/publisher-proof.json", RECORD_LIMIT),
+    ("candidate/workload.raw", ARTIFACT_LIMIT),
+];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -115,16 +130,56 @@ pub struct VerifiedTransition {
 impl VerifiedTransition {
     /// Recheck authorization after durable preparation and before publication.
     pub fn require_fresh(&self) -> Result<()> {
-        if !(self.valid_from..self.fresh_until).contains(&current_time()?) {
-            return Err(invalid(
-                "workload transition authorization expired or the clock regressed",
-            ));
-        }
-        Ok(())
+        require_fresh(self.valid_from, self.fresh_until)
+    }
+
+    pub fn valid_from(&self) -> u64 {
+        self.valid_from
     }
 }
 
-fn compatible(current: &VerifiedWorkload, candidate: &VerifiedWorkload) -> Result<()> {
+fn require_fresh(valid_from: u64, fresh_until: u64) -> Result<()> {
+    if !(valid_from..fresh_until).contains(&current_time()?) {
+        return Err(invalid(
+            "workload transition authorization expired or the clock regressed",
+        ));
+    }
+    Ok(())
+}
+
+/// The authenticated candidate records and exact artifact identity before transfer.
+pub struct VerifiedOffer {
+    current: VerifiedWorkload,
+    candidate: VerifiedMetadata,
+    pub approval_digest: String,
+    fresh_until: u64,
+    valid_from: u64,
+}
+
+impl VerifiedOffer {
+    pub fn artifact(&self) -> (&str, u64) {
+        let artifact = &self.candidate.authorization.artifact;
+        (&artifact.digest, artifact.size)
+    }
+
+    pub fn candidate_authorization(&self) -> &str {
+        &self.candidate.authorization_digest
+    }
+
+    pub fn finish(self, directory: &Path, trust: &Trust) -> Result<VerifiedTransition> {
+        let candidate = complete_bundle(directory, self.candidate, trust)?;
+        require_fresh(self.valid_from, self.fresh_until)?;
+        Ok(VerifiedTransition {
+            current: self.current,
+            candidate,
+            approval_digest: self.approval_digest,
+            fresh_until: self.fresh_until,
+            valid_from: self.valid_from,
+        })
+    }
+}
+
+fn compatible(current: &VerifiedMetadata, candidate: &VerifiedMetadata) -> Result<()> {
     let from = &current.deployment;
     let to = &candidate.deployment;
     if to.security_epoch < from.security_epoch {
@@ -132,8 +187,9 @@ fn compatible(current: &VerifiedWorkload, candidate: &VerifiedWorkload) -> Resul
             "candidate workload would roll back the active security epoch",
         ));
     }
-    if current.source.repository != candidate.source.repository
-        || current.source.certificate_issuer != candidate.source.certificate_issuer
+    if current.derivation.source.repository != candidate.derivation.source.repository
+        || current.derivation.source.certificate_issuer
+            != candidate.derivation.source.certificate_issuer
     {
         return Err(invalid(
             "candidate workload changes the publisher repository or issuer",
@@ -172,7 +228,9 @@ fn compatible(current: &VerifiedWorkload, candidate: &VerifiedWorkload) -> Resul
             "workload transition requires a declared health check for each release",
         ));
     }
-    if current.root_digest == candidate.root_digest && from.launch == to.launch {
+    if current.derivation.root.digest == candidate.derivation.root.digest
+        && from.launch == to.launch
+    {
         return Err(invalid(
             "workload transition does not change executable or launch bytes",
         ));
@@ -210,6 +268,18 @@ pub fn verify_transition_from(
     signature: &Path,
     trust: &Trust,
 ) -> Result<VerifiedTransition> {
+    verify_transition_offer(current, candidate, approval, signature, trust)?
+        .finish(candidate, trust)
+}
+
+/// Authenticate the complete offer before fetching its raw workload artifact.
+pub fn verify_transition_offer(
+    current: impl FnOnce() -> Result<VerifiedWorkload>,
+    candidate: &Path,
+    approval: &Path,
+    signature: &Path,
+    trust: &Trust,
+) -> Result<VerifiedOffer> {
     let (transition, approval_digest) = signed_transition(approval, signature, trust)?;
     transition.check_time(current_time()?)?;
     let current = current()?;
@@ -218,28 +288,28 @@ pub fn verify_transition_from(
             "workload authorization differs from the signed transition",
         ));
     }
-    let candidate = verify_for_source(
+    let candidate = verify_metadata(
         candidate,
         trust,
         &transition.to_source_policy,
         Some(&transition.to_authorization),
     )?;
     match transition.data_compatibility {
-        DataCompatibility::Bidirectional => compatible(&current, &candidate)?,
+        DataCompatibility::Bidirectional => compatible(&current.metadata, &candidate)?,
     }
     let now = current_time()?;
     transition.check_time(now)?;
-    check_time(&current.deployment, now)?;
+    check_time(&current.metadata.deployment, now)?;
     check_time(&candidate.deployment, now)?;
     let fresh_until = transition
         .expires
         .min(current.expires())
-        .min(candidate.expires());
+        .min(candidate.deployment.expires);
     let valid_from = transition
         .valid_from
-        .max(current.deployment.valid_from)
+        .max(current.metadata.deployment.valid_from)
         .max(candidate.deployment.valid_from);
-    Ok(VerifiedTransition {
+    Ok(VerifiedOffer {
         current,
         candidate,
         approval_digest,

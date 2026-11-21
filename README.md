@@ -719,6 +719,9 @@ Build against the exact prepared Guest core. The assembler verifies the separate
 ```sh
 umask 077
 bash tools/fetch-workload-admission.sh
+mkdir -p build/release-client-vendor
+cargo vendor --locked --versioned-dirs --manifest-path release-client/Cargo.toml \
+  "$PWD/build/release-client-vendor/sources" > build/release-client-vendor/config.toml
 mkosi --profile=service-guest-storage --output-dir=build/service-guest-storage build
 python3 tools/verify-base.py build/service-guest-storage/fvca-dev-service-guest.raw mkosi.crt \
   --extract-root build/service-guest-runtime-base
@@ -1209,6 +1212,16 @@ The Guest checks for a transition hourly. `fvca-trial-workload.service` also acc
 The coordinator changes only the affected workload root and unit. The new unit uses the signed local health check. After health and a final freshness check, one atomic rename makes the candidate the boot selection in `selected/`. Subsequent starts still verify the candidate's deployment and the source policy in its signed grant. A process failure invokes recovery from the same unit. On boot, the Guest starts the committed executable and clears an interrupted trial after the committed service starts. Fallback uses the identical Btrfs payload volumes, including writes accepted during the trial. The coordinator removes the failed or superseded trial bundle once the selected executable is running.
 
 Prepare the disposable Stalwart initramfs with `tests/stalwart-mail-initrd.sh --workload-trial`. Build two signed Btrfs fixtures for the same starting workload, with a healthy candidate on `approved.raw` and a candidate whose signed health command persists `/var/lib/stalwart/.fvca-trial-write` and fails on `unhealthy.raw`. Keep the healthy candidate's deployment valid past its trial grant. Run `tests/check-storage.py --guest --direct-boot BUNDLE --release-certificate CERT --workload-trial GOOD_GRANT BAD_GRANT --lab FIXTURE --output NEW_DIRECTORY`. The check exercises a healthy commit and reboot after grant expiry, a power interruption before commit, and recovery from a failed health check while retaining a candidate write.
+
+### Enroll a workload update channel
+
+After source authorization, use `tools/pack-workload-offer.py` with the current verifier, enrolled policy, signer certificates, current bundle, and complete signed transition directory. It verifies the copied offer and emits an exact head and its targets for publication by the TUF repository. Use hash-prefixed consistent snapshots and separate keys for root, targets, snapshot and timestamp. Each head is named `fvca-workload.GUEST.SERVICE.CHANNEL.json`. Advance its sequence for every publication, including withdrawal with `"release": null`. The target names contain the signed transition's exact SHA-256 digest.
+
+Enroll the channel when composing the signed Guest. Pass `--workload-channel-policy`, `--workload-channel-root`, `--workload-channel-depot` and `--workload-channel-ca` along with workload trust and the signed workload uplink. Use a policy with `schema` set to `fvca-workload-channel-policy-v1`, the enrolled `guest` and `service`, `channel`, `tuf_root_sha256`, `depot_config_sha256`, and `max_artifact_bytes`. Use lowercase SHA-256 hex for the exact root and depot files. The depot JSON uses HTTPS, a numeric IPv4 directory URL on TCP 443, `ca_file` set to `/run/fvca/workload-trust/channel-ca.pem`, and a deadline of at most 900 seconds. Enroll the matching `egress=tcp,ADDRESS,443` rule.
+
+The hourly check authenticates the fresh TUF head and the exact current selection. It checks the signed deployment, compatible launch, artifact length and digest before requesting the raw image. After validating the received verity image, it publishes one complete Btrfs inbox and gives the trial an authorization for that exact grant. A successful refresh can reauthorize the same queued grant. The updater removes a channel delivery when a verified refresh withdraws or supersedes it. It also clears partial downloads on failure or when the worker next starts after an interruption. The trial checks channel freshness before stopping the workload and again before committing. A failed refresh fences the trial and leaves the running service available.
+
+Run `tests/check-workload-channel.py` with the same pinned Python TUF tools used for release qualification. It exercises local and HTTPS delivery, withdrawal, rollback and conflicting sequences. It also verifies that the updater refuses independently invalid CMS and TUF artifact records before requesting the raw image. For an enrolled disposable direct-boot Guest with the Stalwart trial initramfs, `tests/check-workload-channel-boot.py` starts KVM and its HTTPS depot on an isolated TAP link and checks discovery through healthy commit. Add `--interrupt-delivery` to check reauthorization after a forced reset without downloading the same image twice.
 
 ## Guest workload verifier
 

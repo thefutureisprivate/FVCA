@@ -1,0 +1,30 @@
+[Unit]
+Description=Discover and deliver an approved Service Guest workload
+ConditionPathExists=/run/fvca/workload-trust/channel-policy.json
+AssertPathIsMountPoint=/run/fvca/guest-data
+AssertSecurity=|uefi-secureboot
+AssertPathExists=|/run/fvca/direct-boot-ready
+AssertSecurity=selinux
+Requisite=fvca-workload-root.service fvca-workload-start.service
+After=fvca-workload-root.service fvca-workload-start.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/fvca/workload-channel
+TimeoutStartSec=15min
+NetworkNamespacePath=/run/netns/fvca-workload
+RestrictAddressFamilies=AF_UNIX AF_INET
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/run/fvca/guest-data/workload-updates /run/fvca/workload-lifecycle.lock
+InaccessiblePaths=-/run/systemd/private -/run/dbus
+RuntimeDirectory=fvca-workload-channel
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+StandardOutput=journal+console
+StandardError=journal+console

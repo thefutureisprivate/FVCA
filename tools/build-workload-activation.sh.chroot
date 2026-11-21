@@ -30,3 +30,25 @@ install -Dm755 "$CARGO_TARGET_DIR/$target/release/fvca-activate-workload" "$acti
 patchelf --add-needed "$allocator_library" "$activation"
 dependencies=$(patchelf --print-needed "$activation")
 test "${dependencies%%$'\n'*}" = "$allocator_library"
+
+# The Guest links only the shared intake library and the workload client.
+release_vendor="$SRCDIR/build/release-client-vendor/sources"
+if [[ ! -d "$release_vendor" ]]; then
+    echo 'Prepare the checksum-locked release-client sources before building the Guest' >&2
+    exit 1
+fi
+cat > "$CARGO_HOME/config.toml" <<EOF
+[source.crates-io]
+replace-with = "fvca-vendor"
+
+[source.fvca-vendor]
+directory = "$release_vendor"
+EOF
+export PKG_CONFIG=/usr/bin/pkgconf
+cargo build --frozen --release --target "$target" --no-default-features --features appliance,workload \
+    --bin fvca-workload-channel --manifest-path "$SRCDIR/release-client/Cargo.toml"
+channel="$DESTDIR/usr/lib/fvca/workload-channel"
+install -Dm755 "$CARGO_TARGET_DIR/$target/release/fvca-workload-channel" "$channel"
+patchelf --add-needed "$allocator_library" "$channel"
+dependencies=$(patchelf --print-needed "$channel")
+test "${dependencies%%$'\n'*}" = "$allocator_library"

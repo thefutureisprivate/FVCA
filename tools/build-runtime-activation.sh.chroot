@@ -46,5 +46,6 @@ if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
 fi
 if [[ "${FVCA_GUEST_OCI:-}" == yes ]]; then
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/workload-network-v1"
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/workload-channel-enrollment-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/kernel-policy-v1"
 fi

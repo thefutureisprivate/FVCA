@@ -46,7 +46,7 @@ def image(path):
 
 def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, extra_cmdline=False,
          attach_runtime=True, timeout=80, direct_cmdline=None, attach_guest=True, ready_marker=READY,
-         firmware_timeout=None, allow_reboot=False, rtc_base=None):
+         firmware_timeout=None, allow_reboot=False, rtc_base=None, workload_depot_tap=False):
     cpu = "host,vmx=off" if args.guest else "host"
     machine = "q35,smm=on"
     devices = []
@@ -93,9 +93,14 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
             "-drive", f"if=none,id={drive},format=raw,{member_access}file={image(member)}",
             "-device", f"virtio-blk-pci,drive={drive},serial={drive}",
         ]
-    command += [
-        "-display", "none", "-serial", "stdio", "-monitor", "none", "-nic", "none",
-    ]
+    command += ["-display", "none", "-serial", "stdio", "-monitor", "none"]
+    if not workload_depot_tap:
+        command += ["-nic", "none"]
+    else:
+        command += [
+            "-netdev", "tap,id=workload,ifname=fvca-depot,script=no,downscript=no",
+            "-device", "virtio-net-pci,netdev=workload,addr=06.0,mac=52:54:00:7d:ce:01",
+        ]
     if rtc_base is not None:
         command += ["-rtc", f"base={rtc_base}"]
     if not allow_reboot:
