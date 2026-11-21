@@ -1,0 +1,20 @@
+[Unit]
+Description=Install the authorized initial FVCA Service Guest data disk
+Requires=fvca-virtqemud.service
+After=fvca-virtqemud.service
+Before=fvca-service-guest.service
+AssertPathExists=/run/fvca/guest-commissioning
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=/usr/libexec/fvca/launch-guest --commission
+TimeoutStartSec=1h
+UMask=0077
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+StandardOutput=journal+console
+StandardError=journal+console

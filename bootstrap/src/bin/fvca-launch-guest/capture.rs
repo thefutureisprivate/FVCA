@@ -22,6 +22,8 @@ const O_NONBLOCK: i32 = 0o4000;
 
 #[path = "live.rs"]
 pub(super) mod live;
+#[path = "commission.rs"]
+pub(super) mod commission;
 #[path = "restore.rs"]
 pub(super) mod restore;
 #[path = "backup.rs"]

@@ -117,7 +117,9 @@ fn activate() -> io::Result<()> {
     let storage = storage::activate_if_selected(protected_epoch)?;
     let esp = slot.as_ref().map(|slot| slot.esp.as_str());
     let enroll_firmware = |recovery| {
-        if let (Some(esp), Some(epoch), Some(storage)) = (esp, epoch, &storage) {
+        if let (Some(esp), Some(epoch), Some(storage)) =
+            (esp, epoch, storage.as_ref().filter(|storage| storage.automatic))
+        {
             return host_update::activate_firmware_if_selected(
                 esp,
                 epoch,
@@ -180,6 +182,9 @@ fn activate() -> io::Result<()> {
             }
             Ok(hypervisor_trial::ArmOutcome::ContinueBoot) => (),
             Err(error) => eprintln!("FVCA_TRIAL_REFUSED {error}"),
+        }
+        if !standing_candidate && !recovering && !Path::new("/run/fvca/boot-trial-started").try_exists()? {
+            guest_boot::publish_commissioning(guest.as_deref(), storage.is_some())?;
         }
     }
     if !recovering && let (Some(esp), Some(guest), Some(epoch)) = (esp, guest.as_deref(), epoch) {

@@ -14,9 +14,9 @@ VERITY_PARTITIONS = {
 }
 
 
-def read_layout(image, partition_types, *, sector_size=None, optional_types=None):
+def read_layout(image, partition_types, *, sector_size=None, optional_types=None, pass_fds=()):
     options = ("--sector-size", str(sector_size)) if sector_size is not None else ()
-    output = subprocess.check_output(["sfdisk", "--json", *options, image])
+    output = subprocess.check_output(["sfdisk", "--json", *options, image], pass_fds=pass_fds)
     table = json.loads(output)["partitiontable"]
     entries = table["partitions"]
     actual_types = sorted(partition["type"].lower() for partition in entries)

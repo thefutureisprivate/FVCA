@@ -255,6 +255,7 @@ fn launch_selection(payload: &str, timeout: Duration) -> io::Result<()> {
 }
 
 fn start(connection: &Connection, events: &EventLoop, selection: &guest_boot::Selection<'_>, xml: &CStr, timeout: Duration) -> io::Result<()> {
+    capture::commission::require_installed()?;
     if connection.lookup(UUID)?.is_some() {
         return Err(invalid("the registered Guest already exists"));
     }
@@ -321,6 +322,7 @@ fn activate() -> io::Result<()> {
             capture::live::require_idle()?;
             launch()
         }
+        [option] if option == "--commission" => capture::commission::run(),
         [option] if option == "--shutdown" => {
             let _lease = capture::lease(Path::new(OPERATION_LOCK))?;
             capture::live::require_idle()?;

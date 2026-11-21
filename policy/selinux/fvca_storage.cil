@@ -27,15 +27,15 @@
 (allow init_t fvca_os_stage_t (file (relabelfrom)))
 (allow fwupd_t fvca_os_stage_t (dir (getattr search)))
 
-; Cold restore moves two recorded VM subvolume roots between private parents.
-; The launcher gives only those roots a movable label before the exchange.
+; Commissioning and cold restore move recorded VM subvolumes between private parents.
+; Only the selected roots receive this label before being moved.
 (type fvca_vm_slot_t)
 (typeattributeset file_type (fvca_vm_slot_t))
 (roletype object_r fvca_vm_slot_t)
 (allow fvca_vm_slot_t fs_t (filesystem (associate)))
 (allow init_t fvca_host_data_t (dir (relabelfrom)))
 (allow init_t fvca_vm_slot_t (dir (getattr ioctl open read relabelfrom relabelto rename reparent rmdir search write)))
-(allowx init_t fvca_vm_slot_t (ioctl dir (0x9411 0x943c)))
+(allowx init_t fvca_vm_slot_t (ioctl dir (0x9411 0x941f 0x943c)))
 
 ; Publish release directories atomically inside the updater's staging area.
 ; Only the staging root receives this label during verified boot.

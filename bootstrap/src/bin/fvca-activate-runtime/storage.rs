@@ -186,6 +186,7 @@ fn open_data(selection: &Selection<'_>, sources: &[PathBuf; 2]) -> io::Result<()
 pub(super) struct VerifiedStorage {
     pub filesystem: String,
     pub policy_sha256: String,
+    pub automatic: bool,
 }
 
 pub(super) fn activate_if_selected(protected_epoch: bool) -> io::Result<Option<VerifiedStorage>> {
@@ -202,12 +203,11 @@ pub(super) fn activate_if_selected(protected_epoch: bool) -> io::Result<Option<V
         return Err(invalid("unattended TPM unlock requires a protected Hypervisor epoch"));
     }
     let sources = find_members(&selection.members)?;
-    let verified_storage = if protected_epoch && selection.authenticated
-        && selection.tpm.as_ref().is_some_and(|tpm| tpm.mode == tpm::Mode::Auto)
-    {
+    let verified_storage = if selection.authenticated {
         Some(VerifiedStorage {
             filesystem: selection.filesystem.to_owned(),
             policy_sha256: tpm::sha256(policy.as_bytes())?,
+            automatic: protected_epoch && selection.tpm.as_ref().is_some_and(|tpm| tpm.mode == tpm::Mode::Auto),
         })
     } else {
         None

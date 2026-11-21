@@ -171,7 +171,7 @@ def initramfs_inventory(path: Path):
     return entries
 
 
-def composed_initramfs(path, work, capture):
+def composed_initramfs(path, work, capture, *, base_capture=None):
     """Read ukify's Zstandard initramfs and its aligned FVCA newc suffix."""
     decoder = zstd.ZstdDecompressor()
     with path.open("rb") as source, tempfile.TemporaryFile(dir=work) as expanded:
@@ -183,7 +183,7 @@ def composed_initramfs(path, work, capture):
         source.seek(-len(decoder.unused_data), os.SEEK_CUR)
         skip_padding(source, source.tell())
         expanded.seek(0)
-        base = newc_inventory(expanded)
+        base = newc_inventory(expanded, capture=base_capture)
         overlay = newc_inventory(source, capture=capture)
     if any(entry["type"] != "file" or not re.fullmatch(r"/usr/lib/fvca/[^/]+", entry["path"])
            for entry in overlay):

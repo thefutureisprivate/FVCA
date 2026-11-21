@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import tempfile
 from uuid import UUID
@@ -19,9 +20,11 @@ from guest_configuration import settings_record
 import host_storage
 import host_workload
 import hypervisor_gpt
+from image_verity import read_layout
 from runtime_boot import (
     DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_CHANGE_SUPPORT,
-    GUEST_CONFIG_KEY, GUEST_CONFIG_KEY_ARGUMENT, GUEST_LAUNCH_FILES, GUEST_VM_SETTINGS,
+    GUEST_COMMISSIONING, GUEST_COMMISSIONING_SUPPORT, GUEST_CONFIG_KEY, GUEST_CONFIG_KEY_ARGUMENT,
+    GUEST_LAUNCH_FILES, GUEST_VM_SETTINGS,
     GUEST_VM_SUPPORT, HOST_NETWORK_ARGUMENT, HOST_NETWORK_POLICY, HOST_NETWORK_SUPPORT,
     HOST_WORKLOAD_ARGUMENT, HOST_WORKLOAD_GUEST, HOST_WORKLOAD_POLICY, HOST_WORKLOAD_SUPPORT,
     MANAGEMENT_ADDRESS_ARGUMENT, MANAGEMENT_ARGUMENT, MANAGEMENT_POLICY,
@@ -97,6 +100,51 @@ def guest_selection(args, work):
     root, selection = guest_boot_bundle.select_image(guest, args.boot_certificate, certificate, directory)
     files = tuple(zip(GUEST_LAUNCH_FILES, (selection, (directory / "root.p7s").read_bytes()), strict=True))
     return files, root
+
+
+def guest_commissioning(seed, bundle, initrd, work):
+    if seed is None:
+        return ()
+    if bundle is None:
+        raise ValueError("commissioning requires an authorized Service Guest boot bundle")
+    from file_inventory import composed_initramfs
+
+    selected = {"/usr/lib/fvca/guest-data": None}
+    composed_initramfs(initrd, work, None, base_capture=selected)
+    match = re.fullmatch(
+        rb"FVCA-GUEST-DATA-1\npartition=([0-9a-f-]{36})\nfilesystem=btrfs\nfilesystem_uuid=([0-9a-f-]{36})\n",
+        selected["/usr/lib/fvca/guest-data"] or b"",
+    )
+    if match is None:
+        raise ValueError("the authorized Service Guest lacks a signed Btrfs selection")
+    part, filesystem = (value.decode("ascii") for value in match.groups())
+    if str(UUID(part)) != part or str(UUID(filesystem)) != filesystem:
+        raise ValueError("the authorized Service Guest uses a noncanonical storage identity")
+    with os.fdopen(os.open(seed, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as disk:
+        before = os.fstat(disk.fileno())
+        if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size < 2**63 or before.st_size % 512:
+            raise ValueError("commissioning requires a nonempty sector-aligned raw seed file")
+        fd = disk.fileno()
+        source = f"/proc/self/fd/{fd}"
+        sector, entries = read_layout(source, {"guest data": "0fc63daf-8483-4772-8e79-3d69d8477de4"},
+                                      sector_size=512, pass_fds=(fd,))
+        data = entries["guest data"]
+        offset, length = data["start"] * sector, data["size"] * sector
+        if data["uuid"].lower() != part or offset < sector or length <= 0 or offset + length > before.st_size:
+            raise ValueError("the seed partition differs from the authorized Guest storage")
+        probe = run("blkid", "-p", "-o", "export", "-O", str(offset), "-S", str(length), source,
+                    pass_fds=(fd,), capture_output=True, text=True).stdout.splitlines()
+        if "TYPE=btrfs" not in probe or f"UUID={filesystem}" not in probe:
+            raise ValueError("the seed is missing the authorized Guest Btrfs filesystem")
+        digest = hashlib.file_digest(disk, "sha256").hexdigest()
+        after = os.fstat(disk.fileno())
+        if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+            after.st_size, after.st_mtime_ns, after.st_ctime_ns
+        ):
+            raise ValueError("the Service Guest commissioning seed changed while being read")
+    record = (f"FVCA-GUEST-COMMISSIONING-1\nguest={guest_boot_bundle.SERVICE_GUEST_ID}\n"
+              f"bundle={bundle}\nbytes={before.st_size}\nseed_sha256={digest}\n")
+    return ((GUEST_COMMISSIONING, record.encode("ascii")),)
 
 
 BACKUP_FILES = ("vm-backup-policy", "vm-backup-ca.pem")
@@ -398,6 +446,8 @@ def network_selection(args, management, backup):
 
 def assemble(args, work):
     storage = host_storage.selection(args.storage) if args.storage is not None else None
+    if args.guest_commissioning_seed is not None and (storage is None or storage.protection != host_storage.AUTHENTICATED):
+        raise ValueError("commissioning requires authenticated Host storage")
     if args.management_enrollment is not None and (storage is None or storage.protection != host_storage.AUTHENTICATED):
         raise ValueError("management enrollment requires authenticated Hypervisor storage")
     resources, resource_arguments = guest_vm_settings(args.guest_vm_settings)
@@ -441,7 +491,7 @@ def assemble(args, work):
     runtime_hash = verify_runtime(args.runtime, args.runtime_certificate, prepared, runtime_work, vm_runtime)
     forbidden = tuple(f"usr/lib/fvca/{name}" for name in (
         "hypervisor.composition", "vm-runtime.p7s", "host-storage",
-        *WORKLOAD_TRUST_FILES, *WORKLOAD_CHANNEL_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES,
+        *WORKLOAD_TRUST_FILES, *WORKLOAD_CHANNEL_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, GUEST_COMMISSIONING,
         *BACKUP_FILES, BACKUP_JOB_FILE,
         RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE, TRIAL_FILE,
         TRIAL_CANDIDATE_FILE, TRIAL_WATCHDOG_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY,
@@ -556,6 +606,12 @@ def assemble(args, work):
         deadline = f"FVCA-HYPERVISOR-TRIAL-WATCHDOG-1\nseconds={args.boot_trial_watchdog_seconds}\n"
         watchdog = ((TRIAL_WATCHDOG_FILE, deadline.encode("ascii")),)
         watchdog_arguments = (f"{TRIAL_WATCHDOG_ARGUMENT}={args.boot_trial_watchdog_seconds}",)
+    if args.guest_commissioning_seed is not None:
+        unit = runtime_work / "tree" / vm_runtime.GUEST_COMMISSIONING_UNIT
+        expected = Path(__file__).resolve().parent.parent / "vm-runtime/mkosi.extra" / vm_runtime.GUEST_COMMISSIONING_UNIT
+        if unit.is_symlink() or not unit.is_file() or unit.read_bytes() != expected.read_bytes():
+            raise ValueError("the verified VM runtime lacks the reviewed commissioning service")
+        required += (GUEST_COMMISSIONING_SUPPORT,)
     verify_initrd(args.initrd, uname, required, forbidden, "Hypervisor")
     extra = (("host-storage", storage.raw),) if storage is not None else ()
     ids = None
@@ -564,6 +620,7 @@ def assemble(args, work):
         extra += slot_files
     backup = backup_selection(args)
     guest, guest_hash = guest_selection(args, work)
+    commissioning = guest_commissioning(args.guest_commissioning_seed, guest_hash, work / "guest/tree/initrd", work)
     stable_trial, _ = trial_selection(args.boot_trial, ids, guest_hash, candidate=False)
     candidate_trial, trial_arguments = trial_selection(args.boot_trial_candidate, ids, guest_hash,
                                                         candidate=True)
@@ -579,7 +636,7 @@ def assemble(args, work):
                                         if name == GUEST_CONFIG_KEY)
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
-        extra=(*extra, *epoch, *guest, *resources, *management, *network, *workload, *backup, *backup_job_selection(args.backup_job, backup),
+        extra=(*extra, *epoch, *guest, *commissioning, *resources, *management, *network, *workload, *backup, *backup_job_selection(args.backup_job, backup),
                *restore_selection(args.restore_authorization, backup),
                *retention_selection(args.retention_policy, backup),
                *stable_trial, *candidate_trial, *watchdog, *guest_epoch,
@@ -623,6 +680,8 @@ def main():
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute(), required=True)
     parser.add_argument("--storage", type=Path, help="host storage selection to embed in the signed UKI")
     parser.add_argument("--guest-boot", type=Path, help="verified Guest boot bundle disk to authorize")
+    parser.add_argument("--guest-commissioning-seed", type=Path,
+                        help="authorize one initial Service Guest raw disk by its size and digest")
     parser.add_argument("--guest-release-certificate", type=Path, help="trusted Guest release signer")
     parser.add_argument("--guest-vm-settings", type=Path, help="typed Service Guest CPU and RAM settings for this Host UKI")
     parser.add_argument("--guest-configuration-public-key", type=Path,
@@ -669,6 +728,11 @@ def main():
     for member in ("a", "b"):
         parser.add_argument(f"--tpm-token-{member}", type=Path, help=f"exported LUKS2 token for member {member}")
     args = parser.parse_args()
+    if args.guest_commissioning_seed is not None and (
+        args.guest_boot is None or args.restore_authorization is not None
+        or args.boot_trial is not None or args.boot_trial_candidate is not None
+    ):
+        parser.error("commissioning requires the ordinary stable Hypervisor and its selected Guest")
     if (args.guest_trial_public_key is None) != (args.guest_trial_epoch is None) or (
         args.guest_trial_epoch is not None and (
             not 0 < args.guest_trial_epoch < 2**64 or args.guest_boot is None or args.storage is None

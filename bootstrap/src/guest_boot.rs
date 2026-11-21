@@ -1,7 +1,7 @@
 //! Exact launch selection authenticated by the Hypervisor UKI.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +15,59 @@ const SOURCE: &str = "/usr/lib/fvca/guest-launch";
 const SIGNATURE: &str = "/usr/lib/fvca/guest-launch.p7s";
 const TRIAL_KEY: &str = "/usr/lib/fvca/guest-trial-key";
 const BASE_EPOCH: &str = "/usr/lib/fvca/guest-base-epoch";
+const COMMISSIONING: &str = "/usr/lib/fvca/guest-commissioning";
+pub const COMMISSIONING_RUNTIME: &str = "/run/fvca/guest-commissioning";
+
+pub struct Commissioning<'a> {
+    pub bundle: &'a str,
+    pub bytes: u64,
+    pub digest: &'a str,
+}
+
+impl<'a> Commissioning<'a> {
+    pub fn parse(text: &'a str) -> io::Result<Self> {
+        let invalid_record = || invalid("invalid signed Service Guest commissioning record");
+        let mut lines = text.split_terminator('\n');
+        if !text.ends_with('\n') || lines.next() != Some("FVCA-GUEST-COMMISSIONING-1")
+            || lines.next().and_then(|line| line.strip_prefix("guest=")).map(str::as_bytes)
+                != Some(SERVICE_GUEST_UUID.to_bytes())
+        {
+            return Err(invalid_record());
+        }
+        let mut field = |prefix| lines.next().and_then(|line| line.strip_prefix(prefix)).ok_or_else(invalid_record);
+        let bundle = runtime::hash(field("bundle=")?)?;
+        let size = field("bytes=")?;
+        let bytes = size.parse::<u64>().map_err(|_| invalid_record())?;
+        let digest = runtime::hash(field("seed_sha256=")?)?;
+        if lines.next().is_some() || size != bytes.to_string() || bytes == 0 || bytes > i64::MAX as u64
+            || !bytes.is_multiple_of(512)
+        {
+            return Err(invalid_record());
+        }
+        Ok(Self { bundle, bytes, digest })
+    }
+}
+
+pub fn publish_commissioning(bundle: Option<&str>, authenticated: bool) -> io::Result<()> {
+    let file = match fs::File::open(COMMISSIONING) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        result => result?,
+    };
+    let mut text = String::new();
+    file.take(512).read_to_string(&mut text)?;
+    let selection = Commissioning::parse(&text)?;
+    if text.len() == 512 || !authenticated || bundle != Some(selection.bundle) {
+        return Err(invalid("commissioning requires the selected Guest and authenticated Host storage"));
+    }
+    fs::OpenOptions::new().create_new(true).write(true).mode(0o600)
+        .open(COMMISSIONING_RUNTIME)?.write_all(text.as_bytes())?;
+    let dropin = Path::new("/run/systemd/system/fvca-service-guest.service.d");
+    fs::create_dir_all(dropin)?;
+    fs::write(
+        dropin.join("10-commissioning.conf"),
+        "[Unit]\nRequires=fvca-commission-guest.service\nAfter=fvca-commission-guest.service\n",
+    )
+}
 
 fn publish_trial_enrollment() -> io::Result<()> {
     let authority = match fs::read(TRIAL_KEY) {

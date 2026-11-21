@@ -39,6 +39,7 @@ GUEST_TRIAL_FILES = (
 GUEST_UPDATE_UNITS = tuple(
     Path(f"usr/lib/systemd/system/fvca-guest-os-update.{kind}") for kind in ("service", "timer")
 )
+GUEST_COMMISSIONING_UNIT = Path("usr/lib/systemd/system/fvca-commission-guest.service")
 MANAGEMENT_UNITS = {
     Path(f"usr/lib/systemd/system/fvca-{daemon}.{kind}")
     for daemon in ("management", "management-broker")
@@ -129,6 +130,7 @@ def allowed(path):
         or path in (TRIAL_HEALTH, TRIAL_HEALTH_WATCHDOG)
         or path in GUEST_TRIAL_FILES
         or path in GUEST_UPDATE_UNITS
+        or path == GUEST_COMMISSIONING_UNIT
         or path in FIRMWARE_UPDATE_UNITS
         or path in (FIRMWARE_UPDATE_SUPPORT, GUEST_VM_SUPPORT, GUEST_CONFIG_CHANGE_SUPPORT, HOST_NETWORK_SUPPORT,
                     HOST_WORKLOAD_SUPPORT, MANAGEMENT_SUPPORT)
