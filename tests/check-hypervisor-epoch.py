@@ -40,7 +40,6 @@ def qualify(args):
     args.nvme_boot = True
     args.no_default_devices = True
     args.boot_sector_size = 4096
-    args.memory_mib = 4096
     cases = [
         ("initially-eligible", args.older, None, args.states / "counter-one", first, first, None),
         ("replayed-slot", args.older, None, args.states / "counter-two", first, second, b"below the TPM floor"),
@@ -65,28 +64,49 @@ def qualify(args):
         restored = int.from_bytes(returned_floor, "big")
         if len(returned_floor) != 8 or restored == 0:
             raise ValueError("expected the actual nonzero counter value after TPM clear")
-        slot = args.reset_eligible
         epoch = max(second, restored)
-        cases.extend((
-            ("reset-control", slot, None, args.states / "counter-two", epoch, second, None),
-            ("cleared-tpm", slot, None, args.states / "cleared", epoch, 0,
-             b"TPM refused read command 0x00000169"),
-            ("counter-reenrolled-after-clear", slot, None, args.states / "reenrolled-after-clear", epoch, restored,
-             UNSEAL_FAILED),
-        ))
+        if len(args.reset_eligible) == 1:
+            slot = args.reset_eligible[0]
+            _, parts = gpt["layout"](slot, args.boot_sector_size)
+            if gpt["HOST_DATA"] in parts:
+                raise ValueError("an integrated reset slot requires its companion")
+            slots = [("", slot, None)]
+        elif len(args.reset_eligible) == 2:
+            a, b = args.reset_eligible
+            a_id, a_parts = gpt["layout"](a, args.boot_sector_size)
+            b_id, b_parts = gpt["layout"](b, args.boot_sector_size)
+            parts = [part[1] for part in (*a_parts.values(), *b_parts.values())]
+            if (a_id == b_id or len(parts) != len(set(parts))
+                    or gpt["HOST_DATA"] not in a_parts.keys() & b_parts.keys()):
+                raise ValueError("the reset pair requires two distinct integrated Hypervisor slots")
+            slots = [("-a", a, b), ("-b", b, a)]
+        else:
+            raise ValueError("supply one external-member slot or two integrated slots for the reset matrix")
+        for suffix, slot, peer in slots:
+            cases.extend((
+                ("reset-control" + suffix, slot, peer, args.states / "counter-two", epoch, second, None),
+                ("cleared-tpm" + suffix, slot, peer, args.states / "cleared", epoch, 0,
+                 b"TPM refused read command 0x00000169"),
+                ("counter-reenrolled-after-clear" + suffix, slot, peer, args.states / "reenrolled-after-clear",
+                 epoch, restored, UNSEAL_FAILED),
+            ))
     for name, disk, peer, state, epoch, floor, reason in cases:
         extra_input = name == "unapproved-measured-input"
+        full_boot = name.startswith("reset-control") and peer is not None
+        args.memory_mib = 8192 if peer is not None else 4096
+        args.vcpus = 4 if peer is not None else 2
         args.disk = disk
         args.runtime = peer
         _, parts = gpt["layout"](disk, args.boot_sector_size)
         esp = f"FVCA_HYPERVISOR_SLOT_VERIFIED {parts['fvca-esp'][1]}".encode("ascii")
+        ready = storage.FAIL if reason is not None else storage.READY if full_boot else storage.ACTIVE
         for attempt in range(1, 4):
             emulator = nullcontext(None) if state is None else storage.software_tpm(state)
             with emulator as socket:
                 prompts, output = storage.boot(
                     args, f"{name}-{attempt}", pin if reason is None else None, *(members if peer is None else ()),
-                    firmware=args.firmware, tpm_socket=socket, firmware_timeout=30, timeout=105,
-                    extra_cmdline=extra_input, ready_marker=storage.ACTIVE if reason is None else storage.FAIL,
+                    firmware=args.firmware, tpm_socket=socket, firmware_timeout=30,
+                    timeout=155 if full_boot else 105, extra_cmdline=extra_input, ready_marker=ready,
                 )
             if b"Kernel command line:" in output:
                 break
@@ -105,17 +125,21 @@ def qualify(args):
                 authorized = prompts == 2 and prompt is not None and output.find(marker) < prompt.start()
             if not authorized or storage.FAIL in output or not all(mark in output for mark in required):
                 raise ValueError(f"{name} did not check the epoch before unlocking authenticated Btrfs")
+            if full_boot:
+                storage.require_nested_guest_ready(output, required, expected_launches=1)
         else:
             if extra_input:
                 gate = (post_epoch_refusal(output, marker, reason)
                         and b"fvca.unapproved-lab-input=1" in output)
-            elif name == "counter-reenrolled-after-clear":
+            elif name.startswith("counter-reenrolled-after-clear"):
                 gate = (post_epoch_refusal(output, marker, reason)
                         and b'"/usr/bin/cryptsetup" exited with' in output)
             else:
-                gate = REFUSED in output and ACCEPTED not in output
+                gate = REFUSED in output and ACCEPTED not in output and UNSEAL_FAILED not in output
             forbidden = (AUTO, UNLOCKED, storage.ACTIVE, storage.HOST_AUTHENTICATED,
-                         storage.HOST_PROFILES, b"FVCA_VM_RUNTIME_ACTIVE", b"FVCA_SERVICE_GUEST_READY")
+                         storage.HOST_PROFILES, storage.READY, b"FVCA_VM_RUNTIME_ACTIVE",
+                         b"FVCA_KVM_GUEST_CONFINED", b"FVCA_SERVICE_GUEST_AGENT_READY",
+                         b"FVCA_SERVICE_GUEST_READY")
             if (prompts or prompt is not None or not gate or reason not in output or storage.FAIL not in output
                     or re.search(rb"Key slot [0-9]+ unlocked\.", output)
                     or any(mark in output for mark in forbidden)):
@@ -133,6 +157,6 @@ if __name__ == "__main__":
     unlock.add_argument("--pin-file", type=Path, help="supply the disposable PIN for tpm2-pin boots")
     parser.add_argument("--paired-slots", nargs=2, type=Path, metavar=("A", "B"),
                         help="also boot both provisioned slots at each floor using their integrated Host members")
-    parser.add_argument("--reset-eligible", type=Path, metavar="SLOT",
-                        help="boot a slot composed with epoch-after-clear.conf against the TPM clear fixtures")
+    parser.add_argument("--reset-eligible", type=Path, nargs="+", metavar="SLOT",
+                        help="test one external-member slot or both integrated slots built with epoch-after-clear.conf")
     qualify(parser.parse_args())
