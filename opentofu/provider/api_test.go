@@ -11,13 +11,19 @@ func TestFirmwareStatusKeepsPendingAndRecordedOperationSeparate(t *testing.T) {
 	operation := &firmwareActivation{
 		Transaction: "dce9f9d8-344d-418c-870b-8784cbdf76ef", Device: strings.Repeat("b", 40),
 		Offer: strings.Repeat("c", 64), Phase: "outcome-unknown",
+		Qualification: &firmwareQualification{QualifiedAt: 80, ObservedAt: 105, AgeSeconds: 25},
 	}
-	view := &firmwareStatus{Schema: "fvca-host-firmware-status-v1", Enrolled: &enrolled,
+	view := &firmwareStatus{Schema: "fvca-host-firmware-status-v2", Enrolled: &enrolled,
 		Unavailable: &unavailable, Activation: operation,
 		Check: &firmwareCheck{Disposition: "outcome-unknown", CheckedAt: 100, Operation: operation}}
 	if !view.valid() {
 		t.Fatal("rejected an unresolved operation")
 	}
+	operation.Qualification.AgeSeconds = 0
+	if view.valid() {
+		t.Fatal("accepted a qualification age inconsistent with its signed and observed dates")
+	}
+	operation.Qualification.AgeSeconds = 25
 	view.Activation = nil
 	if !view.valid() {
 		t.Fatal("expected retained observation to be independent of current activation")

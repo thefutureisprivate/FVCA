@@ -47,8 +47,8 @@ pub fn publish_management_enrollment(cmdline: &str) -> io::Result<()> {
         ));
     }
     for marker in [
-        "/usr/lib/fvca/management-policy-v5",
-        "/sysroot/usr/lib/fvca/management-services-v5",
+        "/usr/lib/fvca/management-policy-v6",
+        "/sysroot/usr/lib/fvca/management-services-v6",
     ] {
         let support = fs::symlink_metadata(marker)?;
         if !support.is_file() || support.len() != 0 {

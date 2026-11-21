@@ -12,19 +12,32 @@ import (
 )
 
 type firmwareActivation struct {
-	Transaction string `json:"transaction"`
-	Device      string `json:"device_id"`
-	Offer       string `json:"offer_sha256"`
-	Phase       string `json:"phase"`
+	Transaction   string                 `json:"transaction"`
+	Device        string                 `json:"device_id"`
+	Offer         string                 `json:"offer_sha256"`
+	Phase         string                 `json:"phase"`
+	Qualification *firmwareQualification `json:"qualification"`
 }
 
 type firmwareStage struct {
-	Device      string  `json:"device_id"`
-	Offer       string  `json:"offer_sha256"`
-	Archive     string  `json:"archive_sha256"`
-	From        string  `json:"qualified_from"`
-	Target      string  `json:"target"`
-	Eligibility *string `json:"eligibility"`
+	Device        string                 `json:"device_id"`
+	Offer         string                 `json:"offer_sha256"`
+	Archive       string                 `json:"archive_sha256"`
+	From          string                 `json:"qualified_from"`
+	Target        string                 `json:"target"`
+	Eligibility   *string                `json:"eligibility"`
+	Qualification *firmwareQualification `json:"qualification"`
+}
+
+type firmwareQualification struct {
+	QualifiedAt int64 `json:"qualified_at"`
+	ObservedAt  int64 `json:"observed_at"`
+	AgeSeconds  int64 `json:"age_seconds"`
+}
+
+func (q *firmwareQualification) valid() bool {
+	return q != nil && q.QualifiedAt > 0 && q.ObservedAt >= q.QualifiedAt &&
+		q.AgeSeconds == q.ObservedAt-q.QualifiedAt
 }
 
 type firmwareCheck struct {
@@ -49,7 +62,8 @@ var firmwareDeviceID = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 func (active *firmwareActivation) valid() bool {
 	return active == nil || (uuid.MatchString(active.Transaction) &&
-		firmwareDeviceID.MatchString(active.Device) && isDigest(active.Offer) && firmwarePhase(active.Phase))
+		firmwareDeviceID.MatchString(active.Device) && isDigest(active.Offer) && firmwarePhase(active.Phase) &&
+		(active.Qualification == nil || active.Qualification.valid()))
 }
 
 func firmwarePhase(value string) bool {
@@ -75,7 +89,7 @@ func firmwareVersion(value string) bool {
 func (stage *firmwareStage) valid() bool {
 	if !firmwareDeviceID.MatchString(stage.Device) || !isDigest(stage.Offer) ||
 		!isDigest(stage.Archive) || !firmwareVersion(stage.From) || !firmwareVersion(stage.Target) ||
-		stage.From == stage.Target {
+		stage.From == stage.Target || !stage.Qualification.valid() {
 		return false
 	}
 	if stage.Eligibility == nil {
@@ -89,7 +103,7 @@ func (stage *firmwareStage) valid() bool {
 }
 
 func (status *firmwareStatus) valid() bool {
-	if status == nil || status.Schema != "fvca-host-firmware-status-v1" ||
+	if status == nil || status.Schema != "fvca-host-firmware-status-v2" ||
 		status.Enrolled == nil || status.Unavailable == nil || (*status.Unavailable && status.Check != nil) {
 		return false
 	}
@@ -151,9 +165,13 @@ func (p *hostFirmware) Metadata(_ context.Context, req datasource.MetadataReques
 
 func (p *hostFirmware) Schema(_ context.Context, _ datasource.SchemaRequest, res *datasource.SchemaResponse) {
 	computedString := schema.StringAttribute{Computed: true}
+	seconds := schema.Int64Attribute{Computed: true}
+	qualification := schema.SingleNestedAttribute{Computed: true, Attributes: map[string]schema.Attribute{
+		"qualified_at": seconds, "observed_at": seconds, "age_seconds": seconds,
+	}}
 	operation := schema.SingleNestedAttribute{Computed: true, Attributes: map[string]schema.Attribute{
 		"transaction": computedString, "device_id": computedString,
-		"offer_sha256": computedString, "phase": computedString,
+		"offer_sha256": computedString, "phase": computedString, "qualification": qualification,
 	}}
 	res.Schema = schema.Schema{
 		Description: "Read the enrolled Hypervisor's firmware activation and last discovery result.",
@@ -172,6 +190,7 @@ func (p *hostFirmware) Schema(_ context.Context, _ datasource.SchemaRequest, res
 				"staged": schema.SingleNestedAttribute{Computed: true, Attributes: map[string]schema.Attribute{
 					"device_id": computedString, "offer_sha256": computedString, "archive_sha256": computedString,
 					"qualified_from": computedString, "target": computedString, "eligibility": computedString,
+					"qualification": qualification,
 				}},
 			}},
 		},
@@ -191,10 +210,28 @@ func (p *hostFirmware) Configure(_ context.Context, req datasource.ConfigureRequ
 }
 
 type activationModel struct {
-	Transaction types.String `tfsdk:"transaction"`
-	Device      types.String `tfsdk:"device_id"`
-	Offer       types.String `tfsdk:"offer_sha256"`
-	Phase       types.String `tfsdk:"phase"`
+	Transaction   types.String        `tfsdk:"transaction"`
+	Device        types.String        `tfsdk:"device_id"`
+	Offer         types.String        `tfsdk:"offer_sha256"`
+	Phase         types.String        `tfsdk:"phase"`
+	Qualification *qualificationModel `tfsdk:"qualification"`
+}
+
+type qualificationModel struct {
+	QualifiedAt types.Int64 `tfsdk:"qualified_at"`
+	ObservedAt  types.Int64 `tfsdk:"observed_at"`
+	AgeSeconds  types.Int64 `tfsdk:"age_seconds"`
+}
+
+func (q *firmwareQualification) model() *qualificationModel {
+	if q == nil {
+		return nil
+	}
+	return &qualificationModel{
+		QualifiedAt: types.Int64Value(q.QualifiedAt),
+		ObservedAt:  types.Int64Value(q.ObservedAt),
+		AgeSeconds:  types.Int64Value(q.AgeSeconds),
+	}
 }
 
 func (active *firmwareActivation) model() *activationModel {
@@ -204,16 +241,18 @@ func (active *firmwareActivation) model() *activationModel {
 	return &activationModel{
 		Transaction: types.StringValue(active.Transaction), Device: types.StringValue(active.Device),
 		Offer: types.StringValue(active.Offer), Phase: types.StringValue(active.Phase),
+		Qualification: active.Qualification.model(),
 	}
 }
 
 type stageModel struct {
-	Device      types.String `tfsdk:"device_id"`
-	Offer       types.String `tfsdk:"offer_sha256"`
-	Archive     types.String `tfsdk:"archive_sha256"`
-	From        types.String `tfsdk:"qualified_from"`
-	Target      types.String `tfsdk:"target"`
-	Eligibility types.String `tfsdk:"eligibility"`
+	Device        types.String        `tfsdk:"device_id"`
+	Offer         types.String        `tfsdk:"offer_sha256"`
+	Archive       types.String        `tfsdk:"archive_sha256"`
+	From          types.String        `tfsdk:"qualified_from"`
+	Target        types.String        `tfsdk:"target"`
+	Eligibility   types.String        `tfsdk:"eligibility"`
+	Qualification *qualificationModel `tfsdk:"qualification"`
 }
 
 type checkModel struct {
@@ -268,6 +307,7 @@ func (p *hostFirmware) Read(ctx context.Context, req datasource.ReadRequest, res
 				Device: types.StringValue(stage.Device), Offer: types.StringValue(stage.Offer),
 				Archive: types.StringValue(stage.Archive), From: types.StringValue(stage.From),
 				Target: types.StringValue(stage.Target), Eligibility: types.StringPointerValue(stage.Eligibility),
+				Qualification: stage.Qualification.model(),
 			}
 		}
 	}

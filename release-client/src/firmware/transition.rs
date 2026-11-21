@@ -1,6 +1,7 @@
 //! Verify the boot and storage policies qualified for this exact firmware transition.
 
 use std::fs::File;
+use std::io;
 
 use serde::{Deserialize, Serialize};
 use tough::Repository;
@@ -14,7 +15,30 @@ use crate::{
 
 pub(super) const FILE: &str = "transition.json";
 pub(super) const LIMIT: u64 = 8192;
-const SCHEMA: &str = "fvca-firmware-boot-transition-v2";
+const SCHEMA: &str = "fvca-firmware-boot-transition-v3";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct QualificationAge {
+    qualified_at: i64,
+    observed_at: i64,
+    age_seconds: u64,
+}
+
+impl QualificationAge {
+    pub(super) fn at(qualified_at: i64, observed_at: i64) -> io::Result<Self> {
+        if qualified_at <= 0 || qualified_at > observed_at {
+            return Err(invalid(
+                "firmware transition qualification is in the future or has no date",
+            ));
+        }
+        Ok(Self {
+            qualified_at,
+            observed_at,
+            age_seconds: (observed_at - qualified_at) as u64,
+        })
+    }
+}
 
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -34,6 +58,7 @@ pub(super) struct Transition {
     to: Version,
     archive_sha256: String,
     payload_sha256: String,
+    pub(super) qualified_at: i64,
     pub(super) key_release: KeyRelease,
     pub(super) before: boot::Policy,
     pub(super) after: boot::Policy,
@@ -72,6 +97,9 @@ impl Transition {
                 "firmware transition evidence has invalid boot or storage policies",
             )
             .into());
+        }
+        if !(1..head.expires).contains(&record.qualified_at) {
+            return Err(invalid("invalid firmware transition qualification date").into());
         }
         if record.key_release == KeyRelease::PreserveEnrollment && record.before != record.after {
             return Err(invalid(

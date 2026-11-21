@@ -525,7 +525,7 @@ def assemble(args, work):
             if path.is_symlink() or not path.is_file():
                 raise ValueError("the VM runtime lacks scheduled Service Guest updates")
     if args.firmware_update_owner is not None:
-        required += ("usr/lib/fvca/firmware-update-enrollment-v12", "usr/bin/chcon", "usr/bin/mount", "usr/bin/sha256sum")
+        required += ("usr/lib/fvca/firmware-update-enrollment-v13", "usr/bin/chcon", "usr/bin/mount", "usr/bin/sha256sum")
         for tree, members in (
             (prepared / "root", tuple(Path(member) for member in (
                 "usr/libexec/fwupd/fwupd", "usr/lib/systemd/system/fvca-fwupd.service",

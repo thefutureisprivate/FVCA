@@ -4,16 +4,20 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
+use jiff::Timestamp;
 use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
 
-use super::{ENROLLMENT, HEAD_SCHEMA, Head, OFFER, STATUS, activation, result};
+use super::{
+    ENROLLMENT, HEAD_SCHEMA, Head, OFFER, Offer, STATUS, activation, result,
+    transition::{self, QualificationAge, Transition},
+};
 use crate::{
     MANIFEST_BYTES, Result, Role, channel::digest, handoff, invalid, state, valid_digest,
     valid_uuid,
 };
 
-const VIEW_SCHEMA: &str = "fvca-host-firmware-status-v1";
+const VIEW_SCHEMA: &str = "fvca-host-firmware-status-v2";
 const CHECK_SCHEMA: &str = "fvca-firmware-discovery-status-v1";
 
 #[derive(Serialize, Deserialize)]
@@ -33,6 +37,7 @@ struct Active {
     device_id: String,
     offer_sha256: String,
     phase: activation::Phase,
+    qualification: Option<QualificationAge>,
 }
 
 impl Active {
@@ -50,6 +55,7 @@ impl From<activation::Activation> for Active {
             device_id: active.device_id,
             offer_sha256: active.offer_sha256,
             phase: active.phase,
+            qualification: None,
         }
     }
 }
@@ -91,6 +97,7 @@ struct Staged {
     qualified_from: String,
     target: String,
     eligibility: Option<Eligibility>,
+    qualification: QualificationAge,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -123,6 +130,7 @@ struct Preflight {
 #[derive(Deserialize)]
 struct Observed {
     assessment: Option<result::Assessment>,
+    qualified_at: Option<i64>,
 }
 
 impl StatusSnapshot {
@@ -134,10 +142,20 @@ impl StatusSnapshot {
             Err(error) => return Err(error.into()),
         };
         let (activation, last_check) = if enrolled {
+            let observed_at = Timestamp::now().as_second();
             let path = Path::new("/run/fvca/host-data").join(ENROLLMENT);
             let pool = handoff::require_pool_directory(&path)?;
-            let activation = activation::pending(&pool)?.map(Active::from);
-            (activation, read_check(&pool))
+            let activation = activation::pending(&pool)?.map(|record| {
+                let mut active = Active::from(record);
+                active.qualification = read_qualified_stage(&pool, &active.offer_sha256)
+                    .ok()
+                    .filter(|(offer, _)| offer.device.device_id == active.device_id)
+                    .and_then(|(_, evidence)| {
+                        QualificationAge::at(evidence.qualified_at, observed_at).ok()
+                    });
+                active
+            });
+            (activation, read_check(&pool, observed_at))
         } else if fvca_trial_authorization::firmware::activation_pending()? {
             return Err(invalid("pending firmware activation has no current enrollment").into());
         } else {
@@ -154,7 +172,7 @@ impl StatusSnapshot {
     }
 }
 
-fn read_check(pool: &File) -> Result<Option<Check>> {
+fn read_check(pool: &File, observed_at: i64) -> Result<Option<Check>> {
     let file = match handoff::open_child(
         pool,
         STATUS,
@@ -179,10 +197,19 @@ fn read_check(pool: &File) -> Result<Option<Check>> {
             pool,
             saved.offer_sha256,
             saved.operational_preflight,
+            observed_at,
         )?),
         _ => None,
     };
-    let operation = saved.activation.map(Active::from);
+    let operation = saved.activation.map(|record| {
+        let mut active = Active::from(record);
+        active.qualification = saved
+            .recovery_evidence
+            .as_ref()
+            .and_then(|evidence| evidence.qualified_at)
+            .and_then(|qualified_at| QualificationAge::at(qualified_at, observed_at).ok());
+        active
+    });
     if operation
         .as_ref()
         .is_some_and(|operation| !operation.valid())
@@ -206,25 +233,12 @@ fn read_stage(
     pool: &File,
     identity: Option<String>,
     preflight: Option<Preflight>,
+    observed_at: i64,
 ) -> Result<Staged> {
     let offer_sha256 = identity
         .filter(|identity| valid_digest(identity))
         .ok_or_else(|| invalid("invalid staged firmware offer identity"))?;
-    let directory = activation::staged_offer(pool, &offer_sha256)?;
-    let file = result::staged_record(&directory, OFFER, MANIFEST_BYTES)?;
-    if digest(&file) != offer_sha256 {
-        return Err(invalid("firmware check does not match the stage it observed").into());
-    }
-    let head: Head = serde_json::from_slice(&file)?;
-    if head.schema != HEAD_SCHEMA || head.role != Role::Hypervisor {
-        return Err(invalid("invalid staged firmware offer schema or role").into());
-    }
-    let offer = head
-        .offer
-        .filter(|offer| {
-            offer.device.valid() && offer.valid_transition() && valid_digest(&offer.archive.sha256)
-        })
-        .ok_or_else(|| invalid("firmware check does not match the stage it observed"))?;
+    let (offer, transition) = read_qualified_stage(pool, &offer_sha256)?;
     Ok(Staged {
         device_id: offer.device.device_id,
         offer_sha256,
@@ -232,7 +246,30 @@ fn read_stage(
         qualified_from: offer.from.text,
         target: offer.to.text,
         eligibility: preflight.map(|entry| entry.state),
+        qualification: QualificationAge::at(transition.qualified_at, observed_at)?,
     })
+}
+
+fn read_qualified_stage(pool: &File, offer_sha256: &str) -> Result<(Offer, Transition)> {
+    let directory = activation::staged_offer(pool, offer_sha256)?;
+    let file = result::staged_record(&directory, OFFER, MANIFEST_BYTES)?;
+    if digest(&file) != offer_sha256 {
+        return Err(invalid("firmware check does not match the stage it observed").into());
+    }
+    let mut head: Head = serde_json::from_slice(&file)?;
+    if head.schema != HEAD_SCHEMA || head.role != Role::Hypervisor {
+        return Err(invalid("invalid staged firmware offer schema or role").into());
+    }
+    let offer = head
+        .offer
+        .take()
+        .filter(|offer| {
+            offer.device.valid() && offer.valid_transition() && valid_digest(&offer.archive.sha256)
+        })
+        .ok_or_else(|| invalid("firmware check does not match the stage it observed"))?;
+    let body = result::staged_record(&directory, transition::FILE, transition::LIMIT)?;
+    let qualification = Transition::parse(&body, &head, &offer)?;
+    Ok((offer, qualification))
 }
 
 #[cfg(test)]
@@ -257,11 +294,12 @@ mod tests {
                 "completion_blocker": "/private/recovery/notes",
                 "recovery_evidence": {
                     "state": "observed", "assessment": "conflicting-reports",
+                    "qualified_at": 80,
                     "boot_evidence": {"filesystem": "private identity"}
                 },
             }),
         )?;
-        let view = read_check(&File::open(work.path())?)?.unwrap();
+        let view = read_check(&File::open(work.path())?, 120)?.unwrap();
         assert_eq!(
             serde_json::to_value(view)?,
             serde_json::json!({
@@ -271,10 +309,14 @@ mod tests {
                 "operation": {
                     "transaction": "dce9f9d8-344d-418c-870b-8784cbdf76ef",
                     "device_id": "b".repeat(40), "offer_sha256": "c".repeat(64),
-                    "phase": "outcome-unknown"
+                    "phase": "outcome-unknown",
+                    "qualification": {"qualified_at": 80, "observed_at": 120, "age_seconds": 40}
                 },
             })
         );
+        let reversed = read_check(&File::open(work.path())?, 79)?.unwrap();
+        assert!(reversed.operation.unwrap().qualification.is_none());
+        assert_eq!(reversed.assessment, Some(result::Assessment::ConflictingReports));
         Ok(())
     }
 }

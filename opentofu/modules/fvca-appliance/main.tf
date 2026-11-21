@@ -4,7 +4,7 @@ terraform {
   required_providers {
     fvca = {
       source  = "registry.opentofu.org/thefutureisprivate/fvca"
-      version = "= 0.4.0"
+      version = "= 0.5.0"
     }
   }
 }

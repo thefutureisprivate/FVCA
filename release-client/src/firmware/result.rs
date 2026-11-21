@@ -27,6 +27,7 @@ pub(super) enum Evidence {
     Observed {
         boot_id: String,
         assessment: Assessment,
+        qualified_at: i64,
         boot_evidence: boot::Evidence,
         boot_transition: transition::Status,
         qualified_recovery: Box<qualification::Recovery>,
@@ -126,10 +127,11 @@ pub(super) fn inspect(directory: &File, activation: &Activation) -> Evidence {
     };
     let observed = collect(directory, activation);
     match observed {
-        Ok((assessment, observed, expected_boot, qualified_recovery)) => {
+        Ok((assessment, observed, qualified, qualified_recovery)) => {
             let boot_evidence = boot::inspect(directory, &boot);
             Evidence::Observed {
-                boot_transition: transition::compare(&expected_boot, &boot_evidence),
+                boot_transition: transition::compare(&qualified.after, &boot_evidence),
+                qualified_at: qualified.qualified_at,
                 qualified_recovery: Box::new(qualified_recovery),
                 boot_evidence,
                 boot_id: boot,
@@ -147,7 +149,12 @@ pub(super) fn inspect(directory: &File, activation: &Activation) -> Evidence {
 fn collect(
     directory: &File,
     activation: &Activation,
-) -> Result<(Assessment, Observed, boot::Policy, qualification::Recovery)> {
+) -> Result<(
+    Assessment,
+    Observed,
+    transition::Transition,
+    qualification::Recovery,
+)> {
     let staged = activation::staged_offer(directory, &activation.offer_sha256)?;
     let bytes = staged_record(&staged, OFFER, MANIFEST_BYTES)?;
     let (head, offer) = parse_offer(&bytes, &activation.offer_sha256, &activation.device_id)?;
@@ -158,7 +165,7 @@ fn collect(
     require_baseline(&offer, activation.esrt_before.as_ref())?;
     let observed = live::read_result(&offer, &head.system_uuid, &head.fwupd_version, activation)?;
     let assessment = assess(&offer, &observed);
-    Ok((assessment, observed, qualified.after, recovery))
+    Ok((assessment, observed, qualified, recovery))
 }
 
 pub(super) fn staged_record(directory: &File, name: &str, limit: u64) -> Result<Vec<u8>> {

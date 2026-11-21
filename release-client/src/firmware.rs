@@ -921,6 +921,7 @@ async fn refresh(
         return Ok(None);
     };
     let (transition_bytes, transition) = transition::download(&repo, &head, offer).await?;
+    transition::QualificationAge::at(transition.qualified_at, verified_at)?;
     let qualified = qualification::download(&repo, offer).await?;
     let payloads = offer.catalog.download(&repo).await?;
     require_current()?;
@@ -1074,7 +1075,8 @@ async fn refresh(
         } else {
             (None, None, None)
         };
-    require_current()?;
+    let qualification =
+        transition::QualificationAge::at(transition.qualified_at, require_current()?)?;
     Ok(Some(Staged {
         offer_sha256: approval_sha256,
         archive_sha256: offer.archive.sha256.clone(),
@@ -1083,6 +1085,7 @@ async fn refresh(
         observation_sha256: observed.sha256,
         capsule_delivery,
         transition_evidence_sha256: offer.qualification.transition_evidence_sha256.clone(),
+        qualification,
         boot_transition,
         qualified_vendor_authentication: offer.qualification.vendor_authentication,
         urgency: qualified.reboot.urgency,
@@ -1128,6 +1131,7 @@ struct Staged {
     #[serde(skip_serializing_if = "Option::is_none")]
     capsule_delivery: Option<capsule::Delivery>,
     transition_evidence_sha256: String,
+    qualification: transition::QualificationAge,
     #[serde(skip_serializing_if = "Option::is_none")]
     boot_transition: Option<transition::Status>,
     qualified_vendor_authentication: VendorAuthentication,

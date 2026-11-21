@@ -100,10 +100,11 @@ def qualify(client, output):
             "storage_policy_sha256": "a" * 64,
         }
         return {
-            "schema": "fvca-firmware-boot-transition-v2",
+            "schema": "fvca-firmware-boot-transition-v3",
             "system_uuid": document["system_uuid"], "fwupd_version": document["fwupd_version"],
             "device": selected["device"], "from": selected["from"], "to": selected["to"],
             "archive_sha256": selected["archive"]["sha256"], "payload_sha256": selected["payload_sha256"],
+            "qualified_at": stamp - 600,
             "key_release": "preserve-enrollment", "before": before, "after": dict(before),
         }
 
@@ -235,6 +236,9 @@ def qualify(client, output):
             assert status["disposition"] == disposition and stamp <= status["last_refresh"] < status["fresh_until"]
             if disposition == "staged":
                 assert status["archive_sha256"] == digest(archive)
+                qualification = status["qualification"]
+                assert qualification["qualified_at"] == stamp - 600
+                assert qualification["age_seconds"] == qualification["observed_at"] - qualification["qualified_at"] >= 600
                 assert "verified_payload_sha256" not in status
                 assert "capsule_delivery" not in status
                 stage = Path(status["staged"])
@@ -252,6 +256,27 @@ def qualify(client, output):
 
     run("capsule-staged", snapshot(initial))
     run("exact-retry", snapshot(initial))
+    refreshed = output / "refreshed-channel-state"
+    refreshed.mkdir(mode=0o700)
+    publish(dict(initial, sequence=2, valid_from=stamp - 30, expires=stamp + 3700))
+    run("channel-refresh-preserves-qualification-date", snapshot(initial), directory=refreshed)
+    for name, date, message in (
+        ("future-qualification", stamp + 600, "qualification is in the future"),
+        ("missing-qualification-date", None, "missing field `qualified_at`"),
+    ):
+        dated = deepcopy(initial)
+        evidence = transition_for(dated)
+        if date is None:
+            del evidence["qualified_at"]
+        else:
+            evidence["qualified_at"] = date
+        bind_transition(dated, evidence)
+        isolated = output / (name + "-state")
+        isolated.mkdir(mode=0o700)
+        publish(dated)
+        run(name, snapshot(initial), message, directory=isolated)
+        assert not any((isolated / "staged").iterdir())
+    publish(initial)
     bad_window = {"timezone": "Europe/Berlin", "start_minute": 240, "end_minute": 240}
     run("invalid-signed-maintenance-window", snapshot(initial), "invalid maintenance window",
         settings=dict(policy, maintenance=bad_window))
