@@ -18,6 +18,7 @@ METADATA_LIMIT = 4 * 1024**2
 COMPRESSED_LIMIT = 256 * 1024**2
 DECOMPRESSED_LIMIT = 640 * 1024**2
 DIGEST = re.compile(r"sha256:([a-f0-9]{64})")
+SOURCE_FIELDS = {"schema", "service", "repository", "index", "manifest", "uid", "gid", "volumes"}
 
 
 def digest_hex(value):
@@ -92,12 +93,64 @@ def absolute_path(value):
     return value
 
 
+def strings(value):
+    if not isinstance(value, list) or len(value) > 256 or not all(
+        isinstance(item, str) and len(item.encode()) <= 4096 and "\0" not in item for item in value
+    ):
+        raise ValueError("invalid OCI string array")
+    return value
+
+
+def launch_metadata(policy, config):
+    entrypoint = strings(config.get("Entrypoint") or [])
+    command = strings(config.get("Cmd") or [])
+    arguments = entrypoint + command
+    if not arguments:
+        raise ValueError("OCI image lacks an entrypoint and command")
+    executable = absolute_path(arguments[0])
+    env = strings(config.get("Env") or [])
+    keys = [item.partition("=") for item in env]
+    if len({key for key, _, _ in keys}) != len(keys) or any(
+        sep != "=" or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) for key, sep, _ in keys
+    ):
+        raise ValueError("invalid OCI environment")
+    cwd = absolute_path(config.get("WorkingDir") or "/")
+    volumes = sorted(absolute_path(path) for path in (config.get("Volumes") or {}))
+    if volumes != policy["volumes"] or any(executable.startswith(path + "/") for path in volumes):
+        raise ValueError("OCI volumes differ from the approved paths or obscure the entrypoint")
+    signal = config.get("StopSignal") or "SIGTERM"
+    if not re.fullmatch(r"SIG[A-Z0-9]+|[1-9][0-9]?", signal):
+        raise ValueError("invalid OCI stop signal")
+    health = config.get("Healthcheck")
+    if health is not None:
+        if set(health) - {"Test", "Interval", "Timeout", "StartPeriod", "StartInterval", "Retries"}:
+            raise ValueError("unrecognized OCI health configuration")
+        test = strings(health["Test"])
+        if not test or not (
+            test == ["NONE"] or test[0] == "CMD" and len(test) > 1 or test[0] == "CMD-SHELL" and len(test) == 2
+        ):
+            raise ValueError("invalid OCI health command")
+        if any(type(value) is not int or not 0 <= value <= 86_400_000_000_000
+               for key, value in health.items() if key != "Test"):
+            raise ValueError("invalid OCI health interval or retry count")
+    return {
+        "entrypoint": entrypoint, "command": command, "environment": env, "working_directory": cwd,
+        "image_user": config.get("User", ""), "uid": policy["uid"], "gid": policy["gid"],
+        "stop_signal": signal, "healthcheck": health, "volumes": volumes,
+    }
+
+
 def validate_policy(policy):
-    if policy.keys() != {
-        "schema", "service", "repository", "index", "manifest", "certificate_identity",
-        "certificate_issuer", "uid", "gid", "volumes",
-    } or policy["schema"] != "fvca-oci-source-v1":
+    if (not isinstance(policy, dict) or policy.keys() != SOURCE_FIELDS | {"certificate_identity", "certificate_issuer"}
+            or policy["schema"] != "fvca-oci-source-v1"):
         raise ValueError("unexpected workload source policy")
+    for name in ("certificate_identity", "certificate_issuer"):
+        if not re.fullmatch(r"https://[^\s]+", policy[name]):
+            raise ValueError("expected an exact HTTPS signing identity and issuer")
+    return validate_source_scope(policy)
+
+
+def validate_source_scope(policy):
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", policy["service"]):
         raise ValueError("invalid service identity")
     if not re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}/[a-z0-9._/-]+", policy["repository"]):
@@ -106,9 +159,6 @@ def validate_policy(policy):
         raise ValueError("unexpected OCI repository path")
     for name in ("index", "manifest"):
         digest_hex(policy[name])
-    for name in ("certificate_identity", "certificate_issuer"):
-        if not re.fullmatch(r"https://[^\s]+", policy[name]):
-            raise ValueError("expected an exact HTTPS signing identity and issuer")
     if any(type(policy[key]) is not int or not 0 < policy[key] < 65535 for key in ("uid", "gid")):
         raise ValueError("the workload requires explicit non-root identities")
     volumes = [absolute_path(path) for path in policy["volumes"]]
@@ -142,7 +192,7 @@ def read_blob(layout, spec):
 
 def manifest_object(raw, kind):
     parsed = parse_json(raw)
-    if parsed.get("schemaVersion") != 2 or parsed.get("mediaType") != kind:
+    if not isinstance(parsed, dict) or parsed.get("schemaVersion") != 2 or parsed.get("mediaType") != kind:
         raise ValueError("unexpected OCI manifest media type or schema")
     return parsed
 

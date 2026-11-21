@@ -5,7 +5,6 @@ import gzip
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
-import re
 import stat
 import subprocess
 import sys
@@ -174,61 +173,22 @@ def strip_privilege_metadata(root):
     return {"set_id": sorted(setid), "file_capabilities": sorted(capabilities)}
 
 
-def strings(value):
-    if not isinstance(value, list) or len(value) > 256 or not all(
-        isinstance(item, str) and len(item.encode()) <= 4096 and "\0" not in item for item in value
-    ):
-        raise ValueError("invalid OCI string array")
-    return value
-
-
 def normalize_launch(policy, config, process, root):
-    entrypoint = strings(config.get("Entrypoint") or [])
-    command = strings(config.get("Cmd") or [])
-    arguments = entrypoint + command
-    executable = PurePosixPath(oci.absolute_path(arguments[0]))
+    launch = oci.launch_metadata(policy, config)
+    arguments = launch["entrypoint"] + launch["command"]
+    executable = PurePosixPath(arguments[0])
     parent = real_directory(root, executable.parent.as_posix())
     binary = parent / executable.name
     if binary.is_symlink() or not binary.is_file() or not binary.stat().st_mode & 0o111:
         raise ValueError("OCI entrypoint must be an executable file at its approved path")
-    env = strings(config.get("Env") or [])
-    keys = [item.partition("=") for item in env]
-    if len({key for key, _, _ in keys}) != len(keys) or any(
-        sep != "=" or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) for key, sep, _ in keys
-    ):
-        raise ValueError("invalid OCI environment")
-    cwd = oci.absolute_path(config.get("WorkingDir") or "/")
+    cwd = launch["working_directory"]
     real_directory(root, cwd)
     uid, gid = (process["user"][key] for key in ("uid", "gid"))
     if (uid, gid) != (policy["uid"], policy["gid"]) or process["args"] != arguments or process["cwd"] != cwd:
         raise ValueError("resolved OCI execution identity or command differs from the approved source")
-    volumes = sorted(oci.absolute_path(path) for path in (config.get("Volumes") or {}))
-    if volumes != policy["volumes"]:
-        raise ValueError("OCI volumes differ from the approved paths")
-    for path in volumes:
+    for path in launch["volumes"]:
         real_directory(root, path)
-        if arguments[0].startswith(path + "/"):
-            raise ValueError("an OCI data volume would obscure the entrypoint")
-    signal = config.get("StopSignal") or "SIGTERM"
-    if not re.fullmatch(r"SIG[A-Z0-9]+|[1-9][0-9]?", signal):
-        raise ValueError("invalid OCI stop signal")
-    health = config.get("Healthcheck")
-    if health is not None:
-        if set(health) - {"Test", "Interval", "Timeout", "StartPeriod", "StartInterval", "Retries"}:
-            raise ValueError("unrecognized OCI health configuration")
-        test = strings(health["Test"])
-        if not test or not (
-            test == ["NONE"] or test[0] == "CMD" and len(test) > 1 or test[0] == "CMD-SHELL" and len(test) == 2
-        ):
-            raise ValueError("invalid OCI health command")
-        if any(type(value) is not int or not 0 <= value <= 86_400_000_000_000
-               for key, value in health.items() if key != "Test"):
-            raise ValueError("invalid OCI health interval or retry count")
-    return {
-        "entrypoint": entrypoint, "command": command, "environment": env, "working_directory": cwd,
-        "image_user": config.get("User", ""), "uid": uid, "gid": gid,
-        "stop_signal": signal, "healthcheck": health, "volumes": volumes,
-    }
+    return launch
 
 
 def stable_bytes(purpose, digest):

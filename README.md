@@ -1343,7 +1343,40 @@ python3 tools/authorize-workload.py --policy "$policy" \
   --workload-certificate build/workload.crt --output build/stalwart-authorized
 ```
 
-This off-node flow implements signed-only source admission. The optional unsigned permit mode and full Stalwart service acceptance remain open.
+This flow uses signed-only source admission. Full Stalwart service acceptance remains open.
+
+### Issue an unsigned-source permit off-node
+
+Use the signed-only policy by default. The owner can review a separate `fvca-oci-explicit-exceptions-v1` source policy for a particular unsigned digest. Include the same `service`, `repository`, `index`, `manifest`, `uid`, `gid`, and `volumes` fields and the `permit_authority` SHA-256 digest of the issuer's DER certificate. This policy has no publisher identity fields. Preserve the exact source policy bytes for the delegation and request digests.
+
+Prepare the exact OCI index and single-platform layout as above. Print the normalized launch for human review. The preview reads the pinned OCI metadata and the expected execution identity. The isolated derivation worker separately checks the unpacked executable and resolved identity.
+
+```sh
+python3 tools/issue-workload-permit.py preview --policy exception-policy.json \
+  --source-index source-index.json --layout source.oci > launch.json
+```
+
+Use lowercase `sha256:` digests, integer Unix seconds, and a lowercase UUID for `revocation_id`. The permit authority and operator use distinct pinned certificates. Use the detached DER CMS signing command above for each exact JSON document and its corresponding signer.
+
+| Document | Signer | Fields |
+| --- | --- | --- |
+| `fvca-workload-permit-delegation-v1` | Permit authority | `schema`, `operator`, `operator_certificate` as the digest of the operator's DER certificate, `role` as `workload-unsigned-approver`, `guest`, `service`, `repository`, `source_policy`, `valid_from`, `expires`, `max_permit_seconds`, and `registry_token_service` |
+| `fvca-workload-permit-request-v1` | Delegated operator | `schema`, `operator`, `role`, `guest`, `service`, `repository`, `source_policy`, `source_index`, `manifest`, `platform` as `{"os":"linux","architecture":"amd64"}`, `launch` as the exact launch digest, `acknowledgment`, `reason`, `requested_at`, `expires`, `revocation_id`, and `revocation_action` as `block-new-starts` or `stop` |
+
+Review the source digests, destination, launch and expiry before signing the request. Enter the exact text **I KNOW THIS MIGHT BE INSECURE** in the `acknowledgment` field. Ordinary expiry is recorded as `block-new-starts`. Stopping a running workload requires an explicit revocation. Each digest needs its own reviewed acknowledgment.
+
+Set `registry_token_service` to `null` for unauthenticated registry access or supply a pinned HTTPS `url` and `service` for an anonymous pull token. The issuer checks both immutable source manifests and observes the unfiltered OCI referrers API, the OCI referrers tag, and the legacy Cosign signature tag in the same repository. Only explicit missing manifest responses or the expected empty lists clear these checks. Signature metadata, unauthorized responses, malformed replies and retrieval failures fence issuance. Record that the decision covers the configured discovery locations at the time of issuance. [OCI Distribution Specification](https://github.com/opencontainers/distribution-spec/blob/v1.1.1/spec.md#listing-referrers) · [Cosign signature discovery](https://github.com/sigstore/cosign/blob/v3.1.4/specs/SIGNATURE_SPEC.md)
+
+```sh
+python3 tools/issue-workload-permit.py issue --policy exception-policy.json \
+  --source-index source-index.json --layout source.oci --launch launch.json \
+  --request request.json --request-signature request.p7s --operator-certificate operator.crt \
+  --delegation delegation.json --delegation-signature delegation.p7s \
+  --authority-certificate permit-authority.crt --authority-key permit-authority.key \
+  --output reviewed-permit
+```
+
+Retain the private output containing the signed permit, its `UNSIGNED_UPSTREAM_APPROVED` provenance, registry observation, and signed operator request and delegation. Permit consumption in the derivation and Guest paths, expiry reporting, and revocation enforcement remain open. Run `python3 -B -W error tests/check-workload-permit.py` to check the issuer and its rejection paths.
 
 ### Verify an executable-only workload transition
 
