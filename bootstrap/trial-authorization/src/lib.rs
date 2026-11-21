@@ -20,6 +20,7 @@ pub mod workload_network;
 
 pub const APPROVAL_LIMIT: usize = 2048;
 pub const PENDING: &str = "pending-trial";
+pub const WITHDRAWN_SUFFIX: &str = ".withdrawn";
 pub const KEY_ARGUMENT: &str = "fvca.trial_key";
 pub const SECURITY_FORCE_STOP_ARGUMENT: &str = "fvca.security_force_stop";
 pub const RUNNING_CONTEXT: &str = "/run/fvca/running-trial-context";

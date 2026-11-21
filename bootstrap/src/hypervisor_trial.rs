@@ -8,8 +8,8 @@ use std::process::{Command, Stdio};
 
 pub use fvca_trial_authorization::APPROVAL_LIMIT;
 use fvca_trial_authorization::{
-    Authorization, Entry, GUEST_CAPTURE_LOCK, PENDING, RUNNING_CONTEXT, Trial, authorization, efi,
-    trial,
+    Authorization, Entry, GUEST_CAPTURE_LOCK, PENDING, RUNNING_CONTEXT, Trial, WITHDRAWN_SUFFIX,
+    authorization, efi, trial,
 };
 
 use crate::{find_partition, identity, invalid, recovery, runtime, sys_block};
@@ -368,6 +368,15 @@ fn record_directory() -> io::Result<PathBuf> {
     Ok(path)
 }
 
+fn require_not_withdrawn(directory: &Path, transaction: &str) -> io::Result<()> {
+    let withdrawn = directory.join(format!("{transaction}{WITHDRAWN_SUFFIX}"));
+    match withdrawn.symlink_metadata() {
+        Ok(_) => Err(invalid("the signed Hypervisor trial has been withdrawn")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn read_record(path: &Path) -> io::Result<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
@@ -547,6 +556,7 @@ pub fn arm_if_authorized(
     }
     let directory = record_directory()?;
     let tx = trial.transaction;
+    require_not_withdrawn(&directory, tx)?;
     let record = directory.join(tx);
     let previously_recorded = match read_record(&record) {
         Ok(prior) if prior == raw => {
@@ -745,6 +755,7 @@ pub fn start_candidate(
         ));
     }
     let directory = record_directory()?;
+    require_not_withdrawn(&directory, trial.transaction)?;
     let order = boot_order()?;
     if order.first() == Some(&trial.candidate.id)
         || directory

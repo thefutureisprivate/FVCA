@@ -2,6 +2,7 @@
 """Exercise standing-policy offline GPT preparation with disposable TPM and disk copies."""
 
 import argparse
+import atexit
 from contextlib import contextmanager
 from datetime import UTC, datetime
 import json
@@ -87,6 +88,10 @@ def qualify(args):
     requests = ACTIVATION_PROBE / "requests"
     if args.activation_probe:
         assert ACTIVATION_PROBE.is_dir() and not requests.exists()
+        lease = ACTIVATION_PROBE.parent / "guest-capture.lock"
+        if not lease.exists():
+            lease.touch(mode=0o600, exist_ok=False)
+            atexit.register(lease.unlink, missing_ok=True)
     root = args.output
     root.mkdir(mode=0o700)
     original = args.fixture

@@ -447,9 +447,9 @@ Run delivery with the authenticated Btrfs Host data mounted at `/run/fvca/host-d
 
 For an eligible release already installed in the inactive slot, use `--activate-prepared-trial` on the running Hypervisor in place of `--deliver-prepared-trial`. The release client checks current eligibility, durably delivers the exact approved envelope, and requests `fvca-activate-hypervisor-trial.service`. The `delivered_trial` and `requested_trial` status fields report those separate steps. Candidate Guest health is recorded during the later trial boot. [systemctl job submission](https://www.freedesktop.org/software/systemd/man/262/systemctl.html#--no-block)
 
-The service checks the signed approval against the verified boot identity saved by the initramfs, the live UEFI selection, and the installed candidate ESP. It defers while a capture or restore owns the Guest lifecycle lease. It retains that lease while verifying an orderly Guest agent shutdown and detaching the writable Btrfs-backed disk. It then rechecks the pending approval and queues an orderly reboot. The stable initramfs performs the one-shot candidate handoff before it would start another Guest.
+The service checks the signed approval against the verified boot identity saved by the initramfs, the live UEFI selection, and the installed candidate ESP. It defers while a capture or restore owns the Guest lifecycle lease. It retains that lease while draining the Guest and detaching the writable Btrfs-backed disk. It then rechecks the pending approval and queues an orderly reboot. The stable initramfs performs the one-shot candidate handoff before it would start another Guest.
 
-If the reboot request fails after the Guest stopped, systemd starts `fvca-recover-hypervisor-activation.service` to reconcile the attachment and restart the stable Guest. Inspect both services for a failed or uncertain shutdown. Deadline-authorized forced stop and watchdog-backed trial retries remain release gates.
+If the reboot request fails after the Guest stopped, systemd starts `fvca-recover-hypervisor-activation.service` to reconcile the attachment and restart the stable Guest. Inspect both services for a failed or uncertain shutdown. The standing trial qualification below covers deadline-authorized forced stop and watchdog-backed retries in nested KVM.
 
 ### Enroll scheduled Hypervisor release checks
 
@@ -460,6 +460,10 @@ Before booting the enrolled slot, provision `/run/fvca/host-data/os-update` on t
 To enable scheduled installation, compose each slot with `--os-update-peer-slot UUID` using the other provisioned slot's `--gpt-slot` value. The UKI grants the service write access to exactly that slot's seven immutable partition UUIDs. Keep the exact active recovery release under `os-update/staged/MANIFEST_SHA256` using the verified intake procedure above. An enrollment without a peer slot can activate an already installed candidate.
 
 A verified stable boot enrolls `fvca-host-update.timer`. It checks after boot and hourly with up to 90 seconds of jitter. A failed service can retry after five minutes, capped at three starts in 30 minutes. For an eligible release, the client checks the signed trial approval against the running boot, verifies the active recovery image, and takes the Guest lifecycle lease during live installation and approval delivery. It refuses to replace a different pending trial. The client releases the lease before requesting Guest shutdown and reboot through the existing activation service. Results go to the console and to `/run/fvca/host-data/os-update/os-update-status.json`. [systemd timer semantics](https://www.freedesktop.org/software/systemd/man/262/systemd.timer.html)
+
+A scheduled publication records the channel and exact approval on the queued file. If a newer authenticated head for the same channel and stable release drops that approval, the updater takes the Guest lifecycle lease and atomically moves the envelope to `boot-trials/TRANSACTION_UUID.withdrawn`. A withdrawn transaction cannot be delivered or armed again. Independently staged approvals require operator reconciliation. A trial already reserved by initramfs follows its recorded attempt and promotion path.
+
+Run `tests/check-host-trial-withdrawal.py` with the TUF fixture environment, a disposable private runtime root, and an empty Btrfs bind mount at `/run/fvca/host-data`. It checks a signed withdrawal, an unqualified withdrawal, a busy lifecycle lease, a reserved trial, and an independent approval through the scheduled update command.
 
 ### Authorize automatic promotion
 

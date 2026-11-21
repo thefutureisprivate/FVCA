@@ -449,6 +449,45 @@ fn reconcile_promotion(directory: &Path, active: Active) -> Result<Active> {
     Ok(promoted)
 }
 
+fn supersedes_pending(head: &Head, active: &Active, pending: &handoff::ChannelOrigin) -> bool {
+    pending.channel == head.channel
+        && pending.stable_manifest == active.manifest_sha256
+        && pending.sequence < head.sequence
+        && !head.release.as_ref().is_some_and(|release| {
+            release.manifest_sha256 == pending.candidate_manifest
+                && release.trial_approval.as_ref() == Some(&pending.trial)
+        })
+}
+
+fn withdraw_pending(
+    head: &Head,
+    active: &Active,
+    key: &[u8],
+    authorize: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    let Some(pending) = handoff::channel_pending()? else {
+        return Ok(());
+    };
+    if !supersedes_pending(head, active, &pending.origin) {
+        return Ok(());
+    }
+    let _lease = handoff::lock_install()?;
+    handoff::require_idle()?;
+    let (signature, body) = pending
+        .envelope
+        .split_first_chunk::<64>()
+        .ok_or_else(|| invalid("truncated pending Hypervisor approval"))?;
+    verify(key, body, signature, "invalid pending Hypervisor approval signature")?;
+    let approval = Standing::parse(std::str::from_utf8(body)?)?;
+    let context = state::read(Path::new(RUNNING_CONTEXT), APPROVAL_LIMIT as u64)?;
+    approval.require_running_context(key, &context)?;
+    let transaction = approval.authorization.trial.transaction.to_owned();
+    if pending.withdraw(&transaction, authorize)? {
+        println!("FVCA_HYPERVISOR_TRIAL_WITHDRAWN {transaction}");
+    }
+    Ok(())
+}
+
 pub(super) fn checkpoint(
     path: &Path,
     name: &str,
@@ -714,6 +753,14 @@ pub async fn discover(
             ))
         }
     };
+    if matches!(operation, Operation::DeliverTrial(Delivery::Scheduled { .. })) {
+        withdraw_pending(
+            &head,
+            &active,
+            trial_key.as_deref().expect("validated Host trial authority"),
+            &|| Ok(require_fresh(Timestamp::now())?),
+        )?;
+    }
     if matches!(operation, Operation::ScheduleGuest(_)) {
         let retain = head
             .release
@@ -889,7 +936,13 @@ pub async fn discover(
                         } else {
                             None
                         };
-                        let lease = peer.as_ref().map(|_| handoff::lock_install()).transpose()?;
+                        let lease = if matches!(delivery, Delivery::Inbox) {
+                            None
+                        } else {
+                            let lease = handoff::lock_install()?;
+                            handoff::require_idle()?;
+                            Some(lease)
+                        };
                         if let Some(grant) = &change {
                             management::require_configuration_intent(&grant.change, |writer| {
                                 writer == owner || writer == qualification || writer == key
@@ -937,11 +990,21 @@ pub async fn discover(
                                 matches!(delivery, Delivery::Scheduled { .. }),
                             )?;
                         }
+                        let origin = matches!(delivery, Delivery::Scheduled { .. }).then(|| {
+                            handoff::ChannelOrigin {
+                                channel: head.channel.clone(),
+                                sequence: head.sequence,
+                                stable_manifest: active.manifest_sha256.clone(),
+                                candidate_manifest: candidate.manifest_sha256.clone(),
+                                trial: member.clone(),
+                            }
+                        });
                         handoff::publish(
                             &envelope,
                             transaction,
                             promotion.as_ref().map(|(packet, _)| packet.as_slice()),
                             change.as_ref().map(|grant| grant.packet.as_slice()),
+                            origin.as_ref(),
                             &authorize,
                         )?;
                         drop(lease);
@@ -1019,6 +1082,62 @@ fn report(directory: &Path, status: &Status) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_newer_head_for_the_same_channel_and_stable_release_withdraws_a_trial() {
+        let active = Active {
+            role: Role::Hypervisor,
+            slot: Some(Slot::A),
+            guest_bundle: None,
+            sequence: 1,
+            epoch: 1,
+            manifest_sha256: "a".repeat(64),
+        };
+        let origin = handoff::ChannelOrigin {
+            channel: "stable".into(),
+            sequence: 2,
+            stable_manifest: active.manifest_sha256.clone(),
+            candidate_manifest: "b".repeat(64),
+            trial: Member { bytes: 123, sha256: "c".repeat(64) },
+        };
+        let mut head = Head {
+            schema: "fvca-os-channel-v1".into(),
+            role: Role::Hypervisor,
+            channel: "stable".into(),
+            sequence: 3,
+            valid_from: 1,
+            expires: 10,
+            compatibility_sha256: "d".repeat(64),
+            release: None,
+        };
+        assert!(supersedes_pending(&head, &active, &origin));
+        head.sequence = 2;
+        assert!(!supersedes_pending(&head, &active, &origin));
+        head.sequence = 3;
+        head.channel = "testing".into();
+        assert!(!supersedes_pending(&head, &active, &origin));
+        head.channel = "stable".into();
+        let other = Active {
+            manifest_sha256: "e".repeat(64),
+            ..active.clone()
+        };
+        assert!(!supersedes_pending(&head, &other, &origin));
+        let release = Candidate {
+            epoch: 2,
+            manifest_sha256: origin.candidate_manifest.clone(),
+            activation: Activation::Routine,
+            trial_approval: Some(origin.trial.clone()),
+            promotion_approval: None,
+            guest_configuration_change: None,
+        };
+        head.release = Some(release.clone());
+        assert!(!supersedes_pending(&head, &active, &origin));
+        head.release = Some(Candidate {
+            trial_approval: None,
+            ..release
+        });
+        assert!(supersedes_pending(&head, &active, &origin));
+    }
 
     #[test]
     fn berlin_window_follows_daylight_saving() -> Result<()> {

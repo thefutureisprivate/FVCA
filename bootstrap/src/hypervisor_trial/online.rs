@@ -61,6 +61,7 @@ impl PendingTrial {
 fn check_pending(directory: &Path, approval: &Standing<'_>) -> io::Result<()> {
     standing::require_fresh(approval)?;
     let trial = &approval.authorization.trial;
+    super::require_not_withdrawn(directory, trial.transaction)?;
     match directory.join(trial.transaction).symlink_metadata() {
         Ok(_) => {
             return Err(invalid(
