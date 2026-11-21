@@ -48,6 +48,10 @@ impl PendingTrial {
         self.approval().authorization.trial.transaction
     }
 
+    pub fn force_stop_after(&self) -> Option<u64> {
+        self.approval().force_stop_after
+    }
+
     fn approval(&self) -> Standing<'_> {
         let payload = std::str::from_utf8(&self.bytes[64..]).expect("verified trial payload UTF-8");
         Standing::parse(payload).expect("verified trial approval")

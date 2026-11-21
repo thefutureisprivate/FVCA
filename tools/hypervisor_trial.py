@@ -31,7 +31,15 @@ def fields(raw, version, names):
 
 def standing_fields(body):
     scope, separator, trial = body.partition(b"FVCA-HYPERVISOR-TRIAL-2\n")
-    return (fields(scope, "FVCA-HYPERVISOR-STANDING-TRIAL-2", STANDING_FIELDS),
+    last = scope.removesuffix(b"\n").rsplit(b"\n", 1)[-1]
+    names = (*STANDING_FIELDS, "force_stop_after") if last.startswith(b"force_stop_after=") else STANDING_FIELDS
+    header = fields(scope, "FVCA-HYPERVISOR-STANDING-TRIAL-2", names)
+    if "force_stop_after" in header:
+        deadline = header["force_stop_after"]
+        if (not deadline.isdecimal() or deadline.startswith("0")
+                or not int(header["not_before"]) <= int(deadline) < int(header["expires"])):
+            raise ValueError("force-stop time is outside the signed trial interval")
+    return (header,
             fields(separator + trial, "FVCA-HYPERVISOR-TRIAL-2", TRIAL_FIELDS))
 
 

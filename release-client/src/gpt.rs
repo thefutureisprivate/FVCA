@@ -199,6 +199,7 @@ struct VerifiedLoader {
     host_network: Option<String>,
     host_workload: Option<String>,
     host_storage: host_storage::Binding,
+    security_force_stop: bool,
 }
 
 impl VerifiedLoader {
@@ -235,6 +236,9 @@ impl VerifiedLoader {
         }
         if self.host_workload != candidate.host_workload {
             return Err(invalid("Host updates must preserve the signed workload uplink").into());
+        }
+        if self.security_force_stop != candidate.security_force_stop {
+            return Err(invalid("Host updates must preserve the signed security force-stop policy").into());
         }
         if stable.authority != next.authority {
             return Err(invalid(
@@ -389,6 +393,7 @@ type BootBindings = (
     Option<String>,
     Option<String>,
     host_storage::Binding,
+    bool,
 );
 
 fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<BootBindings> {
@@ -481,6 +486,13 @@ fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<BootBindings>
             );
         }
     }
+    let security_force_stop = fvca_trial_authorization::security_force_stop(&cmdline)?;
+    if expected.trial.is_some_and(|trial| trial.force_stop_after.is_some()) && !security_force_stop {
+        return Err(invalid(
+            "the prepared candidate lacks the enrolled security force-stop policy",
+        )
+        .into());
+    }
     Ok((
         GuestPolicy::parse(&cmdline)?,
         fvca_trial_authorization::management_binding(&cmdline)?
@@ -488,6 +500,7 @@ fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<BootBindings>
         host_network::binding(&cmdline)?.map(str::to_owned),
         host_workload::binding(&cmdline)?.map(str::to_owned),
         storage,
+        security_force_stop,
     ))
 }
 
@@ -545,8 +558,14 @@ fn loader(
         &[Path::new("--cert"), &fd_path(cert), &efi],
     )?;
     let signed = state::open_regular(&efi)?;
-    let (guest_configuration, management_enrollment, host_network, host_workload, host_storage) =
-        verify_epoch(&signed, epoch)?;
+    let (
+        guest_configuration,
+        management_enrollment,
+        host_network,
+        host_workload,
+        host_storage,
+        security_force_stop,
+    ) = verify_epoch(&signed, epoch)?;
     let bytes = signed.metadata()?.len();
     let hash = digest(&signed, Extent { start: 0, bytes })?;
     if epoch.trial.is_some_and(|trial| {
@@ -564,6 +583,7 @@ fn loader(
         host_network,
         host_workload,
         host_storage,
+        security_force_stop,
     })
 }
 
@@ -1244,6 +1264,7 @@ mod tests {
             host_network: Some("f".repeat(64)),
             host_workload: Some("d".repeat(64)),
             host_storage: storage(),
+            security_force_stop: false,
         };
         let candidate = |binding, authority| VerifiedLoader {
             sha256: [2; 32],
@@ -1252,10 +1273,15 @@ mod tests {
             host_network: Some("f".repeat(64)),
             host_workload: Some("d".repeat(64)),
             host_storage: storage(),
+            security_force_stop: false,
         };
         let enrolled = Some([3; 32]);
         let unchanged = candidate(Some(binding(9, "a")), enrolled);
         stable.require_host_configuration(&unchanged, false, None)?;
+        let mut enabled = candidate(Some(binding(9, "a")), enrolled);
+        enabled.security_force_stop = true;
+        assert!(stable.require_host_configuration(&enabled, false, None).is_err());
+        assert!(enabled.require_host_configuration(&stable, false, None).is_err());
         let mut changed_network = candidate(Some(binding(9, "a")), enrolled);
         changed_network.host_network = None;
         assert!(

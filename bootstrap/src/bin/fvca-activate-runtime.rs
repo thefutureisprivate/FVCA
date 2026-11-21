@@ -90,6 +90,7 @@ fn activate() -> io::Result<()> {
     let slot = Slot::load()?;
     let protected_epoch = Path::new("/usr/lib/fvca/hypervisor-epoch").try_exists()?;
     hypervisor_trial::verify_standing_key(&cmdline)?;
+    hypervisor_trial::verify_force_stop_policy(&cmdline)?;
     hypervisor_trial::guest_configuration::verify_key(&cmdline)?;
     let mut epochs = cmdline
         .split_ascii_whitespace()

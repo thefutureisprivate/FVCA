@@ -692,6 +692,10 @@ Compose standing candidates with `--boot-trial-watchdog-seconds SECONDS` to sign
 
 For live activation qualification, build the stable UKI with the initramfs produced by `tests/nested-guest-shutdown-initrd.sh INPUT_INITRAMFS OUTPUT_INITRAMFS online-trial`. Use the original initramfs for the candidate and pass `--online-handoff` to the standing trial test. The additional checks cover a tampered approval, capture contention, failure to queue the reboot, restart of the stable Guest, and a successful retry through candidate health.
 
+The owner can provision `--allow-security-force-stop` when signing both Hypervisor slots with the standing trial authority enrolled. To authorize a forced stop for one security update, add `force_stop_after=UNIX_SECONDS` after `candidate_guest_devices` before signing the standing trial. This deadline must match `activation.activate_by` in the signed `security` channel offer and fall within the trial's validity. Routine and clean-only trials use the orderly shutdown path.
+
+Once the security deadline is due, an orderly shutdown timeout permits the Hypervisor to stop the same running Guest under the lifecycle leases. It saves an intent before stopping the Guest and records `achieved_consistency=crash-consistent` after releasing and syncing the Guest disk. Both records are stored under `boot-trials` on the authenticated Btrfs mirror. The crash-consistent record is excluded from orderly stopped backup evidence. [Libvirt domain lifecycle API](https://libvirt.org/html/libvirt-libvirt-domain.html#virDomainDestroy)
+
 ### Promote an independently approved Hypervisor trial
 
 Pass the same `--boot-promotion-public-key PUBLIC_KEY_PEM` when composing the stable and candidate slots. Use a dedicated Ed25519 authority and keep its private key off the appliance. After the trial, review the exact health receipt and the recovery release. Capture the candidate disk's installed ESP after the trial so the approval covers any firmware writes during the trial.

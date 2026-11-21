@@ -21,6 +21,7 @@ pub mod workload_network;
 pub const APPROVAL_LIMIT: usize = 2048;
 pub const PENDING: &str = "pending-trial";
 pub const KEY_ARGUMENT: &str = "fvca.trial_key";
+pub const SECURITY_FORCE_STOP_ARGUMENT: &str = "fvca.security_force_stop";
 pub const RUNNING_CONTEXT: &str = "/run/fvca/running-trial-context";
 pub const GUEST_CAPTURE_LOCK: &str = "/run/fvca/guest-capture.lock";
 pub const GUEST_OPERATION_LOCK: &str = "/run/fvca/guest-operation.lock";
@@ -217,8 +218,20 @@ pub struct Standing<'a> {
     pub candidate_uki: &'a str,
     pub candidate_uki_bytes: u64,
     pub payloads: [[&'a str; 2]; 3],
+    pub force_stop_after: Option<u64>,
     not_before: u64,
     expires: u64,
+}
+
+pub fn security_force_stop(cmdline: &str) -> io::Result<bool> {
+    let mut arguments = cmdline
+        .split_ascii_whitespace()
+        .filter(|argument| argument.split('=').next() == Some(SECURITY_FORCE_STOP_ARGUMENT));
+    match (arguments.next(), arguments.next()) {
+        (None, None) => Ok(false),
+        (Some("fvca.security_force_stop=1"), None) => Ok(true),
+        _ => Err(invalid("invalid or duplicate security force-stop enrollment")),
+    }
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -359,7 +372,18 @@ impl Standing<'_> {
             body.find("FVCA-HYPERVISOR-TRIAL-2\n")
                 .ok_or_else(|| invalid("standing trial lacks its candidate authorization"))?,
         );
-        let fields: Vec<_> = header.split('\n').collect();
+        let header = header
+            .strip_suffix('\n')
+            .ok_or_else(|| invalid("unterminated standing trial header"))?;
+        let mut fields: Vec<_> = header.split('\n').collect();
+        let force_stop_after = fields
+            .last()
+            .filter(|line| line.starts_with("force_stop_after="))
+            .map(|line| number(line, "force_stop_after="))
+            .transpose()?;
+        if force_stop_after.is_some() {
+            fields.pop();
+        }
         let [
             STANDING_TRIAL,
             from,
@@ -375,7 +399,6 @@ impl Standing<'_> {
             core_devices,
             runtime_devices,
             guest_devices,
-            "",
         ] = fields.as_slice()
         else {
             return Err(invalid("invalid standing trial approval"));
@@ -388,6 +411,7 @@ impl Standing<'_> {
             .checked_sub(not_before)
             .is_some_and(|length| (1..=86_400).contains(&length))
             || candidate_epoch < stable_epoch
+            || force_stop_after.is_some_and(|deadline| !(not_before..expires).contains(&deadline))
         {
             return Err(invalid(
                 "standing trial exceeds its validity or epoch bounds",
@@ -435,9 +459,19 @@ impl Standing<'_> {
             candidate_uki: digest(uki, "candidate_uki_sha256=")?,
             candidate_uki_bytes,
             payloads,
+            force_stop_after,
             not_before,
             expires,
         })
+    }
+
+    pub fn require_force_stop_deadline(&self, security_deadline: Option<u64>) -> io::Result<()> {
+        if self.force_stop_after.is_some() && self.force_stop_after != security_deadline {
+            return Err(invalid(
+                "trial force-stop time differs from the qualified security deadline",
+            ));
+        }
+        Ok(())
     }
 
     pub fn require_fresh(&self, now: u64) -> io::Result<()> {
@@ -491,6 +525,20 @@ mod tests {
     }
 
     #[test]
+    fn force_stop_is_explicit_in_the_boot_configuration() -> io::Result<()> {
+        assert!(!security_force_stop("quiet")?);
+        assert!(security_force_stop("quiet fvca.security_force_stop=1 ro")?);
+        for malformed in [
+            "fvca.security_force_stop",
+            "fvca.security_force_stop=0",
+            "fvca.security_force_stop=1 fvca.security_force_stop=1",
+        ] {
+            assert!(security_force_stop(malformed).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn standing_promotion_binds_exact_trial_and_advances_sequence() -> io::Result<()> {
         let prior = "a".repeat(64);
         let candidate = "b".repeat(64);
@@ -520,6 +568,32 @@ mod tests {
         assert_eq!(approval.candidate_sequence, 4);
         assert_eq!(approval.trial.candidate_uki, candidate);
         assert_eq!(approval.trial.candidate_uki_bytes, 2048);
+        assert_eq!(approval.trial.force_stop_after, None);
+        let with_deadline = |directive: &str| {
+            trial.replacen(
+                "FVCA-HYPERVISOR-TRIAL-2\n",
+                &format!("{directive}FVCA-HYPERVISOR-TRIAL-2\n"),
+                1,
+            )
+        };
+        let security = with_deadline("force_stop_after=60\n");
+        let standing = Standing::parse(&security)?;
+        assert_eq!(standing.force_stop_after, Some(60));
+        standing.require_force_stop_deadline(Some(60))?;
+        assert!(standing.require_force_stop_deadline(None).is_err());
+        assert!(standing.require_force_stop_deadline(Some(61)).is_err());
+        let mut previous_trial = vec![0; 64];
+        previous_trial.extend_from_slice(security.as_bytes());
+        assert!(approval.matches_trial(&previous_trial).is_err());
+        for malformed in [
+            "force_stop_after=9\n",
+            "force_stop_after=300\n",
+            "force_stop_after=060\n",
+            "force_stop_after=60\nforce_stop_after=61\n",
+            "force_stop_after=60",
+        ] {
+            assert!(Standing::parse(&with_deadline(malformed)).is_err());
+        }
         assert!(
             Standing::parse(&trial.replace("candidate_uki_bytes=2048", "candidate_uki_bytes=8192"))
                 .is_err()

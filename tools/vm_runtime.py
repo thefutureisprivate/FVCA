@@ -31,6 +31,7 @@ DOMAIN_SCHEMAS = {
 BASE_INPUT = "vm-runtime-base"
 TRIAL_HEALTH = Path("usr/libexec/fvca/trial-health")
 TRIAL_HEALTH_WATCHDOG = Path("usr/libexec/fvca/trial-health-watchdog-v2")
+SECURITY_FORCE_STOP = Path("usr/libexec/fvca/security-force-stop-support-v1")
 GUEST_TRIAL_FILES = (
     Path("usr/bin/systemd-dissect"),
     Path("usr/lib/systemd/system/fvca-verify-guest-trial.service"),
@@ -130,7 +131,7 @@ def allowed(path):
         path in REQUIRED_FILES
         or (path.parent == MANAGEMENT_USERDB and path.name in MANAGEMENT_IDS)
         or path == MCOPY
-        or path in (TRIAL_HEALTH, TRIAL_HEALTH_WATCHDOG)
+        or path in (TRIAL_HEALTH, TRIAL_HEALTH_WATCHDOG, SECURITY_FORCE_STOP)
         or path in GUEST_TRIAL_FILES
         or path in GUEST_UPDATE_UNITS
         or path in (GUEST_COMMISSIONING_UNIT, GUEST_PROVISIONING_SUPPORT, *GUEST_PROVISIONING_UNITS)

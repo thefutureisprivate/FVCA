@@ -239,6 +239,7 @@ impl<'a> Scope<'a> {
                 .ok_or_else(|| invalid("standing policy lacks a trial authority"))?;
             if let Some(boot) = boot {
                 let approval = Standing::parse(signed_body(&key, envelope)?)?;
+                requested.activation.require_trial_deadline(&approval)?;
                 approval.require_fresh(now)?;
                 approval.require_running_context(
                     &key,

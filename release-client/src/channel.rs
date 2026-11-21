@@ -165,6 +165,17 @@ enum Activation {
     Security { activate_by: i64 },
 }
 
+impl Activation {
+    fn require_trial_deadline(self, approval: &Standing<'_>) -> Result<()> {
+        let deadline = match self {
+            Self::Routine => None,
+            Self::Security { activate_by } => Some(activate_by.try_into()?),
+        };
+        approval.require_force_stop_deadline(deadline)?;
+        Ok(())
+    }
+}
+
 #[derive(Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Checkpoint {
@@ -785,6 +796,7 @@ pub async fn discover(
                             "invalid independent standing trial signature",
                         )?;
                         let approval = Standing::parse(std::str::from_utf8(body)?)?;
+                        candidate.activation.require_trial_deadline(&approval)?;
                         let promotion = if let (Delivery::Scheduled { .. }, Some(member)) =
                             (delivery, &candidate.promotion_approval)
                         {

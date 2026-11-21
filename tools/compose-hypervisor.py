@@ -598,6 +598,11 @@ def assemble(args, work):
             if actual.is_symlink() or not actual.is_file() or actual.read_bytes() != expected.read_bytes():
                 raise ValueError(f"the verified VM runtime lacks the reviewed commissioning unit {unit.name}")
         required += (GUEST_COMMISSIONING_SUPPORT,)
+    if args.allow_security_force_stop:
+        required += ("usr/lib/fvca/security-force-stop-support-v1",)
+        marker = runtime_work / "tree" / vm_runtime.SECURITY_FORCE_STOP
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
+            raise ValueError("the verified VM runtime lacks security force-stop support")
     verify_initrd(args.initrd, uname, required, forbidden, "Hypervisor")
     extra = (("host-storage", storage.raw),) if storage is not None else ()
     ids = None
@@ -623,24 +628,30 @@ def assemble(args, work):
                                 if name == STANDING_TRIAL_KEY)
     configuration_key_arguments = tuple(f"{GUEST_CONFIG_KEY_ARGUMENT}={key.hex()}" for name, key in authorities
                                         if name == GUEST_CONFIG_KEY)
+    force_stop_arguments = ()
+    force_stop = ()
+    if args.allow_security_force_stop:
+        force_stop = (("security-force-stop", b"1"),)
+        force_stop_arguments = ("fvca.security_force_stop=1",)
     composition = composition_archive(
         work, args.boot_key, args.boot_certificate, core_hash, runtime_hash, "hypervisor", "vm-runtime",
         extra=(*extra, *epoch, *guest, *commissioning, *resources, *management, *network, *workload, *backup, *backup_job_selection(args.backup_job, backup),
                *restore_selection(args.restore_authorization, backup),
                *retention_selection(args.retention_policy, backup),
                *stable_trial, *candidate_trial, *watchdog, *guest_epoch,
-               *authorities, *update_selection(args, (*authorities, *operators))),
+               *authorities, *force_stop, *update_selection(args, (*authorities, *operators))),
     )
     if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT, TRIAL_WATCHDOG_ARGUMENT,
                                     GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_KEY_ARGUMENT, MANAGEMENT_ARGUMENT,
                                     MANAGEMENT_ADDRESS_ARGUMENT, HOST_NETWORK_ARGUMENT, HOST_WORKLOAD_ARGUMENT,
-                                    WORKLOAD_NETWORK_ARGUMENT, host_storage.BOOT_ARGUMENT)
+                                    WORKLOAD_NETWORK_ARGUMENT, "fvca.security_force_stop", host_storage.BOOT_ARGUMENT)
            for arg in cmdline.split()):
         raise ValueError("shared core already supplies a Hypervisor deployment binding")
     storage_arguments = (storage.boot_argument(),) if storage is not None else ()
     cmdline = " ".join((add_kernel_policy(cmdline, HOST_KERNEL_OPTIONS), *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments,
                         *trial_key_arguments, *watchdog_arguments, *resource_arguments, *configuration_key_arguments,
-                        *management_arguments, *network_arguments, *workload_arguments, *storage_arguments))
+                        *management_arguments, *network_arguments, *workload_arguments, *force_stop_arguments,
+                        *storage_arguments))
     immutable = None
     if ids is None:
         disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)
@@ -699,6 +710,8 @@ def main():
     parser.add_argument("--boot-trial-watchdog-seconds", type=int, metavar="SECONDS",
                         help="sign a 10–300 second standing trial deadline for the i6300ESB watchdog")
     parser.add_argument("--boot-trial-public-key", type=Path, help="pin the independent Ed25519 standing trial authority")
+    parser.add_argument("--allow-security-force-stop", action="store_true",
+                        help="preauthorize crash-consistent Guest stop after a signed Host security deadline")
     parser.add_argument("--os-update-owner", type=Path, help="enroll the raw Ed25519 owner key for scheduled Host updates")
     parser.add_argument("--os-update-peer-slot", type=UUID, help="grant live installation to the other provisioned GPT slot")
     parser.add_argument("--os-update-address", type=ipaddress.ip_address, help="permit the signed Host updater to reach one HTTPS depot IP")
@@ -780,6 +793,8 @@ def main():
         args.epoch_policy is None or args.boot_trial is not None or args.restore_authorization is not None
     ):
         parser.error("standing boot trial authority requires an ordinary epoch-protected GPT slot")
+    if args.allow_security_force_stop and args.boot_trial_public_key is None:
+        parser.error("security force-stop permission requires a standing boot trial authority")
     if (args.os_update_address is None) != (args.os_update_ca is None) or (
         args.os_update_address is not None and args.os_update_owner is None
     ):

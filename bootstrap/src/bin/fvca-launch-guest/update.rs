@@ -3,8 +3,10 @@
 use std::fs::{self, File};
 use std::io;
 use std::os::fd::AsFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fvca_initrd_bootstrap::{
     guest_boot,
@@ -13,10 +15,12 @@ use fvca_initrd_bootstrap::{
 };
 use fvca_libvirt_boundary::{Connection, RUNNING};
 use fvca_trial_authorization::firmware::{self, DRAIN_RECEIPT, RUN_DIRECTORY};
+use fvca_trial_authorization::security_force_stop;
 
 use super::{
-    ALIAS, ATTACHMENT, CAPTURE_LOCK, OPERATION_LOCK, PID, RECEIPT, UUID, VM_PARENT, capture,
-    guest_trial, invalid, release, shutdown, verify_data, verify_pool,
+    ALIAS, ATTACHMENT, CAPTURE_LOCK, DISK, OPERATION_LOCK, PID, POOL, RECEIPT, UUID, VM_PARENT,
+    attachment_record, capture, guest_trial, invalid, invalidate_receipt, private_directory,
+    raw_disk_metadata, release, shutdown, verify_data, verify_pool, verify_storage_directory,
 };
 
 const RUN: &str = "/run/fvca";
@@ -39,42 +43,131 @@ pub(super) fn activate(returning: bool) -> io::Result<()> {
     capture::restore::require_idle()?;
     verify_pool()?;
     let pending = (!returning).then(PendingTrial::verify).transpose()?;
-    let transaction = match &pending {
-        Some(pending) => pending.transaction().to_owned(),
+    let (transaction, deadline) = match &pending {
+        Some(pending) => (pending.transaction().to_owned(), pending.force_stop_after()),
         None => healthy_return()?,
     };
+    if deadline.is_some() && !security_force_stop(&fs::read_to_string("/proc/cmdline")?)? {
+        return Err(invalid("the verified boot does not authorize a security force-stop"));
+    }
+    let recheck = || {
+        if let Some(pending) = &pending {
+            return pending.recheck();
+        }
+        let (current, current_deadline) = healthy_return()?;
+        if current != transaction || current_deadline != deadline {
+            return Err(invalid("healthy trial changed during Guest shutdown"));
+        }
+        Ok(())
+    };
     let connection = Connection::connect()?;
-    let running = running_guest(&connection)?;
+    let running = running_guest(&connection, deadline_reached(deadline)?)?;
     capture::publish(
         Path::new(RUN),
         FENCE,
         if running { "running\n" } else { "stopped\n" },
     )?;
     if running {
-        shutdown()?;
-        require_clean_stop()?;
+        match shutdown() {
+            Ok(()) => require_clean_stop()?,
+            Err(error) => {
+                let Some(deadline) = deadline.filter(|_| error.kind() == io::ErrorKind::TimedOut) else {
+                    return Err(error);
+                };
+                if !deadline_reached(Some(deadline))? {
+                    return Err(error);
+                }
+                force_stop(&connection, &transaction, deadline, &recheck)?;
+            }
+        }
     }
     require_drained(Some(&connection))?;
-    if let Some(pending) = pending {
-        pending.recheck()?;
-        println!("FVCA_HYPERVISOR_TRIAL_DRAINED {transaction}");
-    } else {
-        if healthy_return()? != transaction {
-            return Err(invalid("healthy trial changed during Guest shutdown"));
-        }
+    recheck()?;
+    if returning {
         println!("FVCA_HYPERVISOR_PROMOTION_DRAINED {transaction}");
+    } else {
+        println!("FVCA_HYPERVISOR_TRIAL_DRAINED {transaction}");
     }
     queue_host_reboot()
 }
 
-fn running_guest(connection: &Connection) -> io::Result<bool> {
+fn deadline_reached(deadline: Option<u64>) -> io::Result<bool> {
+    deadline.map_or(Ok(false), |deadline| {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(io::Error::other)?;
+        Ok(now.as_secs() >= deadline)
+    })
+}
+
+fn running_guest(connection: &Connection, force_due: bool) -> io::Result<bool> {
     match connection.lookup(UUID)? {
-        Some(guest) if guest.state()? == RUNNING && !guest.guest_frozen()? => Ok(true),
+        // The lifecycle leases and the live-capture fence cover Host-managed
+        // freezes. Once force is due, an unavailable agent cannot veto drain.
+        Some(guest) if guest.state()? == RUNNING && (force_due || !guest.guest_frozen()?) => Ok(true),
         Some(_) => Err(invalid(
             "Host activation requires a running and thawed Guest",
         )),
         None => Ok(false),
     }
+}
+
+fn force_stop(
+    connection: &Connection,
+    transaction: &str,
+    deadline: u64,
+    recheck: impl Fn() -> io::Result<()>,
+) -> io::Result<()> {
+    let guest = connection
+        .lookup(UUID)?
+        .ok_or_else(|| invalid("Guest exited before the forced stop"))?;
+    if guest.state()? != RUNNING {
+        return Err(invalid("forced stop requires the running registered Guest"));
+    }
+    let selection = fs::read_to_string(guest_boot::SELECTION)?;
+    let bundle = guest_boot::parse(&selection)?.bundle;
+    let instance = capture::live::require_instance(bundle)?;
+    let root = verify_storage_directory()?;
+    // The sVirt label reserves access to the running disk for its QEMU domain.
+    let source = raw_disk_metadata(Path::new(DISK))?;
+    let alias = raw_disk_metadata(Path::new(ALIAS))?;
+    let attachment = attachment_record(&root, &source)?;
+    if (source.dev(), source.ino()) != (alias.dev(), alias.ino())
+        || capture::optional_record(&Path::new(VM_PARENT).join(ATTACHMENT))?.as_deref() != Some(&attachment)
+    {
+        return Err(invalid("the running Guest does not own the registered disk attachment"));
+    }
+    let directory = Path::new(POOL).join("boot-trials");
+    private_directory(&directory)?;
+    let name = format!("{transaction}.forced-stop-{}", instance.trim_end().replace(':', "-"));
+    let record = format!(
+        "FVCA-HYPERVISOR-FORCED-STOP-1\ntransaction={transaction}\ninstance={instance}\
+         security_deadline={deadline}\nguest_bundle={bundle}\nrequested_consistency=crash-consistent\n{attachment}",
+    );
+    invalidate_receipt()?;
+    capture::publish(&directory, &format!("{name}.intent"), &record)?;
+    recheck()?;
+    if !deadline_reached(Some(deadline))? {
+        return Err(invalid("security deadline is no longer due"));
+    }
+    if guest.state()? != RUNNING || capture::live::require_instance(bundle)? != instance {
+        return Err(invalid("the Guest instance changed before the forced stop"));
+    }
+    guest.destroy()?;
+    release(connection)?;
+    require_drained(Some(connection))?;
+    let (root, disk) = verify_data()?;
+    if attachment_record(&root, &disk.metadata()?)? != attachment {
+        return Err(invalid("the released disk no longer matches the forced-stop intent"));
+    }
+    disk.sync_all()?;
+    capture::publish(
+        &directory,
+        &name,
+        &format!("{record}achieved_consistency=crash-consistent\n"),
+    )?;
+    println!("FVCA_HYPERVISOR_GUEST_FORCED_STOP {transaction} crash-consistent");
+    Ok(())
 }
 
 fn require_clean_stop() -> io::Result<()> {

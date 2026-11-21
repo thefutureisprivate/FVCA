@@ -23,6 +23,7 @@ mod watchdog;
 
 pub const PROMOTION_KEY: &str = "/usr/lib/fvca/hypervisor-promotion-key";
 pub const TRIAL_KEY: &str = "/usr/lib/fvca/hypervisor-trial-key";
+const SECURITY_FORCE_STOP: &str = "/usr/lib/fvca/security-force-stop";
 const AUTHORIZATION: &str = "/usr/lib/fvca/hypervisor-trial";
 const CANDIDATE: &str = "/usr/lib/fvca/hypervisor-trial-candidate";
 const CANDIDATE_ARGUMENT: &str = "fvca.hypervisor_trial";
@@ -122,6 +123,15 @@ pub fn verify_standing_key(cmdline: &str) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+pub fn verify_force_stop_policy(cmdline: &str) -> io::Result<()> {
+    let enabled = fvca_trial_authorization::security_force_stop(cmdline)?;
+    match read(Path::new(SECURITY_FORCE_STOP), 1) {
+        Ok(value) if enabled && value == b"1" && Path::new(TRIAL_KEY).try_exists()? => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !enabled => Ok(()),
+        _ => Err(invalid("security force-stop policy differs from the signed initramfs enrollment")),
+    }
 }
 
 fn digest<'a>(line: &'a str, field: &str) -> io::Result<&'a str> {

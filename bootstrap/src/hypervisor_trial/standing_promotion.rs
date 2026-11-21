@@ -77,7 +77,7 @@ pub(super) fn enroll_return(
 }
 
 #[cfg(feature = "promotion")]
-pub fn healthy_return() -> io::Result<String> {
+pub fn healthy_return() -> io::Result<(String, Option<u64>)> {
     let grant = read_record(Path::new(RETURN))?;
     let approval = Promotion::parse(std::str::from_utf8(&grant).map_err(io::Error::other)?)?;
     let trial = &approval.trial.authorization.trial;
@@ -97,7 +97,7 @@ pub fn healthy_return() -> io::Result<String> {
     }
     standing::require_fresh(&approval.trial)?;
     gpt_device(&trial.stable)?;
-    Ok(trial.transaction.into())
+    Ok((trial.transaction.into(), approval.trial.force_stop_after))
 }
 
 pub(super) fn commit(
