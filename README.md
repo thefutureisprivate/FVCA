@@ -219,6 +219,17 @@ Give the publisher a dedicated depot location on a local Btrfs filesystem with G
 
 Run `tests/check-os-release-packaging.py` with the reference TUF fixture environment and a verified development Host/Guest pair. It signs and publishes two disposable depots, verifies exact staging under standing policy for both roles, and checks rejection of a changed review, replaced artifact, and mismatched embedded Guest. Supply the client, artifact and evidence directories, VM runtime certificate, and a scratch directory on the same filesystem as the evidence. Run `tests/check-tuf-depot.py --client FILE --scratch-directory DIRECTORY` to exercise writer serialization, interruption, rollback, root rotation, and HTTPS intake against the published layout.
 
+### Retire unused depot objects
+
+Keep every active, fallback and recovery tuple required by the deployment in the current signed targets index. Remove a retired tuple from that index through the normal offline targets approval. Once clients use bounded depot transfers and the deployment has a known maximum clock skew, supply `--max-clock-skew-seconds` to `publish` to retire eligible objects during the publication. Use `prune` when a drain window ends between publications.
+
+```sh
+python3 tools/tuf-depot.py prune --depot /srv/fvca/depot \
+  --trusted-root bootstrap-root.json --max-clock-skew-seconds DEPLOYMENT_CLOCK_SKEW
+```
+
+The command verifies the current index, root history and signed historical snapshot-to-target links. It keeps each previous view through the earlier signed expiry of its snapshot and targets, plus the 24-hour maximum client transfer window and the configured clock skew. It then atomically removes objects that no retained view reaches. The `next_expiry` value in the result is the next eligibility time in Unix seconds. [TUF expiration checks](https://theupdateframework.github.io/specification/latest/#detailed-client-workflow)
+
 ### Import the release
 
 Keep the depot configuration and CA bundle under the intake operator's control alongside the trusted root. The release selection specifies a role, epoch, approved minimum epoch, manifest digest and byte budget. For HTTPS, configure a static origin with a trailing slash on the depot path, an absolute PEM CA bundle path and a deadline for fetching the complete release. The client verifies the server name against this CA bundle, connects directly to the configured origin and requires unencoded response bodies. Serve repository objects with HTTP 200 and missing objects with HTTP 404.
@@ -232,7 +243,7 @@ Keep the depot configuration and CA bundle under the intake operator's control a
 }
 ```
 
-For an offline depot, use `{"transport":"local","path":"/mnt/fvca/depot"}` in the depot configuration. Keep the same trusted TUF metadata state when moving between HTTPS and a local copy of the same repository.
+For an offline depot, use `{"transport":"local","path":"/mnt/fvca/depot"}` in the depot configuration. Local transfers have a 24-hour ceiling. Each lookup resolves the live depot path without following symlinks, so a reader can still fetch retained immutable objects after publication exchanges the directory. Keep the same trusted TUF metadata state when moving between HTTPS and a local copy of the same repository.
 
 Prepare a private state directory owned by the intake account with mode `0700`. In the trusted selection JSON, supply `role`, `epoch`, the independently authorized `minimum_epoch`, `manifest_sha256`, and `max_release_bytes` for the total logical size of the selected set. Supply the initial trusted root from verified configuration, and keep its bytes stable when the client advances the repository's trusted root through TUF rotation.
 

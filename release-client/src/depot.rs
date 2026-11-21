@@ -2,14 +2,14 @@ use std::fs::File;
 use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::StreamExt;
 use reqwest::header::{ACCEPT_ENCODING, CONTENT_ENCODING};
 use reqwest::{Certificate, Client, StatusCode};
-use rustix::fs::{self, Mode, OFlags};
+use rustix::fs::{self, Mode, OFlags, ResolveFlags};
+use rustix::time::{ClockId, clock_gettime};
 use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
@@ -20,6 +20,7 @@ use crate::{Result, invalid, state};
 
 pub const METADATA_BYTES: u64 = 1024 * 1024;
 pub const CONFIG_BYTES: u64 = 64 * 1024;
+const MAX_TRANSFER_SECONDS: u64 = 86_400;
 pub enum EnrolledDepot {
     Local,
     Https(IpAddr),
@@ -57,14 +58,33 @@ enum Config {
 
 #[derive(Clone, Debug)]
 enum Backend {
-    Local {
-        metadata: Arc<File>,
-        targets: Arc<File>,
-    },
-    Https {
-        client: Client,
-        deadline: Instant,
-    },
+    Local { root: PathBuf, deadline: Deadline },
+    Https { client: Client, deadline: Deadline },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Deadline(Duration);
+
+impl Deadline {
+    fn boottime() -> Duration {
+        let time = clock_gettime(ClockId::Boottime);
+        Duration::new(time.tv_sec as u64, time.tv_nsec as u32)
+    }
+
+    fn after(seconds: u64) -> Self {
+        Self(Self::boottime() + Duration::from_secs(seconds))
+    }
+
+    fn remaining(self) -> io::Result<Duration> {
+        let remaining = self.0.saturating_sub(Self::boottime());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "TUF depot transfer timed out",
+            ));
+        }
+        Ok(remaining)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -117,9 +137,11 @@ impl Depot {
                 }
                 let metadata = root.join("metadata");
                 let targets = root.join("targets");
+                open_local(&metadata, OFlags::DIRECTORY)?;
+                open_local(&targets, OFlags::DIRECTORY)?;
                 let backend = Backend::Local {
-                    metadata: open_directory(&metadata)?,
-                    targets: open_directory(&targets)?,
+                    root,
+                    deadline: Deadline::after(MAX_TRANSFER_SECONDS),
                 };
                 (directory_url(&metadata)?, directory_url(&targets)?, backend)
             }
@@ -159,7 +181,7 @@ impl Depot {
                     || base_url.query().is_some()
                     || base_url.fragment().is_some()
                     || !ca_file.is_absolute()
-                    || !(1..=86_400).contains(&deadline_seconds)
+                    || !(1..=MAX_TRANSFER_SECONDS).contains(&deadline_seconds)
                 {
                     return Err(invalid("HTTPS depot requires an HTTPS directory URL, an absolute CA path and a bounded deadline").into());
                 }
@@ -177,7 +199,7 @@ impl Depot {
                     .connect_timeout(Duration::from_secs(10))
                     .read_timeout(Duration::from_secs(30))
                     .build()?;
-                let deadline = Instant::now() + Duration::from_secs(deadline_seconds);
+                let deadline = Deadline::after(deadline_seconds);
                 (
                     base_url.join("metadata/")?,
                     base_url.join("targets/")?,
@@ -233,55 +255,71 @@ impl Depot {
     }
 }
 
-fn open_directory(path: &Path) -> io::Result<Arc<File>> {
-    let fd = fs::open(
+fn open_local(path: &Path, flags: OFlags) -> io::Result<File> {
+    let fd = fs::openat2(
+        fs::CWD,
         path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        flags | OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
         Mode::empty(),
+        ResolveFlags::NO_SYMLINKS,
     )?;
-    Ok(Arc::new(File::from(fd)))
+    Ok(File::from(fd))
 }
 
 fn directory_url(path: &Path) -> io::Result<Url> {
     Url::from_directory_path(path).map_err(|()| invalid("invalid TUF depot path"))
 }
 
-fn local_stream(directory: &File, entry: Entry<'_>, url: &Url) -> io::Result<TransportStream> {
-    let file = File::from(fs::openat(
-        directory,
-        entry.name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?);
+fn local_stream(
+    root: &Path,
+    deadline: Deadline,
+    entry: Entry<'_>,
+    url: &Url,
+) -> io::Result<TransportStream> {
+    deadline.remaining()?;
+    let directory = if entry.metadata {
+        "metadata"
+    } else {
+        "targets"
+    };
+    let path = root.join(directory).join(entry.name);
+    // A publication can exchange the live directory and unlink the replaced view during lookup.
+    let file = open_local(&path, OFlags::empty()).or_else(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            open_local(&path, OFlags::empty())
+        } else {
+            Err(error)
+        }
+    })?;
+    deadline.remaining()?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() > entry.limit {
         return Err(invalid("TUF depot entry is not a bounded regular file"));
     }
     let url = url.clone();
     let stream = ReaderStream::new(tokio::fs::File::from_std(file).take(entry.limit + 1));
-    Ok(Box::pin(stream.map_err(move |error| {
-        TransportError::new_with_cause(TransportErrorKind::Other, &url, error)
+    Ok(Box::pin(stream.map(move |block| {
+        deadline
+            .remaining()
+            .and(block)
+            .map_err(|error| TransportError::new_with_cause(TransportErrorKind::Other, &url, error))
     })))
 }
 
 async fn https_stream(
     client: &Client,
-    deadline: Instant,
+    deadline: Deadline,
     url: &Url,
     limit: u64,
 ) -> Result<TransportStream> {
-    let timeout = deadline.saturating_duration_since(Instant::now());
-    if timeout.is_zero() {
-        return Err(
-            io::Error::new(io::ErrorKind::TimedOut, "HTTPS depot deadline exceeded").into(),
-        );
-    }
+    let timeout = deadline.remaining()?;
     let response = client
         .get(url.clone())
         .header(ACCEPT_ENCODING, "identity")
         .timeout(timeout)
         .send()
         .await?;
+    deadline.remaining()?;
     match response.status() {
         StatusCode::OK => (),
         StatusCode::NOT_FOUND => {
@@ -306,6 +344,9 @@ async fn https_stream(
     let url = url.clone();
     let mut remaining = limit;
     let stream = response.bytes_stream().map(move |block| {
+        deadline.remaining().map_err(|error| {
+            TransportError::new_with_cause(TransportErrorKind::Other, &url, error)
+        })?;
         let block = block.map_err(|error| {
             TransportError::new_with_cause(TransportErrorKind::Other, &url, error)
         })?;
@@ -326,9 +367,8 @@ impl Transport for Depot {
     async fn fetch(&self, url: Url) -> std::result::Result<TransportStream, TransportError> {
         let result: Result<_> = match self.entry(&url) {
             Ok(entry) => match &self.backend {
-                Backend::Local { metadata, targets } => {
-                    local_stream(if entry.metadata { metadata } else { targets }, entry, &url)
-                        .map_err(Into::into)
+                Backend::Local { root, deadline } => {
+                    local_stream(root, *deadline, entry, &url).map_err(Into::into)
                 }
                 Backend::Https { client, deadline } => {
                     https_stream(client, *deadline, &url, entry.limit).await
@@ -358,6 +398,54 @@ impl Transport for Depot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::TryStreamExt;
+
+    #[test]
+    fn local_reader_survives_a_depot_exchange() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let live = scratch.path().join("depot");
+        let ready = scratch.path().join("ready");
+        for depot in [&live, &ready] {
+            std::fs::create_dir_all(depot.join("metadata"))?;
+            std::fs::create_dir_all(depot.join("targets"))?;
+            std::fs::write(depot.join("targets/prior.raw"), b"prior snapshot")?;
+        }
+        std::fs::write(ready.join("targets/current.raw"), b"next snapshot")?;
+        let depot = Depot::from_config(
+            &serde_json::to_vec(&serde_json::json!({
+                "transport": "local", "path": live,
+            }))?,
+            1024,
+        )?;
+        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+        runtime.block_on(async {
+            let (_, targets) = depot.urls();
+            let old = targets.join("prior.raw")?;
+            let started = depot.fetch(old.clone()).await?;
+            fs::renameat_with(fs::CWD, &ready, fs::CWD, &live, fs::RenameFlags::EXCHANGE)?;
+            std::fs::remove_dir_all(ready)?;
+            let read = |stream: TransportStream| {
+                stream.try_fold(Vec::new(), |mut bytes, next| async move {
+                    bytes.extend_from_slice(&next);
+                    Ok(bytes)
+                })
+            };
+            assert_eq!(read(started).await?, b"prior snapshot");
+            assert_eq!(
+                read(depot.fetch(old.clone()).await?).await?,
+                b"prior snapshot"
+            );
+            assert_eq!(
+                read(depot.fetch(targets.join("current.raw")?).await?).await?,
+                b"next snapshot"
+            );
+
+            std::fs::rename(live.join("targets"), live.join("other"))?;
+            std::os::unix::fs::symlink("other", live.join("targets"))?;
+            assert!(read(depot.fetch(old).await?).await.is_err());
+            Ok(())
+        })
+    }
 
     #[test]
     fn scheduled_discovery_requires_the_enrolled_transport_and_address() {

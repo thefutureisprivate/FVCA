@@ -151,7 +151,8 @@ def qualify(client, work):
     assert not abandoned.exists() and invoke([client, pin, config, state, candidate / "selection.json"]).startswith(
         b"FVCA_RELEASE_STAGED "
     )
-    print("writer serialization, corrupt-target rejection and interruption on both sides of exchange passed", flush=True)
+    print("concurrent-writer rejection, corrupt-target refusal and interruption on both sides of exchange passed",
+          flush=True)
 
     second_timestamp = timestamp_path.read_bytes()
     invoke(publish(depot, pin, first, []), expected="would roll the published depot back")
@@ -220,6 +221,96 @@ def qualify(client, work):
     print("published depot served rotated metadata and exact targets over TLS", flush=True)
 
 
+def qualify_retirement(client, work):
+    now = datetime.now(UTC).replace(microsecond=0)
+    keys = INTAKE["new_keys"]()
+    expired = make_package(work, "expired", b"a", 7)
+    draining = make_package(work, "draining", b"b", 8)
+    fallback = make_package(work, "fallback", b"c", 9)
+    current = make_package(work, "current", b"d", 10)
+    depot = work / "depot"
+    depot.mkdir()
+    live_targets = depot / "targets"
+    live_targets.mkdir()
+
+    def legacy_view(directory, version, published, packages):
+        targets = {}
+        for package in packages:
+            records = json.loads((package / "target-records.json").read_bytes())
+            targets.update({name: TargetFile.from_dict(record, name) for name, record in records.items()})
+        INTAKE["publish"](directory, (1, version), keys, published, targets)
+        for package in packages:
+            for source in (package / "targets").iterdir():
+                target = live_targets / source.name
+                if not target.exists():
+                    target.hardlink_to(source)
+
+    legacy_view(depot, 1, now - timedelta(days=7), [expired, fallback])
+    previous = work / "previous"
+    previous.mkdir()
+    legacy_view(previous, 2, now - timedelta(days=4, minutes=5), [draining, fallback])
+    metadata = depot / "metadata"
+    for name in ("2.snapshot.json", "2.targets.json", "timestamp.json"):
+        (previous / "metadata" / name).replace(metadata / name)
+    pin = work / "trusted-root.json"
+    shutil.copyfile(metadata / "1.root.json", pin)
+
+    next_keys = INTAKE["new_keys"]()
+    next_root = work / "next-root.json"
+    next_root.write_bytes(root_bytes(next_keys, now, 2, keys))
+    signed = work / "signed"
+    signed_roles(signed, [fallback, current], next_root, next_keys, now, (3, 3, 3))
+    shutil.copyfile(next_root, signed / "2.root.json")
+    updated = publish(depot, pin, signed, [current]) + ["--max-clock-skew-seconds", "900"]
+    expiry = int((now + timedelta(minutes=10)).timestamp())
+    assert f"metadata=2 targets=3 next_expiry={expiry}".encode() in invoke(updated)
+    assert not (metadata / "1.snapshot.json").exists() and not (metadata / "1.targets.json").exists()
+    assert (metadata / "2.snapshot.json").is_file() and (metadata / "2.targets.json").is_file()
+
+    def published_objects():
+        return {path.name for path in live_targets.iterdir()}
+
+    def names(*packages):
+        return {file.name for package in packages for file in (package / "targets").iterdir()}
+
+    assert published_objects() == names(draining, fallback, current)
+    print("publication retired only expired exclusive targets and retained the clock-skew drain window", flush=True)
+
+    prune = command("prune", "--depot", depot, "--trusted-root", pin, "--max-clock-skew-seconds", "0")
+    kept_timestamp = (metadata / "timestamp.json").read_bytes()
+    archived_snapshot = metadata / "2.snapshot.json"
+    original = archived_snapshot.read_bytes()
+    changed = Metadata.from_bytes(original)
+    changed.signed.expires -= timedelta(days=7)
+    archived_snapshot.write_bytes(changed.to_bytes())
+    invoke(prune, expected="historical snapshot 2 has no verified signing root")
+    assert published_objects() == names(draining, fallback, current)
+    archived_snapshot.write_bytes(original)
+
+    fallback_object = live_targets / next(iter(names(fallback)))
+    detached = work / "temporary-fallback"
+    fallback_object.rename(detached)
+    invoke(prune, expected="required by a retained view")
+    detached.rename(fallback_object)
+    kill_publisher(work, prune, after_exchange=False)
+    assert published_objects() == names(draining, fallback, current)
+    assert b"metadata=2 targets=3 next_expiry=none" in invoke(prune)
+    assert published_objects() == names(fallback, current)
+    assert (metadata / "timestamp.json").read_bytes() == kept_timestamp
+    assert (metadata / "1.root.json").read_bytes() == pin.read_bytes()
+    assert (metadata / "2.root.json").read_bytes() == next_root.read_bytes()
+    assert b"metadata=0 targets=0 next_expiry=none" in invoke(prune)
+
+    config = work / "depot.json"
+    INTAKE["write_json"](config, {"transport": "local", "path": str(depot)})
+    state = work / "state"
+    state.mkdir(mode=0o700)
+    for package in (current, fallback):
+        assert invoke([client, pin, config, state, package / "selection.json"]).startswith(b"FVCA_RELEASE_STAGED ")
+    print("retirement rejected tampered history and missing pins, recovered from interruption and staged the fallback",
+          flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--client", type=lambda path: Path(path).absolute(), required=True)
@@ -228,6 +319,8 @@ def main():
     os.umask(0o077)
     with tempfile.TemporaryDirectory(prefix="fvca-tuf-depot-", dir=args.scratch_directory) as directory:
         qualify(args.client, Path(directory).absolute())
+    with tempfile.TemporaryDirectory(prefix="fvca-tuf-retirement-", dir=args.scratch_directory) as directory:
+        qualify_retirement(args.client, Path(directory).absolute())
 
 
 if __name__ == "__main__":
