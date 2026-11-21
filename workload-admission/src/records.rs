@@ -23,7 +23,7 @@ pub enum Provenance {
     PublisherVerified,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Network {
     None,
@@ -38,7 +38,7 @@ pub struct Limits {
     pub pids: u16,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct IdMap {
     pub uid_base: u32,

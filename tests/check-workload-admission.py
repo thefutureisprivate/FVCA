@@ -122,9 +122,9 @@ class Admission(unittest.TestCase):
         shutil.copytree(self.fixture, self.bundle)
         write(self.policy, self.scope)
 
-    def run_check(self, expected=None, workload_signer=None):
+    def run_check(self, expected=None, workload_signer=None, bundle=None):
         result = subprocess.run([BINARY, self.policy, self.deploy.with_suffix(".crt"),
-                                 (workload_signer or self.workload).with_suffix(".crt"), self.bundle],
+                                 (workload_signer or self.workload).with_suffix(".crt"), bundle or self.bundle],
                                 check=False, capture_output=True, text=True)
         if expected is None:
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -223,6 +223,139 @@ class Admission(unittest.TestCase):
         sign(path, self.deploy, "-nodetach")
         path.write_bytes(original)
         self.run_check("workload verification failed")
+
+    def bind_endpoint(self, path, launch, deployment, derivation, artifact):
+        launch_digest = write(path / "launch.json", launch)
+        deploy_path = path / "deployment.json"
+        auth_path = path / "authorization.json"
+        deployment_digest = write(deploy_path, dict(deployment, launch=launch_digest))
+        derivation_digest = write(path / "derivation.json", dict(derivation, launch=launch_digest))
+        (path / "workload.raw").write_bytes(artifact)
+        output = write(auth_path, dict(
+            self.authorization, deployment=deployment_digest, derivation=derivation_digest,
+            artifact={"size": len(artifact), "digest": digest(artifact)},
+            verity_root_hash=derivation["verity_root_hash"],
+        ))
+        sign(deploy_path, self.deploy)
+        sign(auth_path, self.workload)
+        return output
+
+    def prepare_transition(self, *, deployment=None, launch=None, source=None, root=b"R" * 4096):
+        health = {
+            "Test": ["CMD", "/usr/bin/test-health"], "Interval": 1_000_000_000,
+            "Timeout": 1_000_000_000, "StartPeriod": None, "StartInterval": None, "Retries": 1,
+        }
+        active_launch = dict(self.launch, healthcheck=health)
+        active_deployment = dict(self.deployment, security_epoch=3)
+        from_authorization = self.bind_endpoint(
+            self.bundle, active_launch, active_deployment, self.derivation, self.artifact,
+        )
+        candidate = self.bundle.with_name("candidate")
+        shutil.copytree(self.bundle, candidate)
+        index = digest(b"next index")
+        manifest = digest(b"next manifest")
+        policy = digest(b"next source policy")
+        target_deployment = dict(active_deployment, source_index=index, manifest=manifest)
+        target_deployment.update(deployment or {})
+        target_launch = active_launch | (launch or {})
+        target_source = dict(self.derivation["source"], index=index) | (source or {})
+        derivation = dict(
+            self.derivation, source_policy=policy, source=target_source,
+            manifest=dict(self.derivation["manifest"], digest=manifest),
+        )
+        parts = candidate.with_name("next-parts")
+        parts.mkdir()
+        (parts / "root.erofs").write_bytes(root)
+        (parts / "verity.hash").write_bytes(bytes(4096))
+        verity = sha256(b"next verity root").hexdigest()
+        (parts / "root.hash").write_text(verity, encoding="ascii")
+        sign(parts / "root.hash", self.workload)
+        seal = json.dumps({
+            "rootHash": verity,
+            "certificateFingerprint": self.authorization["workload_certificate"].removeprefix("sha256:"),
+            "signature": base64.b64encode((parts / "root.p7s").read_bytes()).decode("ascii"),
+        })
+        disk = candidate.with_name("next-workload.raw")
+        assemble_image(disk, parts, verity, seal.encode("ascii"))
+        artifact = disk.read_bytes()
+        derivation.update(verity_root_hash=verity, root={"digest": digest(root), "size": len(root)})
+        to_authorization = self.bind_endpoint(candidate, target_launch, target_deployment, derivation, artifact)
+        now = int(time.time())
+        return {
+            "schema": "fvca-workload-transition-v1", "guest": self.scope["guest"], "service": self.scope["service"],
+            "from_authorization": from_authorization, "to_authorization": to_authorization,
+            "to_source_policy": policy, "data_compatibility": "bidirectional",
+            "valid_from": now - 60, "expires": now + 120,
+        }, candidate
+
+    def run_transition(self, record, candidate, expected=None, authority=None, fresh_until=None):
+        grant = self.bundle.with_name("transition.json")
+        write(grant, record)
+        sign(grant, authority or self.deploy)
+        result = subprocess.run([
+            BINARY, "--verify-transition", self.policy, self.deploy.with_suffix(".crt"),
+            self.workload.with_suffix(".crt"), self.bundle, candidate, grant, grant.with_suffix(".p7s"),
+        ], check=False, capture_output=True, text=True)
+        if expected is None:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), " ".join([
+                "FVCA_WORKLOAD_TRANSITION_VERIFIED", self.scope["service"], record["from_authorization"],
+                record["to_authorization"], str(fresh_until or record["expires"]),
+            ]))
+        else:
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn(expected, result.stderr)
+            self.assertNotIn("FVCA_WORKLOAD_TRANSITION_VERIFIED", result.stdout)
+
+    def test_transition_requires_exact_signed_source_and_authorizations(self):
+        grant, candidate = self.prepare_transition()
+        self.run_transition(grant, candidate)
+        self.run_check("derivation does not match", bundle=candidate)
+        self.run_transition(dict(grant, from_authorization=digest(b"other active release")), candidate,
+                            "authorization differs from the signed transition")
+        self.run_transition(dict(grant, to_source_policy=self.scope["source_policy"]), candidate,
+                            "derivation does not match")
+        self.run_transition(dict(grant, to_authorization=digest(b"other authorization")), candidate,
+                            "authorization differs from the signed transition")
+        self.run_transition(grant, candidate, "workload verification failed", authority=self.workload)
+
+    def test_transition_rejects_expiry_and_altered_candidate_bytes(self):
+        grant, candidate = self.prepare_transition()
+        self.run_transition(dict(grant, expires=int(time.time()) - 1), candidate, "outside its validity")
+        disk = candidate / "workload.raw"
+        disk.write_bytes(b"X" + disk.read_bytes()[1:])
+        self.run_transition(grant, candidate, "does not match the signed bytes")
+
+    def test_transition_retains_the_earliest_authorization_expiry(self):
+        expires = int(time.time()) + 60
+        grant, candidate = self.prepare_transition(deployment={"expires": expires})
+        self.run_transition(grant, candidate, fresh_until=expires)
+
+    def test_transition_rejects_an_older_epoch(self):
+        grant, candidate = self.prepare_transition(deployment={"security_epoch": 2})
+        self.run_transition(grant, candidate, "roll back the active security epoch")
+
+    def test_transition_rejects_changed_persistent_volumes(self):
+        grant, candidate = self.prepare_transition(launch={"volumes": ["/var/lib/test"]})
+        self.run_transition(grant, candidate, "persistent volume or container identity mapping")
+
+    def test_transition_rejects_privilege_expansion(self):
+        larger = dict(self.deployment["limits"], memory_bytes=64 * 1024**2)
+        grant, candidate = self.prepare_transition(deployment={"limits": larger})
+        self.run_transition(grant, candidate, "network or resource scope")
+
+    def test_transition_rejects_a_different_publisher_repository(self):
+        grant, candidate = self.prepare_transition(source={"repository": "registry.example/other"})
+        self.run_transition(grant, candidate, "publisher repository or issuer")
+
+    def test_transition_requires_a_health_check(self):
+        grant, candidate = self.prepare_transition(launch={"healthcheck": None})
+        self.run_transition(grant, candidate, "declared health check")
+
+    def test_transition_rejects_an_identical_executable_and_launch(self):
+        grant, candidate = self.prepare_transition(root=bytes(4096))
+        self.assertNotEqual((self.bundle / "workload.raw").read_bytes(), (candidate / "workload.raw").read_bytes())
+        self.run_transition(grant, candidate, "does not change executable or launch bytes")
 
 
 if __name__ == "__main__":

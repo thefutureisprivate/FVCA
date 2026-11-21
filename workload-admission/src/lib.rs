@@ -4,6 +4,7 @@ mod image;
 mod launch;
 pub mod quadlet;
 mod records;
+mod transition;
 
 use std::error::Error;
 use std::fs::{File, OpenOptions};
@@ -21,6 +22,7 @@ use openssl::x509::X509;
 pub use image::{Image, Region};
 use records::{Authorization, Blob, Deployment, Derivation, Network};
 pub use records::{IdMap, Launch, Limits, Scope};
+pub use transition::{VerifiedTransition, verify_transition};
 
 const RECORD_LIMIT: u64 = 4 * 1024 * 1024;
 const SIGNATURE_LIMIT: u64 = 16 * 1024;
@@ -62,7 +64,10 @@ impl Trust {
 pub struct VerifiedWorkload {
     deployment: Deployment,
     launch: Launch,
+    source: records::Source,
+    root_digest: String,
     authorization: Authorization,
+    authorization_digest: String,
     artifact: File,
     image: Image,
 }
@@ -74,6 +79,10 @@ impl VerifiedWorkload {
 
     pub fn digest(&self) -> &str {
         &self.authorization.artifact.digest
+    }
+
+    pub fn authorization_digest(&self) -> &str {
+        &self.authorization_digest
     }
 
     pub fn verity_root_hash(&self) -> &str {
@@ -213,8 +222,11 @@ fn bound_record(directory: &Path, filename: &str, expected: &str) -> Result<Vec<
     Ok(content)
 }
 
-fn check_time(deployment: &Deployment) -> Result<()> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+fn current_time() -> Result<u64> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+}
+
+fn check_time(deployment: &Deployment, now: u64) -> Result<()> {
     if !(deployment.valid_from..deployment.expires).contains(&now)
         || deployment.expires > i64::MAX as u64
     {
@@ -253,18 +265,18 @@ fn check_deployment(value: &Deployment, scope: &Scope) -> Result<()> {
             "deployment resource limits or subordinate identity map are invalid",
         ));
     }
-    check_time(value)
+    check_time(value, current_time()?)
 }
 
 fn check_derivation(
     value: &Derivation,
     approval: &Deployment,
     authorization: &Authorization,
-    scope: &Scope,
+    source_policy: &str,
 ) -> Result<()> {
     if value.schema != "fvca-workload-derivation-v1"
         || value.service != approval.service
-        || value.source_policy != scope.source_policy
+        || value.source_policy != source_policy
         || value.provenance != approval.provenance
         || !is_digest(&value.worker_image)
         || value.source.index != approval.source_index
@@ -327,11 +339,26 @@ fn verify_artifact(path: &Path, expected: &Blob) -> Result<File> {
 /// Verify signed workload evidence and the exact image bytes before any image parser or mount.
 /// The caller owns the staging directory and must prevent concurrent writers until activation.
 pub fn verify(directory: &Path, trust: &Trust) -> Result<VerifiedWorkload> {
+    verify_for_source(directory, trust, &trust.scope.source_policy, None)
+}
+
+fn verify_for_source(
+    directory: &Path,
+    trust: &Trust,
+    source_policy: &str,
+    expected_authorization: Option<&str>,
+) -> Result<VerifiedWorkload> {
     let deployment_bytes = verified_record(directory, "deployment", &trust.deployment)?;
     let deployment = serde_json::from_slice(&deployment_bytes)?;
     check_deployment(&deployment, &trust.scope)?;
 
     let authorization_bytes = verified_record(directory, "authorization", &trust.workload)?;
+    let authorization_digest = digest(&sha256(&authorization_bytes));
+    if expected_authorization.is_some_and(|expected| expected != authorization_digest) {
+        return Err(invalid(
+            "workload authorization differs from the signed transition",
+        ));
+    }
     let authorization: Authorization = serde_json::from_slice(&authorization_bytes)?;
     if authorization.schema != "fvca-workload-authorization-v1"
         || authorization.deployment != digest(&sha256(&deployment_bytes))
@@ -350,7 +377,7 @@ pub fn verify(directory: &Path, trust: &Trust) -> Result<VerifiedWorkload> {
         "derivation.json",
         &authorization.derivation,
     )?)?;
-    check_derivation(&derivation, &deployment, &authorization, &trust.scope)?;
+    check_derivation(&derivation, &deployment, &authorization, source_policy)?;
     bound_record(
         directory,
         "publisher-proof.json",
@@ -361,11 +388,14 @@ pub fn verify(directory: &Path, trust: &Trust) -> Result<VerifiedWorkload> {
     launch.validate()?;
     let mut artifact = verify_artifact(&directory.join("workload.raw"), &authorization.artifact)?;
     let image = image::verify_image(&mut artifact, &authorization, &derivation, &trust.workload)?;
-    check_time(&deployment)?;
+    check_time(&deployment, current_time()?)?;
     Ok(VerifiedWorkload {
         deployment,
         launch,
+        source: derivation.source,
+        root_digest: derivation.root.digest,
         authorization,
+        authorization_digest,
         artifact,
         image,
     })

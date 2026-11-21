@@ -1181,6 +1181,19 @@ python3 tools/authorize-workload.py --policy "$policy" \
 
 This off-node flow implements signed-only source admission. The optional unsigned permit mode and full Stalwart service acceptance remain open.
 
+### Verify an executable-only workload transition
+
+Use the trusted scope of the currently selected workload and the enrolled deployment and workload-root certificates to verify a proposed replacement. Both private bundle directories contain the independently signed deployment and authorization, publisher evidence, and exact workload disk. Re-run source admission and derivation for the candidate under its own pinned source policy.
+
+The deployment authority signs a `fvca-workload-transition-v1` JSON record as detached DER CMS. The record names the enrolled `guest` and `service`. The `from_authorization` and `to_authorization` fields each contain the `sha256:` digest of that endpoint's exact `authorization.json`. The `to_source_policy` field binds the candidate's exact source policy digest. Set `data_compatibility` to `bidirectional` only after qualifying both executables against the same mutable data, including data written during the candidate's trial. Set `valid_from` and `expires` in Unix seconds.
+
+```sh
+fvca-workload-admission --verify-transition CURRENT_POLICY DEPLOYMENT_CERT WORKLOAD_CERT \
+  CURRENT_BUNDLE CANDIDATE_BUNDLE transition.json transition.p7s
+```
+
+The verifier checks both endpoints, the exact transition signature, and the enrolled Guest scope. The publisher repository and issuer, container and subordinate identities, writable volume destinations, and network profile must match. Each endpoint needs a declared health check. The candidate must preserve the security epoch and fit the active release's resource bounds. The verifier reports the exact authorization digests and the earliest expiry. This step checks admission before the updater's separate lifecycle lease, restart, health assessment, and recovery transaction.
+
 ## Guest workload verifier
 
 The Rust verifier checks both CMS signatures against separate signer certificates. It binds the exact deployment, derivation, publisher evidence, launch definition and raw image bytes, then checks both GPT tables and the signed dm-verity root hash. It checks the target Guest and service, validity period, minimum security epoch, revocation list and offline launch profile before returning the verified file descriptor and partition offsets.
