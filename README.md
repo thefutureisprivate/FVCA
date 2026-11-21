@@ -76,6 +76,16 @@ python3 obs/prepare-build.py COMMIT build/allocator-upstream/hardened_malloc-14.
 
 Prepare the Guest vendor directory with the locked `cargo vendor --versioned-dirs` command in the release-client section below. The source preparer checks the Cargo lockfiles from the selected commit and packages the exact crate set for both Guest binaries. Commit every generated file to its corresponding OBS package. The worker uses the OBS project's staging certificate for its UKI and verity signatures. Decompress the disk and its package manifest so they share a basename with `.raw` and `.manifest` extensions. Run `tools/verify-base.py` with the staging certificate, `--extract-root` for the runtime build input, and `--extract-initrd` for the embedded initramfs. Production authorization requires independent evidence and production keys. [OBS mkosi build documentation](https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-package-formats#sec-obs-mkosi)
 
+On the separate signing system, pass the reviewed digests of the uncompressed disk and package manifest to the core authorizer.
+
+```sh
+python3 tools/authorize-core.py core.raw --staging-certificate obs-stage.crt \
+  --image-sha256 APPROVED_IMAGE_SHA256 --manifest-sha256 APPROVED_MANIFEST_SHA256 \
+  --boot-certificate composition.crt --boot-key composition.key --output authorized-core
+```
+
+The authorization signs the same core root hash and UKI contents under the composition key and installs a fresh ESP with the authorized boot image. Use the resulting `core.raw` and `initrd.cpio.zst` with the matching runtime. The package inventory accompanies the core for the shared-package check. [Discoverable Partitions Specification](https://uapi-group.org/specifications/specs/discoverable_partitions_specification/)
+
 ## Appraise a Hypervisor boot quote
 
 In trusted maintenance, enroll a TPM-generated restricted ECDSA P-256 key with SHA-256 at persistent handle `0x81004656`. The key uses the `PolicyCommandCode(TPM2_CC_Quote)` policy and the `fixedtpm`, `fixedparent`, `sensitivedataorigin`, `adminwithpolicy`, `noda`, `restricted`, and `sign` attributes. Preserve the enrolled public point and TPM qualified name on the separate verifier. The runtime collector opens `/dev/tpmrm0` and accepts one 32-byte challenge. [TPM 2.0 Library](https://www.trustedcomputinggroup.org/resources/documents/tpm-library-specification) · [TPM quote command](https://tpm2-tss.readthedocs.io/en/latest/group___esys___quote.html)
