@@ -81,6 +81,7 @@ report_superblock_location() {
 }
 
 provision() {
+    local destination
     require_disk vda fvca-lab-a
     require_disk vdb fvca-lab-b
     require_disk vdc fvca-lab-guest-seed
@@ -90,12 +91,18 @@ provision() {
     mount -t btrfs -o "nodev,nosuid,noexec,datacow,datasum,compress=no,skip_balance,device=$b" "$a" /mnt
     verify_mirror
     write_marker
-    mkdir -m0700 /mnt/vms
-    btrfs subvolume create /mnt/vms/service-guest
-    chmod 0700 /mnt/vms/service-guest
+    if [[ "${1:-}" == commissioning ]]; then
+        mkdir -m0700 /mnt/guest-commissioning
+        destination=/mnt/guest-commissioning/seed.raw
+    else
+        mkdir -m0700 /mnt/vms
+        btrfs subvolume create /mnt/vms/service-guest
+        chmod 0700 /mnt/vms/service-guest
+        destination=/mnt/vms/service-guest/data.raw
+    fi
     (
         umask 077
-        cp --sparse=always --reflink=never /dev/vdc /mnt/vms/service-guest/data.raw
+        cp --sparse=always --reflink=never /dev/vdc "$destination"
     )
     sync
     umount /mnt
@@ -105,7 +112,11 @@ provision() {
     fi
     cryptsetup close fvca-test-b
     cryptsetup close fvca-test-a
-    echo FVCA_STORAGE_LAB_PROVISIONED
+    if [[ "${1:-}" == commissioning ]]; then
+        echo FVCA_STORAGE_LAB_COMMISSIONING_SEED_READY
+    else
+        echo FVCA_STORAGE_LAB_PROVISIONED
+    fi
 }
 
 plain_b() {
@@ -237,6 +248,7 @@ case "$cmdline" in
     *' fvca.lab=guest') provision_guest dup ;;
     *' fvca.lab=guest-wrong-profile') provision_guest single ;;
     *' fvca.lab=provision') modprobe dm-crypt; provision ;;
+    *' fvca.lab=commissioning') modprobe dm-crypt; provision commissioning ;;
     *' fvca.lab=plain-b') modprobe dm-crypt; plain_b ;;
     *' fvca.lab=authenticated-read-error') modprobe dm-crypt; check_bad_sectors ;;
     *' fvca.lab=crash-write') modprobe dm-crypt; crash_check write ;;

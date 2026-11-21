@@ -13,7 +13,9 @@ from runtime_boot import run
 
 def pack(args, work):
     bundle = work / "bundle"
-    bundle.mkdir(mode=0o755)
+    bundle.mkdir()
+    # The signed root must be traversable by QEMU even under a private builder umask.
+    bundle.chmod(0o755)
     for name in guest_boot_bundle.BUNDLE_FILES:
         source = args.bundle / name
         if source.is_symlink() or not source.is_file():

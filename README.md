@@ -1114,14 +1114,6 @@ The Hypervisor verifies that the Guest agent answers a ping before reporting rea
 
 `tests/storage-lab.sh` provisions that layout on disposable disks. On a KVM test machine that exposes Intel VMX to the outer Hypervisor VM, run the nested qualification with `--nested-guest`. The Host reports `FVCA_SERVICE_GUEST_READY` after the Guest reports its direct-boot policy, exact OCI runtime, and verified root readiness.
 
-### Commission the initial Service Guest disk
-
-Prepare a raw Guest data disk for the Btrfs partition identity and filesystem UUID selected by the approved Guest release. During offline enrollment, place that exact file at `guest-commissioning/seed.raw` relative to the root of the authenticated Host Btrfs mirror. The directory and seed must be owned by root with modes `0700` and `0600` respectively. Use ordinary checksummed Btrfs storage for the seed and leave the registered Guest slot vacant.
-
-Compose the ordinary stable Host UKI with `--guest-boot`, `--guest-release-certificate`, the authenticated `--storage` selection, and `--guest-commissioning-seed PATH` pointing to the original raw file. The composer checks the seed's GPT partition and Btrfs filesystem identities against the verified Guest initramfs. The UKI binds the fixed Guest UUID and exact verified Guest boot bundle to the seed's byte length and SHA-256. Use the Hypervisor initramfs and VM runtime built with commissioning support.
-
-On boot the Host verifies the seed copy in a private Btrfs subvolume, flushes its identity to the commissioning journal, and moves it into the vacant registered slot. The Guest launch waits for installation and still requires separate Guest readiness. An interrupted install reconciles the same subvolume. Once the installation is durable, the Host retires the authorized seed. A later missing slot requires explicit recovery. The Host never mounts the Guest filesystem during commissioning.
-
 ```sh
 python3 tests/check-storage.py \
   --disk build/hypervisor-profile/fvca-dev-hypervisor-with-guest.raw \
@@ -1131,6 +1123,25 @@ python3 tests/check-storage.py \
 ```
 
 For a disposable shutdown test, use `tests/nested-guest-shutdown-initrd.sh HYPERVISOR_INITRAMFS NEW_INITRAMFS` and pass the resulting archive to `compose-hypervisor.py --initrd`. Run the nested check with `--nested-guest-shutdown`. For a Guest that requires an authorized workload, supply its prepared Guest data disk as the second argument to `tests/storage-lab.sh`. The test waits for the orderly stop and checks that the raw disk attachment was released.
+
+### Commission the initial Service Guest disk
+
+Prepare a raw Guest data disk for the Btrfs partition identity and filesystem UUID selected by the approved Guest release. During offline enrollment, place that exact file at `guest-commissioning/seed.raw` relative to the root of the authenticated Host Btrfs mirror. The directory and seed must be owned by root with modes `0700` and `0600` respectively. Use ordinary checksummed Btrfs storage for the seed and leave the registered Guest slot vacant.
+
+Compose the ordinary stable Host UKI with `--guest-boot`, `--guest-release-certificate`, the authenticated `--storage` selection, and `--guest-commissioning-seed PATH` pointing to the original raw file. The composer checks the seed's GPT partition and Btrfs filesystem identities against the verified Guest initramfs. The UKI binds the fixed Guest UUID and exact verified Guest boot bundle to the seed's byte length and SHA-256. Use the Hypervisor initramfs and VM runtime built with commissioning support.
+
+On boot the Host verifies the seed copy in a private Btrfs subvolume, flushes its identity to the commissioning journal, and moves it into the vacant registered slot. The Guest launch waits for installation and still requires separate Guest readiness. An interrupted install reconciles the same subvolume. Once the installation is durable, the Host retires the authorized seed. A later missing slot requires explicit recovery. The Host never mounts the Guest filesystem during commissioning.
+
+For KVM qualification, prepare two authenticated mirrors from the approved seed and a same-length copy with an altered byte. Compose a 4 KiB GPT Host slot against the original file and the lab's `host-storage.conf`. Enroll the Host signing certificate in a disposable OVMF variable store.
+
+```sh
+tests/storage-lab.sh --commissioning APPROVED_LAB GUEST_DATA_RAW
+tests/storage-lab.sh --commissioning ALTERED_LAB ALTERED_GUEST_DATA_RAW
+python3 tests/check-guest-commissioning.py --disk HOST_GPT_RAW --variables OVMF_VARS \
+  --lab APPROVED_LAB --altered-lab ALTERED_LAB --output NEW_RESULTS_DIRECTORY
+```
+
+The check requires normal Guest readiness after commissioning and again on a cold start with the same mirror. The altered seed must fail before the launcher starts a Guest.
 
 ### Stopped Service Guest captures
 

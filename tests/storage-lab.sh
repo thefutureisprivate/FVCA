@@ -4,12 +4,17 @@ set -euo pipefail
 umask 077
 
 protection=development-luks2
-if [[ "${1:-}" == --authenticated ]]; then
+mode=provision
+if [[ "${1:-}" == --commissioning ]]; then
+    protection=luks2-xts-hmac-sha256
+    mode=commissioning
+    shift
+elif [[ "${1:-}" == --authenticated ]]; then
     protection=luks2-xts-hmac-sha256
     shift
 fi
-if [[ $# -lt 1 || $# -gt 3 || "$1" == *,* ]]; then
-    echo 'Usage: tests/storage-lab.sh [--authenticated] NEW_OUTPUT_DIRECTORY [GUEST_SEED_DISK [MIRROR_MEMBER_BYTES]]' >&2
+if [[ $# -lt 1 || $# -gt 3 || "$1" == *,* || ( "$mode" == commissioning && $# -lt 2 ) ]]; then
+    echo 'Usage: tests/storage-lab.sh [--authenticated|--commissioning] NEW_OUTPUT_DIRECTORY [GUEST_SEED_DISK [MIRROR_MEMBER_BYTES]]' >&2
     exit 2
 fi
 guest_seed=
@@ -63,7 +68,9 @@ replacement=6dfe4168-65d6-4500-99f7-448214356652,02fe6c37-70be-4215-9872-4a41221
 sed "s/^protection=.*/protection=$protection/" "$tests/host-storage.conf" > "$output/host-storage.conf"
 tail -n +3 "$output/host-storage.conf" > "$root/lab-ids"
 printf 'replacement_b=%s\n' "$replacement" >> "$root/lab-ids"
-sed "s/^member_b=.*/member_b=$replacement/" "$output/host-storage.conf" > "$output/replacement-storage.conf"
+if [[ "$mode" == provision ]]; then
+    sed "s/^member_b=.*/member_b=$replacement/" "$output/host-storage.conf" > "$output/replacement-storage.conf"
+fi
 sed -n -e 's/^partition=/guest_partition=/p' -e 's/^filesystem_uuid=/guest_filesystem=/p' \
     "$tests/guest-storage.conf" > "$root/guest-ids"
 printf '%s' "$(openssl rand -hex 32)" > "$output/storage.key"
@@ -127,7 +134,21 @@ boot() {
     fi
 }
 
-truncate -s "$member_size" "$output/member-a.raw" "$output/member-b.raw" "$output/replacement.raw"
+mirror=(
+    -drive "if=none,id=a,format=raw,file=$output/member-a.raw" -device virtio-blk-pci,drive=a,serial=fvca-lab-a
+    -drive "if=none,id=b,format=raw,file=$output/member-b.raw" -device virtio-blk-pci,drive=b,serial=fvca-lab-b
+)
+truncate -s "$member_size" "$output/member-a.raw" "$output/member-b.raw"
+if [[ "$mode" == commissioning ]]; then
+    boot commissioning "${mirror[@]}" \
+        -drive "if=none,id=guest,format=raw,readonly=on,file=$guest_seed" -device virtio-blk-pci,drive=guest,serial=fvca-lab-guest-seed
+    grep -q FVCA_STORAGE_LAB_COMMISSIONING_SEED_READY "$output/commissioning.log"
+    rm -- "$output/lab.cpio.gz"
+    printf 'Prepared a vacant Service Guest slot and staged the seed on %s\n' "$output"
+    exit 0
+fi
+
+truncate -s "$member_size" "$output/replacement.raw"
 truncate -s 384M "$output/guest-data.raw" "$output/guest-wrong-profile.raw"
 boot guest \
     -drive "if=none,id=guest,format=raw,file=$output/guest-data.raw" -device virtio-blk-pci,drive=guest,serial=fvca-lab-guest
@@ -136,9 +157,7 @@ boot guest-wrong-profile \
     -drive "if=none,id=guest,format=raw,file=$output/guest-wrong-profile.raw" -device virtio-blk-pci,drive=guest,serial=fvca-lab-guest
 grep -q FVCA_GUEST_BTRFS_LAB_PROVISIONED "$output/guest-wrong-profile.log"
 
-boot provision \
-    -drive "if=none,id=a,format=raw,file=$output/member-a.raw" -device virtio-blk-pci,drive=a,serial=fvca-lab-a \
-    -drive "if=none,id=b,format=raw,file=$output/member-b.raw" -device virtio-blk-pci,drive=b,serial=fvca-lab-b \
+boot provision "${mirror[@]}" \
     -drive "if=none,id=guest,format=raw,readonly=on,file=${guest_seed:-$output/guest-data.raw}" -device virtio-blk-pci,drive=guest,serial=fvca-lab-guest-seed
 grep -q FVCA_STORAGE_LAB_PROVISIONED "$output/provision.log"
 
