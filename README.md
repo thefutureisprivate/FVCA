@@ -1237,6 +1237,10 @@ With the approved OCI image staged locally by digest, run `python3 tests/stalwar
 
 Pass `build/stalwart-mail-lab` as the fourth argument to `tests/workload-data-lab.sh` to seed the two signed Stalwart volume mappings on the Guest Btrfs disk. Run `bash tests/stalwart-mail-initrd.sh GUEST_INITRAMFS NEW_INITRAMFS build/stalwart-mail-lab`, then compose the disposable Guest with `NEW_INITRAMFS`. The fixture initramfs contains a synthetic mailbox credential. Use `--workload --stalwart-mail` with `tests/check-storage.py` to verify that the exact message is retrieved before Guest readiness. The workload image alteration check also runs.
 
+To check rejection of a different message, copy the lab's `imap.curl` to a new private fixture directory and write a different `mail.eml` there. Build a second direct-boot bundle with the same core, runtime, release authority and command line using that fixture directory with `tests/stalwart-mail-initrd.sh`. Pass the bundle as `--stalwart-mail-mismatch` alongside the normal direct-boot workload test. The test uses the approved Btrfs disk for both mail comparisons and requires the mismatched reference to stop readiness after authenticated retrieval.
+
+For the unattended nested test, seed the disposable authenticated Host mirror from the workload lab's `approved.raw` and pack the normal mail fixture's signed direct-boot bundle into the Host slot. Use `--nested-guest-tpm-auto` to check Host and Guest readiness together.
+
 To exercise S3 recovery, use the configured Guest and seeded disk in the stopped-backup procedure. Authorize that snapshot on a fresh encrypted Host Btrfs mirror, with the same signed Guest fixture. The restore receipt then requires the recovered Stalwart account and TLS configuration to serve the same message before Guest readiness. The nested KVM test exercised this path against a disposable Garage repository.
 
 ## Independent Stalwart application recovery

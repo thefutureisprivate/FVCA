@@ -452,6 +452,7 @@ def check_guest_workload(args):
     ):
         deadline = 220 if args.stalwart_lifecycle else 125
         prompted, output = boot(args, name, None, args.lab / f"{name}.raw", timeout=deadline)
+        output = rejoin_serial_output(output)
         # The kernel and service streams can interleave on the serial console.
         if prompted or not (mount in output or b"FVCA_GUEST_DATA_ACTIVE" in output) or b"FVCA_WORKLOAD_KEYRING_SEALED" not in output:
             raise ValueError(f"{name} did not reach the workload admission boundary")
@@ -462,11 +463,46 @@ def check_guest_workload(args):
                 raise ValueError("the authorized workload did not mount and start in the signed Guest")
             if args.stalwart_lifecycle:
                 check_stalwart_lifecycle(output)
-            if args.stalwart_mail and not 0 <= output.find(b"FVCA_STALWART_MAIL_VERIFIED") < output.find(READY):
-                raise ValueError("the configured Stalwart mailbox was not verified before Guest readiness")
+            if args.stalwart_mail:
+                started = output.find(b"FVCA_WORKLOAD_STARTED")
+                compared = output.find(b"FVCA_STALWART_MAIL_COMPARE")
+                verified = output.find(b"FVCA_STALWART_MAIL_VERIFIED")
+                if not 0 <= started < compared < verified < output.find(READY):
+                    raise ValueError("the configured Stalwart mailbox was not verified before Guest readiness")
         elif failure not in output or FAIL not in output or READY in output or active in output:
             raise ValueError("the tampered workload did not fail before activation")
         print(f"workload-{name} passed")
+
+    if args.stalwart_mail_mismatch is not None:
+        check_stalwart_mail_mismatch(args)
+
+
+def check_stalwart_mail_mismatch(args):
+    from guest_boot_bundle import verify
+
+    bundle = args.stalwart_mail_mismatch
+    cmdline, release = verify(bundle, args.release_certificate)
+    original = args.direct_release
+    fixed_files = ("cmdline", "domain.xml", "linux", "runtime.raw")
+    if (release["core_root"] != original["core_root"]
+            or release["runtime_root"] != original["runtime_root"]
+            or any(release["files"][name] != original["files"][name] for name in fixed_files)
+            or release["files"]["initrd"] == original["files"]["initrd"]):
+        raise ValueError("the mailbox mismatch bundle must preserve the Guest core, runtime and boot policy")
+
+    mismatch = argparse.Namespace(**vars(args))
+    mismatch.direct_boot = bundle
+    mismatch.direct_cmdline = cmdline
+    mismatch.disk = bundle / "core.raw"
+    mismatch.runtime = bundle / "runtime.raw"
+    prompts, output = boot(mismatch, "wrong-mail-reference", None, args.lab / "approved.raw", timeout=125)
+    output = rejoin_serial_output(output)
+    started = output.find(b"FVCA_WORKLOAD_STARTED")
+    compared = output.find(b"FVCA_STALWART_MAIL_COMPARE")
+    if (prompts or DIRECT_ACTIVE not in output or not 0 <= started < compared < output.find(FAIL)
+            or b"FVCA_STALWART_MAIL_VERIFIED" in output or READY in output):
+        raise ValueError("the Guest did not reject the wrong reference after retrieving the authenticated message")
+    print("workload-wrong-mail-reference passed")
 
 
 def check_stalwart_lifecycle(output):
@@ -582,6 +618,8 @@ if __name__ == "__main__":
     stalwart = parser.add_mutually_exclusive_group()
     stalwart.add_argument("--stalwart-lifecycle", action="store_true", help="check the disposable Stalwart lifecycle fixture")
     stalwart.add_argument("--stalwart-mail", action="store_true", help="require the authenticated Stalwart mailbox check")
+    parser.add_argument("--stalwart-mail-mismatch", type=Path,
+                        help="separately signed direct-boot bundle with an intentionally wrong mail reference")
     for option in ("tpm-state", "pin-file", "firmware"):
         parser.add_argument(f"--{option}", type=Path)
     args = parser.parse_args()
@@ -591,8 +629,8 @@ if __name__ == "__main__":
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
         from guest_boot_bundle import verify
         try:
-            args.direct_cmdline, release = verify(args.direct_boot, args.release_certificate)
-            args.direct_runtime = release["runtime_root"]
+            args.direct_cmdline, args.direct_release = verify(args.direct_boot, args.release_certificate)
+            args.direct_runtime = args.direct_release["runtime_root"]
         except (OSError, ValueError, subprocess.CalledProcessError) as error:
             parser.exit(1, f"Direct-boot qualification failed before launch: {error}\n")
         args.disk = args.direct_boot / "core.raw"
@@ -607,6 +645,8 @@ if __name__ == "__main__":
         parser.error("--stalwart-lifecycle requires --workload")
     if args.stalwart_mail and not args.workload:
         parser.error("--stalwart-mail requires --workload")
+    if args.stalwart_mail_mismatch is not None and (not args.stalwart_mail or args.direct_boot is None):
+        parser.error("--stalwart-mail-mismatch requires --stalwart-mail and --direct-boot")
     if args.oci_runtime is not None:
         args.guest = True
         args.runtime = args.oci_runtime

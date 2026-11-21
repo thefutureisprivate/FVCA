@@ -10,6 +10,7 @@ Type=oneshot
 NoNewPrivileges=yes
 MemoryDenyWriteExecute=yes
 WorkingDirectory=/run/fvca/stalwart-mail
+ExecStart=/usr/bin/echo FVCA_STALWART_MAIL_COMPARE
 ExecStart=/usr/bin/sha256sum --check --strict --status mail.sha256
 ExecStart=/usr/bin/echo FVCA_STALWART_MAIL_VERIFIED
 StandardOutput=journal+console
