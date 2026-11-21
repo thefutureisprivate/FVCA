@@ -824,6 +824,8 @@ python3 tests/check-storage.py --nested-guest-tpm-auto \
 
 Seed the Guest Btrfs disk to match the selected release. A workload-bearing release requires its signed workload files and provisioned volumes before the Guest can reach readiness. The check requires the Host epoch gate, unattended unlock, authenticated RAID1, an enforcing sVirt Guest and Guest agent readiness before the Host reports ready.
 
+To qualify a provisioned pair, supply the other GPT slot with `--peer-slot PEER_GPT_SLOT` in place of `--lab`. Run the check in both directions. It verifies that the requested slot's ESP booted and that the integrated members unlock the same Btrfs mirror.
+
 To configure CPU and RAM for the registered VM, pass `--guest-vm-settings PATH` when composing the Hypervisor. The file accepts this JSON object.
 
 ```json

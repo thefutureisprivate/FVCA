@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import selectors
 import shutil
 import subprocess
@@ -273,13 +274,26 @@ def require_nested_guest_ready(log, required, expected_launches):
 
 def check_nested_guest_tpm_auto(args):
     """Qualify a self-contained slot with freshly copied software TPM state."""
-    args.output.mkdir(mode=0o700)
     args.nvme_boot = True
     args.boot_sector_size = 4096
     args.no_default_devices = True
     args.memory_mib = 8192
     args.vcpus = 4
-    members = [args.lab / f"member-{side}.raw" for side in ("a", "b")]
+    args.runtime = args.peer_slot
+    members = () if args.peer_slot is not None else tuple(
+        args.lab / f"member-{side}.raw" for side in ("a", "b")
+    )
+    gpt = runpy.run_path(Path(__file__).with_name("check-hypervisor-gpt-slots.py"))
+    disk_id, partitions = gpt["layout"](args.disk, args.boot_sector_size)
+    esp_uuid = partitions["fvca-esp"][1]
+    if args.peer_slot is not None:
+        peer_id, peer_partitions = gpt["layout"](args.peer_slot, args.boot_sector_size)
+        if peer_id == disk_id or gpt["HOST_DATA"] not in partitions.keys() & peer_partitions.keys():
+            raise ValueError("boot and peer slots must have distinct disk UUIDs and integrated Host members")
+        if peer_partitions["fvca-esp"][1] == esp_uuid:
+            raise ValueError("boot and peer slots must have distinct EFI partition UUIDs")
+    expected_esp = f"FVCA_HYPERVISOR_SLOT_VERIFIED {esp_uuid}".encode("ascii")
+    args.output.mkdir(mode=0o700)
     for attempt in range(1, 4):
         with software_tpm(args.tpm_state) as socket:
             prompts, log = boot(
@@ -294,7 +308,7 @@ def check_nested_guest_tpm_auto(args):
     epoch = b"FVCA_HYPERVISOR_EPOCH_ACCEPTED"
     unlocked = b"FVCA_HOST_STORAGE_TPM_UNLOCKED"
     required = (
-        b"secureboot: Secure boot enabled", b"FVCA_HYPERVISOR_SLOT_VERIFIED", epoch, HOST_AUTHENTICATED,
+        b"secureboot: Secure boot enabled", expected_esp, epoch, HOST_AUTHENTICATED,
         b"FVCA_HOST_STORAGE_UNLOCK_PROFILE tpm2-auto", unlocked,
     )
     require_nested_guest_ready(log, required, expected_launches=1)
@@ -702,8 +716,10 @@ def check_tpm(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    for option in ("lab", "output"):
-        parser.add_argument(f"--{option}", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    storage = parser.add_mutually_exclusive_group(required=True)
+    storage.add_argument("--lab", type=Path, help="disposable Btrfs lab directory")
+    storage.add_argument("--peer-slot", type=Path, help="second provisioned 4 KiB Hypervisor GPT slot")
     loader = parser.add_mutually_exclusive_group(required=True)
     loader.add_argument("--disk", type=Path, help="signed UEFI boot disk")
     loader.add_argument("--direct-boot", type=Path, help="signed direct-boot bundle to qualify")
@@ -743,6 +759,8 @@ if __name__ == "__main__":
     for option in ("tpm-state", "pin-file", "firmware"):
         parser.add_argument(f"--{option}", type=Path)
     args = parser.parse_args()
+    if args.peer_slot is not None and not args.nested_guest_tpm_auto:
+        parser.error("--peer-slot requires --nested-guest-tpm-auto")
     if args.direct_boot is not None:
         if not args.guest or args.variables is not None or args.release_certificate is None:
             parser.error("--direct-boot requires --guest and --release-certificate")
@@ -804,5 +822,5 @@ if __name__ == "__main__":
             check_nested_guest(args)
         else:
             check_hypervisor(args)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Host storage qualification failed: {error}\n")
