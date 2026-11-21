@@ -195,9 +195,29 @@ python3 tools/pack-os-release.py --review review.json --review-sha256 APPROVED_R
 
 The tool verifies the reviewed file hashes and the exact composition, including the correspondence between the detached and embedded Host payloads. It writes `selection.json`, `target-records.json` for the offline TUF targets signer, and `targets/` with the consistent-snapshot filenames. Each logical target uses `ROLE-EPOCH-MANIFEST_SHA256-` followed by the member name. The release manifest binds the exact `qualification.json`, which is the approved review file. Keep its named evidence in the review archive.
 
-Sign the logical target records with the authorized offline TUF targets keys and generate the standing channel head through the independent qualification authority when applicable. Serve the hash-prefixed files under `targets/` and the signed TUF metadata under `metadata/`. Mount imported media with `nodev,nosuid,noexec` and keep it read-only for intake. [TUF repository layout](https://theupdateframework.github.io/specification/latest/#repository-layout)
+### Publish the signed TUF depot
 
-Run `tests/check-os-release-packaging.py` with the reference TUF fixture environment and a verified development Host/Guest pair. It signs two disposable depots, verifies exact staging under standing policy for both roles, and checks rejection of a changed review, replaced artifact, and mismatched embedded Guest. Supply the client, artifact and evidence directories, VM runtime certificate, and a scratch directory on the same filesystem as the evidence.
+Use Python TUF 7.0.1 and securesystemslib 1.6.0 with cryptographic support. Draft the complete intended targets index from prepared release and [signed channel](#author-the-channel-off-node) packages. Include the packages for active and permitted recovery releases that should remain discoverable. On the appropriate signing systems, load each draft with python-tuf and call `Metadata.sign` with each authorized role signer and `append=True`. Return each finalized document before drafting the role that references it. Preserve the signed bytes exactly. [python-tuf signing API](https://github.com/theupdateframework/python-tuf/blob/v7.0.1/tuf/api/metadata.py#L331)
+
+```sh
+python3 tools/tuf-depot.py draft-targets --version VERSION --expires TARGETS_EXPIRY \
+  --package prepared-release --package new-channel > targets.unsigned.json
+# Have the offline targets authority produce signed/targets.json.
+python3 tools/tuf-depot.py draft-snapshot --version VERSION --expires SNAPSHOT_EXPIRY \
+  --trusted-root current-root.json --input signed/targets.json > snapshot.unsigned.json
+# Have the snapshot authority produce signed/snapshot.json.
+python3 tools/tuf-depot.py draft-timestamp --version VERSION --expires TIMESTAMP_EXPIRY \
+  --trusted-root current-root.json --input signed/snapshot.json > timestamp.unsigned.json
+# Have the timestamp authority produce signed/timestamp.json.
+python3 tools/tuf-depot.py publish --depot /srv/fvca/depot --trusted-root bootstrap-root.json \
+  --signed signed --package prepared-release --package new-channel
+```
+
+Use Unix expiration seconds and advance each modified role's version. Reuse the exact signed targets index when renewing the snapshot, and reuse the exact signed snapshot when renewing only the timestamp. Put root rotations in `signed/` as `VERSION.root.json` with signatures from the required quorums of the predecessor and successor authorities. Keep the out-of-band bootstrap root pinned for publication and use the independently verified current root when drafting linked metadata. [TUF key rotation and repository operations](https://theupdateframework.github.io/specification/latest/#repository-operations)
+
+Give the publisher a dedicated depot location on a local Btrfs filesystem with GNU `mv --exchange --no-copy`. Restrict writes to its parent and the depot to the publisher account. The publisher verifies all thresholds, links, validity windows, versions, and selected target bytes before atomically replacing the live directory. It retains previous versioned metadata and hash-addressed targets for clients already using them. A retry clears the abandoned private directory from an interrupted publication. Configure the origin to serve `metadata/` and `targets/` through the live path and revalidate `timestamp.json` on each request. Mount imported media with `nodev,nosuid,noexec` and keep it read-only for intake. [Consistent snapshots](https://theupdateframework.github.io/specification/latest/#consistent-snapshots)
+
+Run `tests/check-os-release-packaging.py` with the reference TUF fixture environment and a verified development Host/Guest pair. It signs and publishes two disposable depots, verifies exact staging under standing policy for both roles, and checks rejection of a changed review, replaced artifact, and mismatched embedded Guest. Supply the client, artifact and evidence directories, VM runtime certificate, and a scratch directory on the same filesystem as the evidence. Run `tests/check-tuf-depot.py --client FILE --scratch-directory DIRECTORY` to exercise writer serialization, interruption, rollback, root rotation, and HTTPS intake against the published layout.
 
 ### Import the release
 

@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 GUEST_INVENTORY = "service-guest-boot-inventory.json"
 HOST_INVENTORY = "hypervisor-boot-inventory.json"
 INTAKE = runpy.run_path(str(Path(__file__).with_name("check-release-intake.py")))
+DEPOT = runpy.run_path(str(Path(__file__).with_name("check-tuf-depot.py")))
 
 
 def record(path):
@@ -94,7 +95,6 @@ def qualify(args, scratch, role):
     selected = json.loads((prepared / "selection.json").read_bytes())
     stem = INTAKE["target_prefix"](selected)
     depot = scratch / "depot"
-    depot.mkdir()
     targets = {name: TargetFile.from_dict(member, name) for name, member in
                json.loads((prepared / "target-records.json").read_bytes()).items()}
     assert targets.keys() == {f"{stem}-{name}" for name in names}
@@ -109,14 +109,11 @@ def qualify(args, scratch, role):
     owner, qualification, trial = (CryptoSigner.generate_ed25519() for _ in range(3))
     compatibility = "3" * 64
     keys = INTAKE["new_keys"]()
-    initial = scratch / "initial"
-    initial.mkdir()
-    INTAKE["publish"](initial, (1, 1), keys, now, {})
     scope = scratch / "scope"
     scope.mkdir(mode=0o700)
     trusted, policy, signature, key = (scope / name for name in
                                       ("trusted-root.json", "policy.json", "policy.sig", "owner.public"))
-    (initial / "metadata/1.root.json").rename(trusted)
+    trusted.write_bytes(DEPOT["root_bytes"](keys, now, 1))
     config = scratch / "depot.json"
     depot_digest = INTAKE["write_json"](config, {"transport": "local", "path": str(depot)})
     standing = {
@@ -186,13 +183,10 @@ def qualify(args, scratch, role):
         print("service-guest wrong qualification authority rejected", flush=True)
     proof.write_bytes(bytes.fromhex(qualification.sign(head_bytes).signature))
     invoke(seal)
-    (prepared / "targets").rename(depot / "targets")
-    for name, member in json.loads((packaged_channel / "target-records.json").read_bytes()).items():
-        target = TargetFile.from_dict(member, name)
-        filename = f"{target.hashes['sha256']}.{name}"
-        (packaged_channel / "targets" / filename).rename(depot / "targets" / filename)
-        targets[name] = target
-    INTAKE["publish"](depot, (1, 1), keys, now, targets)
+    packages = [prepared, packaged_channel]
+    signed = scratch / "signed"
+    DEPOT["signed_roles"](signed, packages, trusted, keys, now, (1, 1, 1))
+    assert DEPOT["invoke"](DEPOT["publish"](depot, trusted, signed, packages)).startswith(b"FVCA_TUF_DEPOT_PUBLISHED ")
     assert trusted.read_bytes() == (depot / "metadata/1.root.json").read_bytes()
     command = [args.client, "--discover-os-release", trusted, config, state, policy, signature, key]
     result = json.loads(invoke(command))
@@ -204,7 +198,7 @@ def qualify(args, scratch, role):
     for name in sorted(names):
         expected = targets[f"{stem}-{name}"]
         assert record(installed / name) == {"bytes": expected.length, "sha256": expected.hashes["sha256"]}
-    print(f"{role} independently authored channel and exact staging passed: {selected['manifest_sha256']}", flush=True)
+    print(f"{role} signed depot publication and exact staging passed: {selected['manifest_sha256']}", flush=True)
     if role == "service-guest":
         INTAKE["write_json"](request, document | {"sequence": 3, "release": None})
         withdrawal = json.loads(invoke(draft))
