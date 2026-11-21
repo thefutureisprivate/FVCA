@@ -1,6 +1,6 @@
 # FVCA OpenTofu provider
 
-The off-node provider `registry.opentofu.org/thefutureisprivate/fvca` version `0.6.0` implements the `fvca_guest_configuration_plan` data source and the `fvca_guest_configuration` resource for an enrolled Service Guest. The `fvca-appliance` module preflights typed CPU and memory settings by default. Set `manage_guest = true` to track the settings in OpenTofu and submit them on apply. Automatic release observations remain separate from the desired configuration revision.
+The off-node provider `registry.opentofu.org/thefutureisprivate/fvca` version `0.7.0` implements `fvca_guest_provisioning` for one-time Guest commissioning and `fvca_guest_configuration_plan` and `fvca_guest_configuration` for an existing Service Guest. The `fvca-appliance` module preflights typed CPU and memory settings by default. Set `manage_guest = true` to track the settings in OpenTofu and submit them on apply. Automatic release observations remain separate from the desired configuration revision.
 
 Use the `fvca_os_release` data source with the enrolled `host_id` and a `role` of `hypervisor` or `service-guest`. The data source reports the recorded active manifest and the last update check, including its candidate, staged digest and freshness. All release observations are computed fields. A superseded check is retained for diagnosis after the updater accepts a new checkpoint or reconciles a different active release.
 
@@ -45,6 +45,14 @@ tofu -chdir=opentofu/examples/plan plan -out=guest.tfplan
 
 The output identifies the Host and Guest, the boot-selected settings, the proposed settings, and the observed Host release. An already satisfied configuration reports activation `none`. Changed settings report `host-trial`.
 
+## Commission the initial Service Guest
+
+Enroll the Host with the signed managed commissioning policy and its dedicated provisioning submitter key. Stage the approved raw seed on the authenticated Host mirror and leave the registered Guest slot vacant. [Host commissioning and enrollment](../README.md#commission-the-initial-service-guest-disk)
+
+Set `initial_disk` to the approved Guest `bundle_sha256` (the Guest boot bundle's dm-verity root), `seed_sha256`, raw `disk_bytes`, `vcpus` and `memory_mib`. Leave `manage_guest` disabled until the operation reaches `ready`. Plan uses the enrolled read key to check the signed boot offer and bind its operation ID to an encrypted saved plan.
+
+For apply, supply `FVCA_PROVISION_OPERATOR_KEY_FILE` through the runner with its dedicated PKCS#8 Ed25519 key, owned by the runner with mode `0600`. Apply the saved plan within 15 minutes. The `provisioning_operation` output reports the ID and the last observed state. An accepted operation can report `pending` while the Host installs the disk and waits for Guest readiness. Refresh reads the same ID and reports `ready` once the Host has recorded that check. Keep `initial_disk` inputs in configuration. Later CPU and memory changes use `guest` and `manage_guest`.
+
 ## Submit a managed configuration
 
 Enable `manage_guest` and enroll a dedicated configuration submitter key on the Host. Generate an encrypted saved plan with the read key. At apply, supply `FVCA_APPLY_OPERATOR_KEY_FILE` through the runner using the same private-file requirements as the read credential. Apply the saved plan within 15 minutes.
@@ -55,6 +63,6 @@ tofu -chdir=opentofu/examples/plan apply guest.tfplan
 
 The broker validates the saved expected revision and returns a stable operation ID. A lost response or interrupted apply can be reconciled by reading that ID. The operation stays `pending-activation` until the Host receives the matching signed composition, trial and promotion approvals. A later refresh distinguishes `in-trial`, `active` and `superseded` and reports the boot-selected configuration separately. Independent OS release updates refresh observed release fields without replacing the resource or driving a settings submission.
 
-Keep the registered Guest and its Host identity in configuration. The provider refuses resource destroy and identity replacement. Boot-image signing, commissioning a new Guest, and retirement use their own authorities.
+Keep the registered Guest and its Host identity in configuration. The provider refuses resource destroy and identity replacement. Boot-image signing, initial commissioning, and retirement use their own authorities.
 
 Use the [off-node configuration handoff](../README.md#change-cpu-and-memory-through-a-standing-host-trial) to turn the pending operation into typed composer settings and a separately signed approval for the exact Host trial.

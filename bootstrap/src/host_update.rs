@@ -11,7 +11,7 @@ use std::process::Command;
 use fvca_trial_authorization::{
     GUEST_CAPTURE_LOCK, GUEST_OPERATION_LOCK, MANAGEMENT_INTENTS, MANAGEMENT_POLICY,
     MANAGEMENT_POLICY_BYTES, PEER_ENROLLMENT, PROMOTION_ENROLLMENT, management_binding,
-    peer_partitions,
+    peer_partitions, commissioning,
 };
 
 use crate::{invalid, run};
@@ -79,20 +79,11 @@ pub fn publish_management_enrollment(cmdline: &str) -> io::Result<()> {
                 "management intent state requires the authenticated Host pool",
             ));
         }
-        let directory = Path::new(MANAGEMENT_INTENTS);
-        match fs::DirBuilder::new().mode(0o700).create(directory) {
-            Ok(()) => File::open(state)?.sync_all()?,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
-            Err(error) => return Err(error),
-        }
-        if !private_directory(&directory.symlink_metadata()?, device) {
-            return Err(invalid("invalid private management intent directory"));
-        }
-        run(Command::new("/usr/bin/chcon").args([
-            "--no-dereference",
-            "system_u:object_r:fvca_management_intents_t:s0",
-            MANAGEMENT_INTENTS,
-        ]))?;
+        prepare_management_intents(Path::new(MANAGEMENT_INTENTS), device)?;
+    }
+    if Path::new(commissioning::OFFER).try_exists()? {
+        prepare_lock(Path::new(GUEST_CAPTURE_LOCK))?;
+        prepare_management_intents(Path::new(commissioning::QUEUE), fs::metadata(HOST_DATA)?.dev())?;
     }
     if let Err(error) = management_credentials() {
         eprintln!("FVCA_MANAGEMENT_CREDENTIALS_UNAVAILABLE {error}");
@@ -112,6 +103,20 @@ pub fn publish_management_enrollment(cmdline: &str) -> io::Result<()> {
     )?;
     println!("FVCA_MANAGEMENT_SOCKET_ENROLLED {address}");
     Ok(())
+}
+
+fn prepare_management_intents(directory: &Path, device: u64) -> io::Result<()> {
+    match fs::DirBuilder::new().mode(0o700).create(directory) {
+        Ok(()) => File::open(directory.parent().expect("management intents have a parent"))?.sync_all()?,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+        Err(error) => return Err(error),
+    }
+    if !private_directory(&directory.symlink_metadata()?, device) {
+        return Err(invalid("invalid private management intent directory"));
+    }
+    run(Command::new("/usr/bin/chcon")
+        .args(["--no-dereference", "system_u:object_r:fvca_management_intents_t:s0"])
+        .arg(directory))
 }
 
 fn private_management_file(meta: &fs::Metadata, device: u64) -> bool {

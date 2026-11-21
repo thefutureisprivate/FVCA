@@ -1132,6 +1132,10 @@ Compose the ordinary stable Host UKI with `--guest-boot`, `--guest-release-certi
 
 On boot the Host verifies the seed copy in a private Btrfs subvolume, flushes its identity to the commissioning journal, and moves it into the vacant registered slot. The Guest launch waits for installation and still requires separate Guest readiness. An interrupted install reconciles the same subvolume. Once the installation is durable, the Host retires the authorized seed. A later missing slot requires explicit recovery. The Host never mounts the Guest filesystem during commissioning.
 
+For OpenTofu-managed commissioning, also pass `--managed-guest-commissioning` and `--management-enrollment FILE`. Add a dedicated Ed25519 public key as `commission_operator_public_key` in the enrollment. Use a key distinct from the management read, configuration and attestation keys and from release and boot authorities. Supply the exact approved Guest verity root, seed SHA-256, byte length and machine settings to the [OpenTofu commissioning resource](opentofu/README.md#commission-the-initial-service-guest).
+
+The Host starts management while the Guest slot is vacant. After apply admits the signed offer, a fixed systemd unit starts the existing commissioning service. The durable operation stays `pending` until the Guest reaches startup readiness and answers the Guest agent check. A later boot with the same policy resumes the admitted operation. The installer checks whether the disk already exists before resuming. Inspect `fvca-commission-guest.service` and `fvca-service-guest.service` for a pending operation that fails to reach readiness.
+
 For KVM qualification, prepare two authenticated mirrors from the approved seed and a same-length copy with an altered byte. Compose a 4 KiB GPT Host slot against the original file and the lab's `host-storage.conf`. Enroll the Host signing certificate in a disposable OVMF variable store.
 
 ```sh

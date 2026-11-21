@@ -4,7 +4,7 @@ terraform {
   required_providers {
     fvca = {
       source  = "registry.opentofu.org/thefutureisprivate/fvca"
-      version = "= 0.6.0"
+      version = "= 0.7.0"
     }
   }
 }
@@ -31,6 +31,17 @@ variable "manage_guest" {
   default = false
 }
 
+variable "initial_disk" {
+  type = object({
+    bundle_sha256 = string
+    seed_sha256   = string
+    disk_bytes    = number
+    vcpus         = number
+    memory_mib    = number
+  })
+  default = null
+}
+
 provider "fvca" {
   address                = var.host.address
   server_name            = var.host.server_name
@@ -43,6 +54,11 @@ module "appliance" {
   host_id      = var.host.id
   guest        = var.guest
   manage_guest = var.manage_guest
+  initial_disk = var.initial_disk
+}
+
+output "provisioning_operation" {
+  value = module.appliance.provisioning_operation
 }
 
 output "active_configuration" {

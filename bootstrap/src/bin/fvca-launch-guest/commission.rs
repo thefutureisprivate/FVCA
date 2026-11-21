@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use fvca_initrd_bootstrap::{guest_boot::Commissioning, recovery};
+use fvca_trial_authorization::commissioning::{self, JOURNAL as JOB};
 
 use super::{
     ALIAS, CAPTURE_LOCK, Connection, File, MetadataExt, OPERATION_LOCK, OpenOptions, OpenOptionsExt, PID,
@@ -11,7 +12,32 @@ use super::{
 };
 use crate::{ATTACHMENT, VM_PARENT, require_pool_path};
 
-const JOB: &str = "/run/fvca/host-data/guest-commissioning";
+fn authorization() -> io::Result<Option<String>> {
+    let Some(offer) = optional_record(Path::new(commissioning::OFFER))? else { return Ok(None) };
+    commissioning::Offer::parse(&offer)?;
+    let queue = Path::new(commissioning::QUEUE);
+    require_pool_path(queue)?;
+    private_directory(queue)?;
+    if optional_record(&queue.join(commissioning::REQUEST))?.as_deref() != Some(&offer) {
+        return Err(invalid("the broker has not admitted this exact Guest provisioning offer"));
+    }
+    Ok(Some(offer))
+}
+
+pub(crate) fn record_readiness(bundle: &str) -> io::Result<()> {
+    let Some(offer) = authorization()? else { return Ok(()) };
+    let job = Path::new(JOB);
+    require_pool_path(job)?;
+    private_directory(job)?;
+    if optional_record(&job.join(commissioning::GUEST_READY))?.as_deref() == Some(&offer) {
+        return Ok(());
+    }
+    if commissioning::Offer::parse(&offer)?.seed.bundle != bundle || !installed(job)? {
+        return Err(invalid("the Service Guest did not reach the admitted provisioning state"));
+    }
+    publish(job, commissioning::GUEST_READY, &offer)?;
+    btrfs::sync(&crate::verify_pool()?)
+}
 
 fn require_disk(disk: File, policy: &Commissioning<'_>) -> io::Result<()> {
     if disk.metadata()?.len() != policy.bytes || recovery::sha256(disk)? != policy.digest {
@@ -168,7 +194,7 @@ fn launch_allowed(job: &Path, selected: Option<&str>) -> io::Result<()> {
 }
 
 pub(crate) fn require_installed() -> io::Result<()> {
-    let text = optional_record(Path::new(guest_boot::COMMISSIONING_RUNTIME))?;
+    let text = optional_record(Path::new(commissioning::SELECTION))?;
     let job = Path::new(JOB);
     match private_directory(job) {
         Err(error) if error.kind() == io::ErrorKind::NotFound && text.is_none() => return Ok(()),
@@ -179,7 +205,7 @@ pub(crate) fn require_installed() -> io::Result<()> {
 }
 
 pub(crate) fn run() -> io::Result<()> {
-    let text = optional_record(Path::new(guest_boot::COMMISSIONING_RUNTIME))?
+    let text = optional_record(Path::new(commissioning::SELECTION))?
         .ok_or_else(|| invalid("no verified Service Guest commissioning authorization"))?;
     let policy = Commissioning::parse(&text)?;
     let launch = fs::read_to_string(guest_boot::SELECTION)?;
@@ -189,6 +215,7 @@ pub(crate) fn run() -> io::Result<()> {
     }
     let _capture = wait_for_lease(Path::new(CAPTURE_LOCK))?;
     let _operation = super::lease(Path::new(OPERATION_LOCK))?;
+    authorization()?;
     let pool = crate::verify_pool()?;
     let job = Path::new(JOB);
     let vms = Path::new(VM_PARENT);

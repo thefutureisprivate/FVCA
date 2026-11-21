@@ -152,6 +152,8 @@ fn activate() -> io::Result<()> {
         guest_boot::Startup::AfterFirmwareRecovery
     } else if recovering {
         guest_boot::Startup::Disabled
+    } else if guest_boot::managed_commissioning()? {
+        guest_boot::Startup::AwaitProvisioning
     } else {
         guest_boot::Startup::Automatic
     };
@@ -184,7 +186,7 @@ fn activate() -> io::Result<()> {
             Err(error) => eprintln!("FVCA_TRIAL_REFUSED {error}"),
         }
         if !standing_candidate && !recovering && !Path::new("/run/fvca/boot-trial-started").try_exists()? {
-            guest_boot::publish_commissioning(guest.as_deref(), storage.is_some())?;
+            guest_boot::publish_commissioning(guest.as_deref(), storage.is_some(), &cmdline)?;
         }
     }
     if !recovering && let (Some(esp), Some(guest), Some(epoch)) = (esp, guest.as_deref(), epoch) {

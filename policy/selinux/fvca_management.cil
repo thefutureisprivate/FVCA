@@ -150,7 +150,9 @@
 (typeattributeset file_type (fvca_management_intents_t))
 (roletype object_r fvca_management_intents_t)
 (allow fvca_management_intents_t fs_t (filesystem (associate)))
-(allow init_t fvca_management_intents_t (dir (getattr open read relabelfrom relabelto search)))
+; systemd installs the path watch from the mount root down to the intent.
+(allow init_t fvca_host_data_t (dir (watch)))
+(allow init_t fvca_management_intents_t (dir (getattr open read relabelfrom relabelto search watch)))
 (allow fvca_management_broker_t fvca_management_intents_t (dir (add_name getattr open read remove_name search write)))
 
 (type fvca_management_intent_t)
@@ -159,7 +161,7 @@
 (allow fvca_management_intent_t fs_t (filesystem (associate)))
 (typetransition fvca_management_broker_t fvca_management_intents_t file fvca_management_intent_t)
 (allow fvca_management_broker_t fvca_management_intent_t (file (create getattr open read rename setattr unlink write)))
-(allow init_t fvca_management_intent_t (file (getattr open read)))
+(allow init_t fvca_management_intent_t (file (getattr open read watch)))
 
 (type fvca_attestation_socket_t)
 (typeattributeset file_type (fvca_attestation_socket_t))

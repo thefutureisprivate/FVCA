@@ -62,6 +62,7 @@ func (p *fvcaProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 func (p *fvcaProvider) DataSources(_ context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{
 		func() datasource.DataSource { return &guestConfigurationPlan{} },
+		func() datasource.DataSource { return &guestProvisioningPlan{} },
 		func() datasource.DataSource { return &osReleaseData{} },
 		func() datasource.DataSource { return &hostFirmware{} },
 		func() datasource.DataSource { return &hostFirmwareInventory{} },
@@ -69,5 +70,8 @@ func (p *fvcaProvider) DataSources(_ context.Context) []func() datasource.DataSo
 }
 
 func (p *fvcaProvider) Resources(_ context.Context) []func() resource.Resource {
-	return []func() resource.Resource{func() resource.Resource { return &guestConfiguration{} }}
+	return []func() resource.Resource{
+		func() resource.Resource { return &guestConfiguration{} },
+		func() resource.Resource { return &guestProvisioning{} },
+	}
 }

@@ -32,6 +32,7 @@ use tokio::time::{Instant, timeout_at};
 use tokio_rustls::TlsAcceptor;
 
 use crate::{Result, attestation, channel, guest_configuration, invalid, state};
+mod provisioning;
 use protocol::{Activation, Enrollment, Operation, Refusal, Request, Settings};
 
 const SOCKET: &str = "/run/fvca-management-broker/broker.sock";
@@ -233,6 +234,9 @@ enum Outcome {
         #[serde(flatten)]
         receipt: intent::Receipt,
     },
+    GuestProvisioning {
+        provisioning: provisioning::Receipt,
+    },
     BootQuote {
         evidence: attestation::Evidence,
     },
@@ -345,6 +349,14 @@ async fn dispatch(
         Operation::InspectConfiguration { operation_id } => {
             let receipt = intent::status(enrollment, operation_id)?;
             Ok(Outcome::ConfigurationOperation { receipt })
+        }
+        Operation::GuestProvisioning {} => {
+            let provisioning = provisioning::inspect(enrollment)?;
+            Ok(Outcome::GuestProvisioning { provisioning })
+        }
+        Operation::ApplyGuestProvisioning { plan } => {
+            let provisioning = provisioning::submit(enrollment, plan, packet)?;
+            Ok(Outcome::GuestProvisioning { provisioning })
         }
         Operation::Status {} => {
             let active = HostState::read().map_err(|_| Refusal::HostStateUnavailable)?;

@@ -1,0 +1,14 @@
+[Unit]
+Description=Dispatch the admitted initial Service Guest operation once per Host boot
+Wants=fvca-service-guest.service
+After=fvca-service-guest.service
+AssertPathExists=/run/fvca/guest-provisioning-offer
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/true
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes

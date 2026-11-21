@@ -3,8 +3,11 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
+use fvca_trial_authorization::{commissioning, guest_config};
+pub use fvca_trial_authorization::commissioning::Seed as Commissioning;
 pub use fvca_trial_authorization::guest::{
     BOOT, FILES, SELECTION, SERVICE_GUEST_UUID, Selection, TRIAL_ENROLLMENT, parse,
 };
@@ -16,57 +19,58 @@ const SIGNATURE: &str = "/usr/lib/fvca/guest-launch.p7s";
 const TRIAL_KEY: &str = "/usr/lib/fvca/guest-trial-key";
 const BASE_EPOCH: &str = "/usr/lib/fvca/guest-base-epoch";
 const COMMISSIONING: &str = "/usr/lib/fvca/guest-commissioning";
-pub const COMMISSIONING_RUNTIME: &str = "/run/fvca/guest-commissioning";
+const MANAGED: &str = "/usr/lib/fvca/guest-commissioning-managed";
+const PROVISIONING_POLICY: &str = "/usr/lib/fvca/guest-provisioning-policy-v1";
+const CONTROL: &str = "/run/systemd/system";
+const DISPATCH: &str = "fvca-commissioning-dispatch.path";
 
-pub struct Commissioning<'a> {
-    pub bundle: &'a str,
-    pub bytes: u64,
-    pub digest: &'a str,
+fn publish_private(path: &str, data: &str) -> io::Result<()> {
+    fs::OpenOptions::new().create_new(true).write(true).mode(0o600)
+        .open(path)?.write_all(data.as_bytes())
 }
 
-impl<'a> Commissioning<'a> {
-    pub fn parse(text: &'a str) -> io::Result<Self> {
-        let invalid_record = || invalid("invalid signed Service Guest commissioning record");
-        let mut lines = text.split_terminator('\n');
-        if !text.ends_with('\n') || lines.next() != Some("FVCA-GUEST-COMMISSIONING-1")
-            || lines.next().and_then(|line| line.strip_prefix("guest=")).map(str::as_bytes)
-                != Some(SERVICE_GUEST_UUID.to_bytes())
-        {
-            return Err(invalid_record());
-        }
-        let mut field = |prefix| lines.next().and_then(|line| line.strip_prefix(prefix)).ok_or_else(invalid_record);
-        let bundle = runtime::hash(field("bundle=")?)?;
-        let size = field("bytes=")?;
-        let bytes = size.parse::<u64>().map_err(|_| invalid_record())?;
-        let digest = runtime::hash(field("seed_sha256=")?)?;
-        if lines.next().is_some() || size != bytes.to_string() || bytes == 0 || bytes > i64::MAX as u64
-            || !bytes.is_multiple_of(512)
-        {
-            return Err(invalid_record());
-        }
-        Ok(Self { bundle, bytes, digest })
-    }
+pub fn managed_commissioning() -> io::Result<bool> {
+    Path::new(MANAGED).try_exists()
 }
 
-pub fn publish_commissioning(bundle: Option<&str>, authenticated: bool) -> io::Result<()> {
+pub fn publish_commissioning(bundle: Option<&str>, authenticated: bool, cmdline: &str) -> io::Result<()> {
     let file = match fs::File::open(COMMISSIONING) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !managed_commissioning()? => return Ok(()),
         result => result?,
     };
     let mut text = String::new();
-    file.take(512).read_to_string(&mut text)?;
+    file.take(commissioning::LIMIT as u64 + 1).read_to_string(&mut text)?;
     let selection = Commissioning::parse(&text)?;
-    if text.len() == 512 || !authenticated || bundle != Some(selection.bundle) {
+    if text.len() > commissioning::LIMIT || !authenticated || bundle != Some(selection.bundle) {
         return Err(invalid("commissioning requires the selected Guest and authenticated Host storage"));
     }
-    fs::OpenOptions::new().create_new(true).write(true).mode(0o600)
-        .open(COMMISSIONING_RUNTIME)?.write_all(text.as_bytes())?;
-    let dropin = Path::new("/run/systemd/system/fvca-service-guest.service.d");
-    fs::create_dir_all(dropin)?;
+    publish_private(commissioning::SELECTION, &text)?;
+    let control = Path::new(CONTROL);
+    let dropin = control.join("fvca-service-guest.service.d");
+    fs::create_dir_all(&dropin)?;
     fs::write(
         dropin.join("10-commissioning.conf"),
         "[Unit]\nRequires=fvca-commission-guest.service\nAfter=fvca-commission-guest.service\n",
-    )
+    )?;
+    if managed_commissioning()? {
+        let marker = fs::symlink_metadata(PROVISIONING_POLICY)?;
+        if !marker.is_file() || marker.len() != 0 {
+            return Err(invalid("the verified Host lacks the provisioning watch policy"));
+        }
+        let mut host = String::new();
+        fs::File::open(MANAGED)?.take(38).read_to_string(&mut host)?;
+        let host = host.strip_suffix('\n').ok_or_else(|| invalid("invalid provisioning enrollment"))?;
+        let binding = guest_config::binding(cmdline)?;
+        let offer = commissioning::Offer::record(host, binding.as_ref(), crate::guest_resources::active()?, &text)?;
+        publish_private(commissioning::OFFER, &offer)?;
+        let wants = control.join("fvca-base.target.wants");
+        fs::create_dir_all(&wants)?;
+        symlink(format!("/usr/lib/systemd/system/{DISPATCH}"), wants.join(DISPATCH))?;
+        let broker = control.join("fvca-management-broker.service.d");
+        fs::create_dir_all(&broker)?;
+        fs::write(broker.join("30-provisioning.conf"), format!("[Unit]\nRequires={DISPATCH}\nAfter={DISPATCH}\n"))?;
+    }
+    Ok(())
 }
 
 fn publish_trial_enrollment() -> io::Result<()> {
@@ -94,6 +98,7 @@ fn publish_trial_enrollment() -> io::Result<()> {
 
 pub enum Startup {
     Automatic,
+    AwaitProvisioning,
     AfterFirmwareRecovery,
     Disabled,
 }
@@ -130,7 +135,10 @@ pub fn activate_if_selected(
         return Ok(Some(bundle));
     }
     publish_trial_enrollment()?;
-    let control = Path::new("/run/systemd/system");
+    if matches!(startup, Startup::AwaitProvisioning) {
+        return Ok(Some(bundle));
+    }
+    let control = Path::new(CONTROL);
     if matches!(startup, Startup::AfterFirmwareRecovery) {
         let dropin = control.join("fvca-firmware-recovery.service.d");
         fs::create_dir_all(&dropin)?;
@@ -151,7 +159,7 @@ pub fn activate_if_selected(
             "ExecStartPre=/usr/bin/systemctl --quiet is-active fvca-service-guest.service\n",
         ),
     )?;
-    std::os::unix::fs::symlink(
+    symlink(
         "/usr/lib/systemd/system/fvca-service-guest.service",
         wants.join("fvca-service-guest.service"),
     )?;

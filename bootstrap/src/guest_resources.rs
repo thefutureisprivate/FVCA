@@ -15,7 +15,6 @@ const RUNTIME_SUPPORT: &str = "/sysroot/usr/lib/fvca/guest-vm-settings-v2";
 const O_NOFOLLOW: i32 = 0o400000;
 const O_NONBLOCK: i32 = 0o4000;
 
-#[cfg(feature = "libvirt")]
 pub fn active() -> io::Result<Resources> {
     Ok(bound_record(
         Path::new(ACTIVE),

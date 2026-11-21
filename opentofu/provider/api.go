@@ -167,23 +167,24 @@ type release struct {
 }
 
 type response struct {
-	Schema                string           `json:"schema"`
-	Nonce                 string           `json:"nonce"`
-	Host                  string           `json:"host"`
-	Guest                 string           `json:"guest"`
-	Result                string           `json:"result"`
-	Code                  string           `json:"code"`
-	BootConfiguration     *settings        `json:"boot_configuration"`
-	ConfigurationEnrolled *bool            `json:"configuration_enrolled"`
-	HostTrial             *bool            `json:"host_trial"`
-	Observed              *release         `json:"observed_release"`
-	OSRelease             *osReleaseStatus `json:"os_release"`
-	Firmware              *firmwareStatus  `json:"firmware"`
-	Inventory             *inventoryPage   `json:"inventory"`
-	Configuration         *settings        `json:"configuration"`
-	Activation            string           `json:"activation"`
-	OperationID           string           `json:"operation_id"`
-	OperationState        string           `json:"state"`
+	Schema                string               `json:"schema"`
+	Nonce                 string               `json:"nonce"`
+	Host                  string               `json:"host"`
+	Guest                 string               `json:"guest"`
+	Result                string               `json:"result"`
+	Code                  string               `json:"code"`
+	BootConfiguration     *settings            `json:"boot_configuration"`
+	ConfigurationEnrolled *bool                `json:"configuration_enrolled"`
+	HostTrial             *bool                `json:"host_trial"`
+	Observed              *release             `json:"observed_release"`
+	OSRelease             *osReleaseStatus     `json:"os_release"`
+	Firmware              *firmwareStatus      `json:"firmware"`
+	Inventory             *inventoryPage       `json:"inventory"`
+	Configuration         *settings            `json:"configuration"`
+	Activation            string               `json:"activation"`
+	OperationID           string               `json:"operation_id"`
+	OperationState        string               `json:"state"`
+	Provisioning          *provisioningReceipt `json:"provisioning"`
 }
 
 type request struct {
@@ -265,6 +266,9 @@ func (c *client) signedExchange(ctx context.Context, host, guest string, operati
 			return response{}, errors.New("Host live firmware inventory is unavailable")
 		case "os-release-status-unavailable":
 			return response{}, errors.New("Host OS release observation is unavailable")
+		case "guest-provisioning-unavailable", "stale-guest-provisioning",
+			"expired-guest-provisioning-plan", "guest-provisioning-storage-unavailable":
+			return response{}, fmt.Errorf("Host refused Guest provisioning (%s)", got.Code)
 		case "outside-machine-profile", "configuration-authority-unavailable", "configuration-exhausted",
 			"host-state-unavailable", "expired-configuration-plan", "invalid-configuration-plan",
 			"configuration-operation-pending", "lifecycle-busy", "outside-host-capacity":

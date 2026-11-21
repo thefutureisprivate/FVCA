@@ -27,6 +27,7 @@ pub(super) struct Enrollment {
     pub tls_certificate_sha256: String,
     operator_public_key: String,
     pub apply_operator_public_key: Option<String>,
+    pub(super) commission_operator_public_key: Option<String>,
     pub(super) attestation_operator_public_key: Option<String>,
 }
 
@@ -53,6 +54,16 @@ impl Enrollment {
                     !valid_digest(key)
                         || key == &self.operator_public_key
                         || Some(key) == self.apply_operator_public_key.as_ref()
+                        || key.bytes().all(|byte| byte == b'0')
+                })
+            || self
+                .commission_operator_public_key
+                .as_ref()
+                .is_some_and(|key| {
+                    !valid_digest(key)
+                        || key == &self.operator_public_key
+                        || Some(key) == self.apply_operator_public_key.as_ref()
+                        || Some(key) == self.attestation_operator_public_key.as_ref()
                         || key.bytes().all(|byte| byte == b'0')
                 })
         {
@@ -109,6 +120,10 @@ pub(super) enum Operation {
     },
     ApplyConfiguration {
         plan: Plan,
+    },
+    GuestProvisioning {},
+    ApplyGuestProvisioning {
+        plan: super::provisioning::Plan,
     },
     #[serde(rename = "configuration-operation")]
     InspectConfiguration {
@@ -178,6 +193,10 @@ pub(super) fn authorize(enrollment: &Enrollment, packet: &[u8], now: u64) -> Res
             .apply_operator_public_key
             .as_deref()
             .ok_or_else(|| invalid("the Host has no management configuration submitter"))?,
+        Operation::ApplyGuestProvisioning { .. } => enrollment
+            .commission_operator_public_key
+            .as_deref()
+            .ok_or_else(|| invalid("the Host has no Guest provisioning submitter"))?,
         Operation::BootQuote { .. } => enrollment
             .attestation_operator_public_key
             .as_deref()
@@ -191,6 +210,7 @@ pub(super) fn authorize(enrollment: &Enrollment, packet: &[u8], now: u64) -> Res
         | Operation::HostLocalCaptures { .. }
         | Operation::HostLocalCapture { .. }
         | Operation::Preflight { .. }
+        | Operation::GuestProvisioning {}
         | Operation::InspectConfiguration { .. } => &enrollment.operator_public_key,
     };
     channel::verify(
@@ -255,6 +275,10 @@ pub(super) enum Refusal {
     UnknownConfigurationOperation,
     LifecycleBusy,
     OutsideHostCapacity,
+    GuestProvisioningUnavailable,
+    StaleGuestProvisioning,
+    ExpiredGuestProvisioningPlan,
+    GuestProvisioningStorageUnavailable,
     BootQuoteUnavailable,
     HostStorageHealthUnavailable,
     HostBackupStatusUnavailable,
@@ -457,6 +481,7 @@ mod tests {
         let reader = key()?;
         let submitter = key()?;
         let verifier = key()?;
+        let provisioner = key()?;
         let host = "367f5cbc-c46a-437d-af72-5d96d805d234";
         let mut enrollment: Enrollment = serde_json::from_value(json!({
             "schema": "fvca-hypervisor-management-v1",
@@ -465,6 +490,7 @@ mod tests {
             "operator_public_key": hex::encode(reader.public_key().as_ref()),
             "apply_operator_public_key": hex::encode(submitter.public_key().as_ref()),
             "attestation_operator_public_key": hex::encode(verifier.public_key().as_ref()),
+            "commission_operator_public_key": hex::encode(provisioner.public_key().as_ref()),
         }))?;
         enrollment.validate()?;
         let request = |operation, key: &Ed25519KeyPair| -> Result<Vec<u8>> {
@@ -481,6 +507,10 @@ mod tests {
             "vcpus": 3, "memory_mib": 2560, "planned_at": 5, "plan_expires": 300,
         }});
         let read = json!({"type": "configuration-operation", "operation_id": "d".repeat(64)});
+        let offer = json!({"type": "guest-provisioning"});
+        let commission = json!({"type": "apply-guest-provisioning", "plan": {
+            "operation_id": "a".repeat(64), "planned_at": 5, "plan_expires": 300,
+        }});
         let health = json!({"type": "host-storage-health"});
         let backup = json!({"type": "host-backup-status"});
         let firmware = json!({"type": "host-firmware-status"});
@@ -495,9 +525,21 @@ mod tests {
             authorize(&enrollment, &write, 20)?.operation,
             Operation::ApplyConfiguration { .. }
         ));
+        assert!(matches!(
+            authorize(&enrollment, &request(offer.clone(), &reader)?, 20)?.operation,
+            Operation::GuestProvisioning {}
+        ));
+        assert!(authorize(&enrollment, &request(offer, &provisioner)?, 20).is_err());
+        for other in [&reader, &submitter, &verifier] {
+            assert!(authorize(&enrollment, &request(commission.clone(), other)?, 20).is_err());
+        }
+        assert!(matches!(
+            authorize(&enrollment, &request(commission, &provisioner)?, 20)?.operation,
+            Operation::ApplyGuestProvisioning { .. }
+        ));
         assert!(authorize(&enrollment, &request(read.clone(), &submitter)?, 20).is_err());
         assert!(authorize(&enrollment, &request(read.clone(), &verifier)?, 20).is_err());
-        for other in [&submitter, &verifier] {
+        for other in [&submitter, &verifier, &provisioner] {
             assert!(authorize(&enrollment, &request(health.clone(), other)?, 20).is_err());
             assert!(authorize(&enrollment, &request(backup.clone(), other)?, 20).is_err());
             assert!(authorize(&enrollment, &request(firmware.clone(), other)?, 20).is_err());
@@ -562,6 +604,9 @@ mod tests {
         assert!(enrollment.validate().is_err());
         enrollment.attestation_operator_public_key = None;
         assert!(authorize(&enrollment, &quote, 20).is_err());
+        enrollment.commission_operator_public_key = enrollment.apply_operator_public_key.clone();
+        assert!(enrollment.validate().is_err());
+        enrollment.commission_operator_public_key = None;
         enrollment.apply_operator_public_key = None;
         assert!(authorize(&enrollment, &write, 20).is_err());
         enrollment.apply_operator_public_key = Some(enrollment.operator_public_key.clone());

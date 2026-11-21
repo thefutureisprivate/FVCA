@@ -1,6 +1,7 @@
 [Unit]
 Description=Report a failed normal FVCA Service Guest launch
 ConditionPathExists=!/run/fvca/host-data/captures/restores/active
+ConditionPathExists=!/run/fvca/guest-provisioning-offer
 
 [Service]
 Type=oneshot

@@ -1,0 +1,7 @@
+[Unit]
+Description=Watch for the admitted initial Service Guest operation
+AssertPathExists=/run/fvca/guest-provisioning-offer
+AssertPathIsMountPoint=/run/fvca/host-data
+
+[Path]
+PathExists=/run/fvca/host-data/guest-provisioning/request

@@ -24,7 +24,8 @@ from image_verity import read_layout
 from runtime_boot import (
     DIRECT_BOOT_FILES, DISABLE_AUTOMATIC_EXTENSIONS, GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_CHANGE_SUPPORT,
     GUEST_COMMISSIONING, GUEST_COMMISSIONING_SUPPORT, GUEST_CONFIG_KEY, GUEST_CONFIG_KEY_ARGUMENT,
-    GUEST_LAUNCH_FILES, GUEST_VM_SETTINGS,
+    GUEST_LAUNCH_FILES, GUEST_MANAGED_COMMISSIONING, GUEST_PROVISIONING_POLICY, GUEST_PROVISIONING_SUPPORT,
+    GUEST_VM_SETTINGS,
     GUEST_VM_SUPPORT, HOST_NETWORK_ARGUMENT, HOST_NETWORK_POLICY, HOST_NETWORK_SUPPORT,
     HOST_WORKLOAD_ARGUMENT, HOST_WORKLOAD_GUEST, HOST_WORKLOAD_POLICY, HOST_WORKLOAD_SUPPORT,
     MANAGEMENT_ADDRESS_ARGUMENT, MANAGEMENT_ARGUMENT, MANAGEMENT_POLICY,
@@ -356,7 +357,7 @@ def management_selection(args, authorities):
         "schema", "host", "address", "gateway_uid", "gateway_gid",
         "tls_certificate_sha256", "operator_public_key",
     }
-    optional = {"apply_operator_public_key", "attestation_operator_public_key"}
+    optional = {"apply_operator_public_key", "attestation_operator_public_key", "commission_operator_public_key"}
     if (not isinstance(policy, dict)
             or not required <= policy.keys() <= required | optional
             or policy["schema"] != "fvca-hypervisor-management-v1"):
@@ -380,6 +381,8 @@ def management_selection(args, authorities):
         raise ValueError("invalid management gateway account")
     if "apply_operator_public_key" in policy and args.guest_configuration_public_key is None:
         raise ValueError("management submission requires an enrolled Guest configuration signing authority")
+    if args.managed_guest_commissioning and "commission_operator_public_key" not in policy:
+        raise ValueError("managed commissioning requires a dedicated provisioning submitter")
     operator_fields = ("operator_public_key", *sorted(optional & policy.keys()))
     for field in ("tls_certificate_sha256", *operator_fields):
         value = policy[field]
@@ -492,6 +495,7 @@ def assemble(args, work):
     forbidden = tuple(f"usr/lib/fvca/{name}" for name in (
         "hypervisor.composition", "vm-runtime.p7s", "host-storage",
         *WORKLOAD_TRUST_FILES, *WORKLOAD_CHANNEL_FILES, *DIRECT_BOOT_FILES, *GUEST_LAUNCH_FILES, GUEST_COMMISSIONING,
+        GUEST_MANAGED_COMMISSIONING,
         *BACKUP_FILES, BACKUP_JOB_FILE,
         RESTORE_FILE, RETENTION_FILE, hypervisor_gpt.MANIFEST, hypervisor_gpt.ROOT_SIGNATURE, TRIAL_FILE,
         TRIAL_CANDIDATE_FILE, TRIAL_WATCHDOG_FILE, PROMOTION_KEY, STANDING_TRIAL_KEY,
@@ -607,10 +611,18 @@ def assemble(args, work):
         watchdog = ((TRIAL_WATCHDOG_FILE, deadline.encode("ascii")),)
         watchdog_arguments = (f"{TRIAL_WATCHDOG_ARGUMENT}={args.boot_trial_watchdog_seconds}",)
     if args.guest_commissioning_seed is not None:
-        unit = runtime_work / "tree" / vm_runtime.GUEST_COMMISSIONING_UNIT
-        expected = Path(__file__).resolve().parent.parent / "vm-runtime/mkosi.extra" / vm_runtime.GUEST_COMMISSIONING_UNIT
-        if unit.is_symlink() or not unit.is_file() or unit.read_bytes() != expected.read_bytes():
-            raise ValueError("the verified VM runtime lacks the reviewed commissioning service")
+        units = (vm_runtime.GUEST_COMMISSIONING_UNIT,)
+        if args.managed_guest_commissioning:
+            units += vm_runtime.GUEST_PROVISIONING_UNITS
+            marker = runtime_work / "tree" / GUEST_PROVISIONING_SUPPORT
+            if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
+                raise ValueError("the verified VM runtime lacks managed commissioning support")
+            required += (str(GUEST_PROVISIONING_POLICY), str(GUEST_PROVISIONING_SUPPORT))
+        for unit in units:
+            actual = runtime_work / "tree" / unit
+            expected = Path(__file__).resolve().parent.parent / "vm-runtime/mkosi.extra" / unit
+            if actual.is_symlink() or not actual.is_file() or actual.read_bytes() != expected.read_bytes():
+                raise ValueError(f"the verified VM runtime lacks the reviewed commissioning unit {unit.name}")
         required += (GUEST_COMMISSIONING_SUPPORT,)
     verify_initrd(args.initrd, uname, required, forbidden, "Hypervisor")
     extra = (("host-storage", storage.raw),) if storage is not None else ()
@@ -626,6 +638,9 @@ def assemble(args, work):
                                                         candidate=True)
     authorities = approval_keys(args)
     management, management_arguments, operators = management_selection(args, authorities)
+    if args.managed_guest_commissioning:
+        host = json.loads(management[0][1])["host"]
+        commissioning += ((GUEST_MANAGED_COMMISSIONING, f"{host}\n".encode("ascii")),)
     network, network_arguments = network_selection(args, management, backup)
     guest_cmdline = (work / "guest/tree/cmdline").read_text(encoding="ascii") if guest else ""
     workload, workload_arguments = host_workload.selection(args.workload_uplink, guest_cmdline, network)
@@ -682,6 +697,8 @@ def main():
     parser.add_argument("--guest-boot", type=Path, help="verified Guest boot bundle disk to authorize")
     parser.add_argument("--guest-commissioning-seed", type=Path,
                         help="authorize one initial Service Guest raw disk by its size and digest")
+    parser.add_argument("--managed-guest-commissioning", action="store_true",
+                        help="wait for the enrolled provisioning operator before commissioning the Guest")
     parser.add_argument("--guest-release-certificate", type=Path, help="trusted Guest release signer")
     parser.add_argument("--guest-vm-settings", type=Path, help="typed Service Guest CPU and RAM settings for this Host UKI")
     parser.add_argument("--guest-configuration-public-key", type=Path,
@@ -728,6 +745,8 @@ def main():
     for member in ("a", "b"):
         parser.add_argument(f"--tpm-token-{member}", type=Path, help=f"exported LUKS2 token for member {member}")
     args = parser.parse_args()
+    if args.managed_guest_commissioning and (args.guest_commissioning_seed is None or args.management_enrollment is None):
+        parser.error("managed commissioning requires an authorized seed and management enrollment")
     if args.guest_commissioning_seed is not None and (
         args.guest_boot is None or args.restore_authorization is not None
         or args.boot_trial is not None or args.boot_trial_candidate is not None

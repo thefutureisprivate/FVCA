@@ -263,6 +263,7 @@ fn start(connection: &Connection, events: &EventLoop, selection: &guest_boot::Se
     let domain = connection.start_registered(xml)?;
     if let Err(error) = wait_for_boot(&domain, selection.runtime, events, timeout)
         .and_then(|()| capture::live::record_launch(selection.bundle))
+        .and_then(|()| capture::commission::record_readiness(selection.bundle))
     {
         if let Err(cleanup) = domain.destroy() {
             eprintln!("FVCA could not stop the failed Guest: {cleanup}");

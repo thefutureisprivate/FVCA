@@ -8,6 +8,7 @@ use std::net::{IpAddr, SocketAddr};
 
 pub mod backup_job;
 pub mod capture;
+pub mod commissioning;
 pub mod efi;
 pub mod firmware;
 pub mod guest;
