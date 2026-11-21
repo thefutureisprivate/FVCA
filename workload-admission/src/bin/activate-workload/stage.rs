@@ -1,23 +1,27 @@
 //! Publish a verified inactive workload bundle on the selected Guest Btrfs pool.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
-use fvca_workload_admission::{Trust, VerifiedTransition, verify_transition};
-
-use super::{
-    BUNDLE, GUEST_DATA, MOUNTED_AUTHORIZATION, Result, private_directory, read_trust,
-    require_guest_data,
+use fvca_workload_admission::{
+    Trust, VerifiedTransition, VerifiedWorkload, verify, verify_committed, verify_transition_from,
 };
 
-const UPDATE_DIRECTORY: &str = "workload-updates";
+use super::{
+    BUNDLE, MOUNTED_AUTHORIZATION, Result, private_directory, read_trust, require_guest_data,
+};
+
+pub(super) const STORE: &str = "/run/fvca/guest-data/workload-updates";
 const INCOMING: &str = "incoming";
-const STAGED: &str = "staged";
+pub(super) const STAGED: &str = "staged";
+pub(super) const SELECTED: &str = "selected";
+pub(super) const TRIAL: &str = "trial";
 const CANDIDATE: &str = "candidate";
 const GRANT: &str = "transition.json";
 const PROOF: &str = "transition.p7s";
+const ATTEMPT: &str = "last-attempt";
 const BUNDLE_FILES: [&str; 8] = [
     "authorization.json",
     "authorization.p7s",
@@ -48,7 +52,7 @@ fn private_file(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn pool_directory(path: &Path, device: u64) -> io::Result<File> {
+pub(super) fn pool_directory(path: &Path, device: u64) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
@@ -91,13 +95,13 @@ fn exact_entries(path: &Path, names: &[&str]) -> io::Result<()> {
     Ok(())
 }
 
-fn verify_and_sync(
-    path: &Path,
-    current: &Path,
-    mounted: &str,
-    trust: &Trust,
-    device: u64,
-) -> Result<VerifiedTransition> {
+struct Bundle {
+    directory: File,
+    candidate: File,
+    files: Vec<File>,
+}
+
+fn open_bundle(path: &Path, device: u64) -> io::Result<Bundle> {
     let directory = pool_directory(path, device)?;
     exact_entries(path, &[CANDIDATE, GRANT, PROOF])?;
     let candidate = path.join(CANDIDATE);
@@ -111,23 +115,75 @@ fn verify_and_sync(
     let proof = path.join(PROOF);
     files.push(pool_file(&grant, device)?);
     files.push(pool_file(&proof, device)?);
-    let transition = verify_transition(current, &candidate, &grant, &proof, trust)?;
+    Ok(Bundle {
+        directory,
+        candidate: candidate_dir,
+        files,
+    })
+}
+
+pub(super) fn verify_selection(
+    store: &Path,
+    trust: &Trust,
+    device: u64,
+) -> Result<VerifiedWorkload> {
+    let selected = store.join(SELECTED);
+    if directory_present(store)? {
+        pool_directory(store, device)?;
+        if directory_present(&selected)? {
+            open_bundle(&selected, device)?;
+            return verify_committed(
+                &selected.join(CANDIDATE),
+                &selected.join(GRANT),
+                &selected.join(PROOF),
+                trust,
+            );
+        }
+    }
+    private_directory(BUNDLE)?;
+    verify(Path::new(BUNDLE), trust)
+}
+
+pub(super) fn selected_bundle(store: &Path) -> io::Result<std::path::PathBuf> {
+    let selected = store.join(SELECTED);
+    Ok(if directory_present(&selected)? {
+        selected.join(CANDIDATE)
+    } else {
+        Path::new(BUNDLE).to_path_buf()
+    })
+}
+
+pub(super) fn verify_staged(
+    store: &Path,
+    path: &Path,
+    mounted: &str,
+    trust: &Trust,
+    device: u64,
+) -> Result<VerifiedTransition> {
+    let bundle = open_bundle(path, device)?;
+    let transition = verify_transition_from(
+        || verify_selection(store, trust, device),
+        &path.join(CANDIDATE),
+        &path.join(GRANT),
+        &path.join(PROOF),
+        trust,
+    )?;
     if transition.current.authorization_digest() != mounted {
         return Err(io::Error::other(
             "the workload transition differs from the mounted authorization",
         )
         .into());
     }
-    for file in files {
+    for file in bundle.files {
         file.sync_all()?;
     }
-    candidate_dir.sync_all()?;
-    directory.sync_all()?;
+    bundle.candidate.sync_all()?;
+    bundle.directory.sync_all()?;
     transition.require_fresh()?;
     Ok(transition)
 }
 
-fn directory_present(path: &Path) -> io::Result<bool> {
+pub(super) fn directory_present(path: &Path) -> io::Result<bool> {
     match private_directory(path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -139,7 +195,6 @@ fn directory_present(path: &Path) -> io::Result<bool> {
 // take the workload lifecycle lease before accessing these fixed directories.
 fn prepare(
     store: &Path,
-    current: &Path,
     mounted: &str,
     trust: &Trust,
     device: u64,
@@ -158,7 +213,7 @@ fn prepare(
         (false, true) => false,
     };
     let path = if publish { &incoming } else { &staged };
-    let transition = verify_and_sync(path, current, mounted, trust, device)?;
+    let transition = verify_staged(store, path, mounted, trust, device)?;
     if publish {
         fs::rename(&incoming, &staged).map_err(|error| {
             io::Error::other(format!(
@@ -170,25 +225,77 @@ fn prepare(
     Ok(Some((transition, publish)))
 }
 
+fn read_identity(file: io::Result<File>) -> io::Result<Option<String>> {
+    let mut mounted = String::new();
+    match file {
+        Ok(file) => file.take(73).read_to_string(&mut mounted)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    mounted
+        .strip_suffix('\n')
+        .filter(|digest| {
+            digest.strip_prefix("sha256:").is_some_and(|hash| {
+                hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+        })
+        .map(|digest| Some(digest.to_owned()))
+        .ok_or_else(|| io::Error::other("invalid workload digest receipt"))
+}
+
+pub(super) fn mounted_authorization() -> io::Result<Option<String>> {
+    read_identity(private_file(Path::new(MOUNTED_AUTHORIZATION)))
+}
+
+pub(super) fn attempted(store: &Path, device: u64) -> io::Result<Option<String>> {
+    read_identity(pool_file(&store.join(ATTEMPT), device))
+}
+
+pub(super) fn record_attempt(store: &Path, directory: &File, approval: &str) -> io::Result<()> {
+    let temporary = store.join(".last-attempt.new");
+    super::remove_missing(fs::remove_file(&temporary))?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    writeln!(file, "{approval}")?;
+    file.sync_all()?;
+    fs::rename(temporary, store.join(ATTEMPT))?;
+    directory.sync_all()
+}
+
+pub(super) fn discard_trial(store: &Path, device: u64) -> io::Result<()> {
+    let directory = pool_directory(store, device)?;
+    let trial = store.join(TRIAL);
+    pool_directory(&trial, device)?;
+    let candidate = trial.join(CANDIDATE);
+    if directory_present(&candidate)? {
+        pool_directory(&candidate, device)?;
+        for name in BUNDLE_FILES {
+            super::remove_missing(fs::remove_file(candidate.join(name)))?;
+        }
+        fs::remove_dir(candidate)?;
+    }
+    for name in [GRANT, PROOF] {
+        super::remove_missing(fs::remove_file(trial.join(name)))?;
+    }
+    fs::remove_dir(trial)?;
+    directory.sync_all()
+}
+
 pub(super) fn run() -> Result<()> {
     // The stage service sees a read-only view of the pool except for its store.
     let data = require_guest_data("nodev,nosuid,noexec")?;
-    let mut mounted = String::new();
-    private_file(Path::new(MOUNTED_AUTHORIZATION))?
-        .take(73)
-        .read_to_string(&mut mounted)?;
-    let digest = mounted
-        .strip_suffix('\n')
-        .filter(|digest| digest.len() == 71)
-        .ok_or_else(|| io::Error::other("invalid mounted workload authorization receipt"))?;
+    let digest = mounted_authorization()?
+        .ok_or_else(|| io::Error::other("missing mounted workload authorization receipt"))?;
 
-    if let Some((stage, published)) = prepare(
-        &Path::new(GUEST_DATA).join(UPDATE_DIRECTORY),
-        Path::new(BUNDLE),
-        digest,
-        &read_trust()?,
-        data.dev(),
-    )? {
+    if let Some((stage, published)) =
+        prepare(Path::new(STORE), &digest, &read_trust()?, data.dev())?
+    {
         println!(
             "FVCA_WORKLOAD_STAGED {} {} {} {} {}",
             if published { "published" } else { "retained" },

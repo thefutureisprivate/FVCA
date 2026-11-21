@@ -1,0 +1,8 @@
+[Unit]
+Description=Check for an approved Service Guest workload transition
+
+[Timer]
+OnActiveSec=1h
+OnUnitInactiveSec=1h
+RandomizedDelaySec=5m
+Unit=fvca-trial-workload.service

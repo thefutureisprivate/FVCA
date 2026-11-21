@@ -1,0 +1,23 @@
+[Unit]
+Description=Trial an approved Service Guest workload on its existing data
+ConditionPathIsDirectory=/run/fvca/guest-data/workload-updates
+AssertPathIsMountPoint=/run/fvca/guest-data
+AssertSecurity=|uefi-secureboot
+AssertPathExists=|/run/fvca/direct-boot-ready
+AssertSecurity=selinux
+Requisite=fvca-workload-root.service fvca-workload-start.service
+Wants=fvca-stage-workload.service
+After=fvca-workload-root.service fvca-workload-start.service fvca-stage-workload.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/fvca/activate-workload trial
+ExecStopPost=/usr/lib/fvca/activate-workload recover
+TimeoutStartSec=180s
+TimeoutStopSec=170s
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_CHOWN
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+UMask=0077
+StandardOutput=journal+console
+StandardError=journal+console

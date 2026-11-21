@@ -46,7 +46,7 @@ def image(path):
 
 def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, extra_cmdline=False,
          attach_runtime=True, timeout=80, direct_cmdline=None, attach_guest=True, ready_marker=READY,
-         firmware_timeout=None, allow_reboot=False):
+         firmware_timeout=None, allow_reboot=False, rtc_base=None):
     cpu = "host,vmx=off" if args.guest else "host"
     machine = "q35,smm=on"
     devices = []
@@ -96,6 +96,8 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
     command += [
         "-display", "none", "-serial", "stdio", "-monitor", "none", "-nic", "none",
     ]
+    if rtc_base is not None:
+        command += ["-rtc", f"base={rtc_base}"]
     if not allow_reboot:
         command.append("-no-reboot")
     if getattr(args, "qmp_path", None) is not None:
@@ -546,6 +548,71 @@ def check_guest_workload_stage(args):
     print("workload-stage-tampered passed", flush=True)
 
 
+def check_guest_workload_trial(args):
+    args.output.mkdir(mode=0o700)
+    phases = [path.read_bytes() for path in args.workload_trial]
+    good, bad = (json.loads(grant) for grant in phases)
+    hashes = [("sha256:" + hashlib.sha256(grant).hexdigest()).encode() for grant in phases]
+    stable = good["from_authorization"].encode()
+    candidate = good["to_authorization"].encode()
+    unhealthy = bad["to_authorization"].encode()
+    if stable != bad["from_authorization"].encode() or len({stable, candidate, unhealthy}) != 3:
+        raise ValueError("trial fixtures must share one current workload and have distinct candidates")
+
+    def boot_trial(case, disk, marker, timeout=155, rtc_base=None):
+        prompts, output = boot(args, case, None, disk, timeout=timeout, ready_marker=marker, rtc_base=rtc_base)
+        output = rejoin_serial_output(output)
+        if (prompts or DIRECT_ACTIVE not in output or FAIL in output or marker not in output
+                or b"FVCA_STALWART_MAIL_VERIFIED" not in output):
+            raise ValueError(f"the signed Guest did not reach the expected {case} outcome")
+        return output
+
+    def mounted(output, authorization):
+        return re.search(rb"FVCA_WORKLOAD_ROOT_ACTIVE stalwart [0-9a-f]{64} "
+                         + re.escape(authorization) + rb"[\r\n]", output)
+
+    def require_switch(output, old, new):
+        before, after = mounted(output, old), mounted(output, new)
+        if before is None or after is None or before.start() >= after.start():
+            raise ValueError("the workload trial did not switch the two authorized roots in order")
+
+    commit = b"FVCA_WORKLOAD_TRIAL_COMMITTED " + hashes[0] + b" " + candidate
+    recover = b"FVCA_WORKLOAD_TRIAL_RECOVERED"
+    trial_mounted = b"FVCA_WORKLOAD_TRIAL_MOUNTED "
+    with tempfile.TemporaryDirectory(prefix="trial-disk-", dir=args.output) as directory:
+        disk = Path(directory) / "guest-data.raw"
+        args.persistent_members = True
+        for case in ("commit", "interrupted", "unhealthy"):
+            source = "unhealthy.raw" if case == "unhealthy" else "approved.raw"
+            subprocess.run(
+                ["cp", "--reflink=auto", "--sparse=always", "--", args.lab / source, disk], check=True,
+            )
+            if case == "commit":
+                output = boot_trial("trial-commit", disk, commit)
+                require_switch(output, stable, candidate)
+                after_grant = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(good["expires"] + 2))
+                output = boot_trial("trial-committed-reboot", disk, READY, rtc_base=after_grant)
+                if not mounted(output, candidate) or mounted(output, stable):
+                    raise ValueError("the reboot did not select the committed candidate")
+            elif case == "interrupted":
+                output = boot_trial("trial-interrupted", disk, trial_mounted + hashes[0])
+                require_switch(output, stable, candidate)
+                if commit in output:
+                    raise ValueError("the interruption did not occur before the commit")
+                output = boot_trial("trial-interrupted-reboot", disk, READY)
+                if not mounted(output, stable) or mounted(output, candidate) or recover not in output:
+                    raise ValueError("the reboot did not recover the previously committed workload")
+            else:
+                output = boot_trial("trial-unhealthy", disk, b"FVCA_TRIAL_WRITE_RETAINED", timeout=290)
+                require_switch(output, stable, unhealthy)
+                failed = mounted(output, unhealthy)
+                if (not mounted(output[failed.end():], stable) or recover not in output
+                        or b"FVCA_WORKLOAD_TRIAL_COMMITTED" in output):
+                    raise ValueError("the unhealthy candidate was not replaced with the committed workload")
+            disk.unlink()
+            print(f"workload-trial-{case} passed", flush=True)
+
+
 def check_stalwart_lifecycle(output):
     if not re.search(
         rb"FVCA_STALWART_STATE [a-z_]+:system_r:container_t:s0:c[0-9]+,c[0-9]+ 2000:2000 128 true none healthy",
@@ -660,6 +727,9 @@ if __name__ == "__main__":
                                         help="qualify workload activation with approved.raw and tampered.raw")
     workload_qualification.add_argument("--workload-stage", type=Path,
                                         help="check durable staging for the exact signed transition JSON")
+    workload_qualification.add_argument("--workload-trial", type=Path, nargs=2,
+                                        metavar=("APPROVED_GRANT", "UNHEALTHY_GRANT"),
+                                        help="check commit, power interruption and same-data workload fallback")
     stalwart = parser.add_mutually_exclusive_group()
     stalwart.add_argument("--stalwart-lifecycle", action="store_true", help="check the disposable Stalwart lifecycle fixture")
     stalwart.add_argument("--stalwart-mail", action="store_true", help="require the authenticated Stalwart mailbox check")
@@ -688,6 +758,8 @@ if __name__ == "__main__":
         parser.error("--workload requires --oci-runtime and its own Btrfs fixtures")
     if args.workload_stage is not None and (args.direct_boot is None or args.wrong_runtime is not None):
         parser.error("--workload-stage requires --direct-boot and tests a candidate-altered disk")
+    if args.workload_trial is not None and (args.direct_boot is None or args.wrong_runtime is not None):
+        parser.error("--workload-trial requires --direct-boot and approved.raw and unhealthy.raw")
     if args.stalwart_lifecycle and not args.workload:
         parser.error("--stalwart-lifecycle requires --workload")
     if args.stalwart_mail and not args.workload:
@@ -719,6 +791,8 @@ if __name__ == "__main__":
             check_guest_workload(args)
         elif args.workload_stage is not None:
             check_guest_workload_stage(args)
+        elif args.workload_trial is not None:
+            check_guest_workload_trial(args)
         elif args.guest:
             check_guest(args)
         elif args.nested_guest is not None:

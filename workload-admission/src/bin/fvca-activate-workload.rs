@@ -10,11 +10,13 @@ use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fvca_workload_admission::quadlet::{self, Definition, NAMESPACE, PAYLOAD, ROOT, SERVICE};
-use fvca_workload_admission::{Scope, Trust, read_bounded, verify};
+use fvca_workload_admission::{Scope, Trust, VerifiedWorkload, read_bounded};
 use openssl::x509::X509;
 
 #[path = "activate-workload/stage.rs"]
 mod stage;
+#[path = "activate-workload/trial.rs"]
+mod trial;
 
 const GUEST_DATA: &str = "/run/fvca/guest-data";
 const BUNDLE: &str = "/run/fvca/guest-data/workload";
@@ -183,14 +185,13 @@ fn approved_unit(output: &str) -> bool {
         && overrides.next().is_none()
 }
 
-fn start_workload() -> Result<()> {
+fn check_workload_unit() -> Result<()> {
     if !same_unit()? {
         return Err(io::Error::other(
             "the published workload service differs from the generated service",
         )
         .into());
     }
-    run(Command::new(SYSTEMCTL).arg("daemon-reload"))?;
     let result = Command::new(SYSTEMCTL)
         .env_clear()
         .args(["show", "--property=FragmentPath,DropInPaths", SERVICE])
@@ -208,9 +209,41 @@ fn start_workload() -> Result<()> {
         )
         .into());
     }
+    Ok(())
+}
+
+fn start_workload(replace: bool) -> Result<()> {
+    run(Command::new(SYSTEMCTL).arg("daemon-reload"))?;
+    check_workload_unit()?;
+    if replace
+        && Command::new(SYSTEMCTL)
+            .env_clear()
+            .args(["is-failed", "--quiet", SERVICE])
+            .status()?
+            .success()
+    {
+        run(Command::new(SYSTEMCTL).args(["reset-failed", SERVICE]))?;
+    }
     run(Command::new(SYSTEMCTL).args(["start", SERVICE]))?;
     run(Command::new(SYSTEMCTL).args(["is-active", "--quiet", SERVICE]))?;
     println!("FVCA_WORKLOAD_STARTED");
+    Ok(())
+}
+
+fn boot_workload() -> Result<()> {
+    start_workload(false)?;
+    trial::recover()
+}
+
+fn stop_workload() -> Result<()> {
+    match fs::symlink_metadata(UNIT_PATH) {
+        Ok(_) => {
+            check_workload_unit()?;
+            run(Command::new(SYSTEMCTL).args(["stop", SERVICE]))?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     Ok(())
 }
 
@@ -304,22 +337,28 @@ fn require_guest_data(options: &str) -> Result<fs::Metadata> {
 }
 
 fn mount_workload() -> Result<()> {
-    require_guest_data("rw,nodev,nosuid,noexec")?;
-    private_directory(BUNDLE)?;
-    let verified = verify(Path::new(BUNDLE), &read_trust()?)?;
+    let data = require_guest_data("rw,nodev,nosuid,noexec")?;
+    mount_verified(&stage::verify_selection(
+        Path::new(stage::STORE),
+        &read_trust()?,
+        data.dev(),
+    )?)
+}
+
+fn mount_verified(verified: &VerifiedWorkload) -> Result<()> {
     let dns = admitted_network(verified.network_profile())?;
-    let definition = quadlet::render(&verified, dns)?;
+    let definition = quadlet::render(verified, dns)?;
     let hash = verified.verity_root_hash().to_owned();
     let authorization = verified.authorization_digest().to_owned();
     let service = verified.service().to_owned();
     provision_volumes(&service, &definition)?;
-    let (artifact, image) = verified.into_artifact();
+    let (artifact, image) = verified.artifact();
 
     // No kernel partition discovery. Both loops use the verified descriptor and bounded offsets.
-    let root = fvca_workload_loop::attach(&artifact, image.root.offset, image.root.size).map_err(
+    let root = fvca_workload_loop::attach(artifact, image.root.offset, image.root.size).map_err(
         |error| io::Error::other(format!("cannot attach the workload data region: {error}")),
     )?;
-    let tree = fvca_workload_loop::attach(&artifact, image.verity.offset, image.verity.size)
+    let tree = fvca_workload_loop::attach(artifact, image.verity.offset, image.verity.size)
         .map_err(|error| {
             io::Error::other(format!("cannot attach the workload hash region: {error}"))
         })?;
@@ -350,7 +389,7 @@ fn mount_workload() -> Result<()> {
         .mode(0o600)
         .open(MOUNTED_AUTHORIZATION)?;
     writeln!(identity, "{authorization}")?;
-    println!("FVCA_WORKLOAD_ROOT_ACTIVE {service} {hash}");
+    println!("FVCA_WORKLOAD_ROOT_ACTIVE {service} {hash} {authorization}");
     Ok(())
 }
 
@@ -408,8 +447,10 @@ fn execute() -> Result<()> {
     let operation: fn() -> Result<()> = match command.as_slice() {
         ["mount"] => mount_workload,
         ["unmount"] => unmount_workload,
-        ["start"] => start_workload,
+        ["start"] => boot_workload,
         ["stage"] => stage::run,
+        ["trial"] => trial::run,
+        ["recover"] => trial::recover,
         _ => return Err(io::Error::other("invalid workload activation operation").into()),
     };
     let _lease = lock_lifecycle()?;

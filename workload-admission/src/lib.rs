@@ -22,7 +22,9 @@ use openssl::x509::X509;
 pub use image::{Image, Region};
 use records::{Authorization, Blob, Deployment, Derivation, Network};
 pub use records::{IdMap, Launch, Limits, Scope};
-pub use transition::{VerifiedTransition, verify_transition};
+pub use transition::{
+    VerifiedTransition, verify_committed, verify_transition, verify_transition_from,
+};
 
 const RECORD_LIMIT: u64 = 4 * 1024 * 1024;
 const SIGNATURE_LIMIT: u64 = 16 * 1024;
@@ -113,8 +115,8 @@ impl VerifiedWorkload {
     }
 
     /// Continue with the file descriptor that was hashed, without reopening the path.
-    pub fn into_artifact(self) -> (File, Image) {
-        (self.artifact, self.image)
+    pub fn artifact(&self) -> (&File, &Image) {
+        (&self.artifact, &self.image)
     }
 }
 
@@ -210,6 +212,16 @@ fn verified_record(directory: &Path, filename: &str, certificate: &X509) -> Resu
     let signature = read_bounded(&directory.join(format!("{filename}.p7s")), SIGNATURE_LIMIT)?;
     verify_signature(&content, &signature, certificate)?;
     Ok(content)
+}
+
+/// Authenticate a bundle's identity for comparing it to an already running workload.
+/// This does not authorize startup or replace full verification of the bundle.
+pub fn authorization_identity(directory: &Path, trust: &Trust) -> Result<String> {
+    Ok(digest(&sha256(&verified_record(
+        directory,
+        "authorization",
+        &trust.workload,
+    )?)))
 }
 
 fn bound_record(directory: &Path, filename: &str, expected: &str) -> Result<Vec<u8>> {

@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::{
     Result, SIGNATURE_LIMIT, Trust, VerifiedWorkload, check_time, current_time, digest, invalid,
-    is_digest, read_bounded, verify_for_source, verify_signature,
+    is_digest, read_bounded, verify, verify_for_source, verify_signature,
 };
 
 const TRANSITION_LIMIT: u64 = 4096;
@@ -53,13 +53,55 @@ impl Transition {
             || !is_digest(&self.to_authorization)
             || !is_digest(&self.to_source_policy)
             || self.from_authorization == self.to_authorization
+            || self.valid_from == 0
+            || self.valid_from >= self.expires
+            || self.expires > i64::MAX as u64
         {
             return Err(invalid(
                 "workload transition is outside the enrolled Guest or service scope",
             ));
         }
-        self.check_time(current_time()?)
+        Ok(())
     }
+}
+
+fn signed_transition(
+    approval: &Path,
+    signature: &Path,
+    trust: &Trust,
+) -> Result<(Transition, String)> {
+    let body = read_bounded(approval, TRANSITION_LIMIT)?;
+    verify_signature(
+        &body,
+        &read_bounded(signature, SIGNATURE_LIMIT)?,
+        &trust.deployment,
+    )?;
+    let transition: Transition = serde_json::from_slice(&body)?;
+    transition.check_scope(trust)?;
+    Ok((transition, digest(&sha256(&body))))
+}
+
+/// Reverify a committed candidate with the source policy in its signed transition.
+/// The caller must obtain these paths from the durable selection, never from intake.
+/// A committed workload still needs a fresh deployment, even after its trial ends.
+pub fn verify_committed(
+    candidate: &Path,
+    approval: &Path,
+    signature: &Path,
+    trust: &Trust,
+) -> Result<VerifiedWorkload> {
+    let (transition, _) = signed_transition(approval, signature, trust)?;
+    if current_time()? < transition.valid_from {
+        return Err(invalid(
+            "the clock precedes the committed workload transition",
+        ));
+    }
+    verify_for_source(
+        candidate,
+        trust,
+        &transition.to_source_policy,
+        Some(&transition.to_authorization),
+    )
 }
 
 pub struct VerifiedTransition {
@@ -150,20 +192,32 @@ pub fn verify_transition(
     signature: &Path,
     trust: &Trust,
 ) -> Result<VerifiedTransition> {
-    let body = read_bounded(approval, TRANSITION_LIMIT)?;
-    verify_signature(
-        &body,
-        &read_bounded(signature, SIGNATURE_LIMIT)?,
-        &trust.deployment,
-    )?;
-    let transition: Transition = serde_json::from_slice(&body)?;
-    transition.check_scope(trust)?;
-    let current = verify_for_source(
-        current,
+    verify_transition_from(
+        || verify(current, trust),
+        candidate,
+        approval,
+        signature,
         trust,
-        &trust.scope.source_policy,
-        Some(&transition.from_authorization),
-    )?;
+    )
+}
+
+/// Verify a proposal against the currently selected workload, including a prior
+/// committed candidate whose source policy differs from the enrollment policy.
+pub fn verify_transition_from(
+    current: impl FnOnce() -> Result<VerifiedWorkload>,
+    candidate: &Path,
+    approval: &Path,
+    signature: &Path,
+    trust: &Trust,
+) -> Result<VerifiedTransition> {
+    let (transition, approval_digest) = signed_transition(approval, signature, trust)?;
+    transition.check_time(current_time()?)?;
+    let current = current()?;
+    if current.authorization_digest() != transition.from_authorization {
+        return Err(invalid(
+            "workload authorization differs from the signed transition",
+        ));
+    }
     let candidate = verify_for_source(
         candidate,
         trust,
@@ -188,7 +242,7 @@ pub fn verify_transition(
     Ok(VerifiedTransition {
         current,
         candidate,
-        approval_digest: digest(&sha256(&body)),
+        approval_digest,
         fresh_until,
         valid_from,
     })
