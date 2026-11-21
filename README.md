@@ -166,23 +166,40 @@ The verdict identifies the approved measured boot and its enrolled Host. Guest i
 
 `fvca-release-client` accepts an exact role release from a configured HTTPS or local TUF depot on the release or recovery workstation. Use an out-of-band trusted root and a separately authorized local selection record. Keep the TUF root and approved targets signing keys offline. Assign distinct Ed25519 keys to all four top-level TUF roles, and use consistent snapshots with SHA-256 and lengths at both metadata links. The client accepts timestamp metadata with up to 24 hours of remaining validity and snapshot metadata with up to seven days. Use a trusted clock and preserve the private metadata state across imports. [TUF specification](https://theupdateframework.github.io/specification/latest/) · [Amutable Quarry distribution](https://amutable.com/blog/distributing-images-quarry)
 
-Publish a top-level target named `ROLE-EPOCH-MANIFEST_SHA256-release.json`. Use the full lowercase SHA-256 digest of the exact serialized manifest bytes for `MANIFEST_SHA256`. The Hypervisor tuple contains the composed boot disk, the VM runtime disk, and its authorized Guest boot disk. The Service Guest tuple contains the packed Guest boot disk holding the signed UKI, core and OCI runtime. Publish a qualification record as a separate target and include its digest and byte count in the manifest. Before signing targets, independently review the actual qualification evidence and verify the signed boot and runtime artifacts with the role's release authorities.
+### Prepare reviewed TUF targets
 
-For example, the Service Guest manifest uses this shape. Replace the digest strings and lengths with the exact values of the reviewed release files.
+On the review workstation, place the packed Guest disk at `guest-boot.raw`. For a Hypervisor release, also provide `boot.raw` and `vm-runtime.raw`. Generate `service-guest-boot-inventory.json` with `tools/inventory-boot.py service-guest --image guest-boot.raw --capsule-certificate CAPSULE_VERITY_CERT`, together with the Guest boot, runtime and release certificates from the [boot inventory procedure](#inventory-an-assembled-boot-release). A Hypervisor release also requires `hypervisor-boot-inventory.json` for `boot.raw` and uses the Host boot certificate to verify its Guest capsule.
+
+The reviewer checks the role inventories, package provenance, integration results and available rebuild comparisons for the exact submission. The review file binds those records and the complete artifact set by length and SHA-256. For a Service Guest release, the review uses this shape. Supply the actual measured lengths and lowercase SHA-256 digests. Add the Host boot inventory and both Host artifacts for the `hypervisor` role. List additional reviewed evidence by filename under `evidence`.
 
 ```json
 {
-  "schema": "fvca-os-release-v1",
+  "schema": "fvca-os-release-review-v1",
+  "role": "service-guest",
   "epoch": 19,
-  "composition": {
-    "role": "service-guest",
-    "guest_boot": {"bytes": 587538944, "sha256": "GUEST_BOOT_SHA256"}
-  },
-  "qualification": {"bytes": 1024, "sha256": "QUALIFICATION_SHA256"}
+  "artifacts": {"guest-boot.raw": {"bytes": 587538944, "sha256": "GUEST_BOOT_SHA256"}},
+  "evidence": {
+    "service-guest-boot-inventory.json": {"bytes": 8171112, "sha256": "GUEST_INVENTORY_SHA256"},
+    "qualification.log": {"bytes": 1024, "sha256": "QUALIFICATION_SHA256"}
+  }
 }
 ```
 
-The Hypervisor composition uses `role` set to `hypervisor` and requires `boot`, `vm_runtime` and `guest_boot` member records. Use the same `ROLE-EPOCH-MANIFEST_SHA256-` prefix for `boot.raw`, `vm-runtime.raw`, `guest-boot.raw` and `qualification.json` as applicable. This allows a single depot to hold distinct approved releases for both Hypervisor slots at the same security epoch. In the depot, use `metadata/` for the TUF role documents and `targets/` for hash-prefixed target files. Mount imported media with `nodev,nosuid,noexec` and keep it read-only for intake. [TUF repository layout](https://theupdateframework.github.io/specification/latest/#repository-layout)
+Obtain the approved digest of `review.json` from the independent reviewer. Supply the minimum epoch from the release or recovery policy. For a Hypervisor release, pass `--vm-runtime-certificate` with the trusted certificate for the detached VM runtime.
+
+```sh
+python3 tools/pack-os-release.py --review review.json --review-sha256 APPROVED_REVIEW_SHA256 \
+  --artifact-directory reviewed-images --evidence-directory reviewed-evidence \
+  --minimum-epoch 19 --output prepared-release
+```
+
+The tool verifies the reviewed file hashes and the exact composition, including the correspondence between the detached and embedded Host payloads. It writes `selection.json`, `target-records.json` for the offline TUF targets signer, and `targets/` with the consistent-snapshot filenames. Each logical target uses `ROLE-EPOCH-MANIFEST_SHA256-` followed by the member name. The release manifest binds the exact `qualification.json`, which is the approved review file. Keep its named evidence in the review archive.
+
+Sign the logical target records with the authorized offline TUF targets keys and generate the standing channel head through the independent qualification authority when applicable. Serve the hash-prefixed files under `targets/` and the signed TUF metadata under `metadata/`. Mount imported media with `nodev,nosuid,noexec` and keep it read-only for intake. [TUF repository layout](https://theupdateframework.github.io/specification/latest/#repository-layout)
+
+Run `tests/check-os-release-packaging.py` with the reference TUF fixture environment and a verified development Host/Guest pair. It signs two disposable depots, verifies exact staging under standing policy for both roles, and checks rejection of a changed review, replaced artifact, and mismatched embedded Guest. Supply the client, artifact and evidence directories, VM runtime certificate, and a scratch directory on the same filesystem as the evidence.
+
+### Import the release
 
 Keep the depot configuration and CA bundle under the intake operator's control alongside the trusted root. The release selection specifies a role, epoch, approved minimum epoch, manifest digest and byte budget. For HTTPS, configure a static origin with a trailing slash on the depot path, an absolute PEM CA bundle path and a deadline for fetching the complete release. The client verifies the server name against this CA bundle, connects directly to the configured origin and requires unencoded response bodies. Serve repository objects with HTTP 200 and missing objects with HTTP 404.
 

@@ -45,11 +45,15 @@ def unpack(work):
     return tree
 
 
-def root_inventory(work, root_hash):
+def root_identity(work, root_hash):
     return {
         "verity_root": root_hash, "data_sha256": guest.sha256(work / "root"),
-        "verity_tree_sha256": guest.sha256(work / "verity"), "files": tree_inventory(work / "tree"),
+        "verity_tree_sha256": guest.sha256(work / "verity"),
     }
+
+
+def root_inventory(work, root_hash):
+    return {**root_identity(work, root_hash), "files": tree_inventory(work / "tree")}
 
 
 def startup(initrd, work, names, *, optional=()):
@@ -194,12 +198,31 @@ def inspect_guest(args, work):
     if boot_key == runtime_key:
         raise ValueError("Guest Secure Boot and runtime require distinct authorities")
     guest.require_authority(args.guest_release_certificate, None, None, boot_key, runtime_key)
-    if args.bundle.is_symlink() or {path.name for path in args.bundle.iterdir()} != set(guest.BUNDLE_FILES):
-        raise ValueError("unexpected Service Guest direct-boot bundle contents")
-    bundle = work / "bundle"
-    bundle.mkdir()
-    for name in guest.BUNDLE_FILES:
-        snapshot(args.bundle / name, bundle / name)
+    capsule = None
+    if args.image is not None:
+        if guest.public_key(args.capsule_certificate) == guest.public_key(args.guest_release_certificate):
+            raise ValueError("Guest capsule verity and release require distinct authorities")
+        image = work / "guest-boot.raw"
+        snapshot(args.image, image)
+        run("sfdisk", "--verify", "--sector-size", "512", image, stdout=subprocess.DEVNULL)
+        sector, parts = read_layout(image, VERITY_PARTITIONS, sector_size=512)
+        directory = work / "capsule"
+        directory.mkdir()
+        root_hash = verify_verity(image, sector, parts, args.capsule_certificate, directory)
+        bundle = unpack(directory)
+        if {path.name for path in bundle.iterdir()} != set(guest.BUNDLE_FILES):
+            raise ValueError("unexpected Guest boot disk contents")
+        capsule = {
+            **root_identity(directory, root_hash), "sha256": guest.sha256(image),
+            "signer_sha256": signer(args.capsule_certificate),
+        }
+    else:
+        bundle = work / "bundle"
+        bundle.mkdir()
+        if args.bundle.is_symlink() or {path.name for path in args.bundle.iterdir()} != set(guest.BUNDLE_FILES):
+            raise ValueError("unexpected Service Guest direct-boot bundle contents")
+        for name in guest.BUNDLE_FILES:
+            snapshot(args.bundle / name, bundle / name)
     release = capsule_inventory(bundle, args.guest_release_certificate)
     core_dir, runtime_dir = work / "core", work / "runtime"
     core_dir.mkdir()
@@ -242,6 +265,8 @@ def inspect_guest(args, work):
         "runtime_signer_sha256": signer(args.runtime_certificate), "initramfs": boot,
         "core": root_inventory(core_dir, core_hash), "runtime": root_inventory(runtime_dir, runtime_hash),
     }
+    if capsule is not None:
+        report["capsule_image"] = capsule
     if args.workload_bundle is not None:
         report["workload"] = inspect_workload(args, work, policy)
     return report
@@ -257,14 +282,20 @@ def main():
     host.add_argument("--slot", type=Path, required=True, help="immutable Hypervisor GPT disk")
     host.add_argument("--sector-size", type=int, choices=(4096, 512), default=4096)
     service_guest = mode.add_parser("service-guest", parents=[common])
-    service_guest.add_argument("--bundle", type=Path, required=True)
+    source = service_guest.add_mutually_exclusive_group(required=True)
+    source.add_argument("--bundle", type=Path, help="unpacked direct-boot bundle")
+    source.add_argument("--image", type=Path, help="packed Guest boot DDI")
+    service_guest.add_argument("--capsule-certificate", type=Path, help="trusted Guest boot DDI verity signer")
     service_guest.add_argument("--runtime-certificate", type=Path, required=True)
     service_guest.add_argument("--workload-bundle", type=Path, help="authorized workload from the Guest's data volume")
     service_guest.add_argument("--admission-tool", type=lambda path: Path(path).absolute(),
                                help="reviewed fvca-workload-admission binary")
     args = parser.parse_args()
-    if args.role == "service-guest" and (args.workload_bundle is None) != (args.admission_tool is None):
-        parser.error("--workload-bundle and --admission-tool must be supplied together")
+    if args.role == "service-guest":
+        if (args.workload_bundle is None) != (args.admission_tool is None):
+            parser.error("--workload-bundle and --admission-tool must be supplied together")
+        if (args.image is None) != (args.capsule_certificate is None):
+            parser.error("--image and --capsule-certificate must be supplied together")
     try:
         if args.output.exists() or args.output.is_symlink():
             raise ValueError("use a new inventory file")
