@@ -23,6 +23,7 @@ pub mod hypervisor_trial;
 pub mod kernel_policy;
 pub mod runtime;
 pub mod selinux;
+pub mod storage_integrity;
 pub mod workload_network;
 #[cfg(feature = "libvirt")]
 pub mod vm_confinement;

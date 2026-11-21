@@ -8,7 +8,7 @@ export CARGO_TARGET_DIR="$build_dir/target"
 export RUSTFLAGS="-Dwarnings"
 
 target=x86_64-unknown-linux-gnu
-binaries=(fvca-activate-runtime fvca-check-hypervisor-epoch fvca-set-boot-next fvca-set-boot-order fvca-verify-boot-approval)
+binaries=(fvca-activate-runtime fvca-assess-host-recovery fvca-check-hypervisor-epoch fvca-set-boot-next fvca-set-boot-order fvca-verify-boot-approval)
 features=(--features promotion)
 if [[ -n "${FVCA_GUEST_DATA_SELECTION:-}" ]]; then
     binaries=(fvca-activate-guest-data)

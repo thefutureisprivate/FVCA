@@ -6,12 +6,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fvca_initrd_bootstrap::btrfs::{self, Pool};
+use fvca_initrd_bootstrap::storage_integrity::{self, sole_backing};
 use fvca_initrd_bootstrap::{find_partition, identity, invalid, run, sys_block, verify_superblock};
 
 use super::hash;
 
-#[path = "storage_integrity.rs"]
-mod integrity;
 #[path = "tpm.rs"]
 mod tpm;
 
@@ -128,15 +127,6 @@ fn parent_device(path: &Path) -> io::Result<PathBuf> {
     partition.parent().map(Path::to_path_buf).ok_or_else(|| invalid("missing parent block device"))
 }
 
-fn sole_backing(mapped: &Path) -> io::Result<PathBuf> {
-    let mut slaves = fs::read_dir(mapped.join("slaves"))?;
-    let backing = slaves.next().transpose()?;
-    match backing {
-        Some(backing) if slaves.next().transpose()?.is_none() => fs::canonicalize(backing.path()),
-        _ => Err(invalid("Host storage mapping requires exactly one backing device")),
-    }
-}
-
 fn unlock_development(source: &Path, mapper: &str) -> io::Result<()> {
     let status = Command::new("/usr/bin/systemd-cryptsetup").env_clear()
         .env("SYSTEMD_CRYPTSETUP_USE_TOKEN_MODULE", "0")
@@ -165,7 +155,7 @@ fn open_data(selection: &Selection<'_>, sources: &[PathBuf; 2]) -> io::Result<()
             let volume = sys_block(&fs::canonicalize(volumes[index])?)?;
             let partition = sys_block(source)?;
             if selection.authenticated {
-                integrity::verify(&volume, &partition)?;
+                storage_integrity::verify(&volume, &partition)?;
             } else if sole_backing(&volume)? != partition {
                 return Err(invalid("LUKS mapping has an unselected backing device"));
             }

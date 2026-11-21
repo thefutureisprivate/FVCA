@@ -740,7 +740,7 @@ Run `tests/check-guest-os-update.py` with the TUF fixture environment, a disposa
 
 The Hypervisor assembler accepts `--storage tests/host-storage.conf` for the disposable storage fixture. The signed `FVCA-HOST-STORAGE-4` record fixes the protection and unlock modes, the GPT and LUKS2 UUID of each member, and the shared Btrfs filesystem UUID. The initramfs checks both partitions and their LUKS2 identities before prompting on the console, then verifies that each decrypted mapping is backed by its authorized partition on a separate disk.
 
-Btrfs mirrors data, metadata and system chunks across the two decrypted devices. The gate checks the actual devices and allocation profiles before enabling read-write access at `/run/fvca/host-data`. The mount uses `nodev,nosuid,noexec`, and the filesystem root must be owned by root with mode `0700`. Ordinary boot requires both authorized members. Physical TPM qualification, policy for degraded boot, and the appliance recovery environment remain pending.
+Btrfs mirrors data, metadata and system chunks across the two decrypted devices. The gate checks the actual devices and allocation profiles before enabling read-write access at `/run/fvca/host-data`. The mount uses `nodev,nosuid,noexec`, and the filesystem root must be owned by root with mode `0700`. Ordinary boot requires both authorized members. Physical TPM qualification and an authorized writable replacement workflow remain pending.
 
 On a Fedora KVM test machine with `cryptsetup`, `btrfs-progs`, `e2fsprogs` and `cpio` installed, the fixture creates fresh file-backed disks. It tests single-member recovery without Btrfs log replay and replaces the missing device with a freshly encrypted mapping. A writable degraded mount can allocate SINGLE chunks. The fixture restores those chunks to RAID1 in the isolated repair guest, then verifies every profile and scrubs the restored pool. Build the Hypervisor as above with the fixture selection added to the assembler command, then run the integration checks against the signed disk and its matching runtime. To qualify boot after replacement, compose a second UKI with the fixture's `replacement-storage.conf` and provide its disk as `--replacement-disk`. [Btrfs recovery mount options](https://btrfs.readthedocs.io/en/latest/ch-mount-options.html)
 
@@ -760,6 +760,23 @@ Run `tests/storage-lab.sh --authenticated build/host-integrity-lab` to provision
 The initramfs disables udev filesystem probing on the storage mappings. It confirms that rule took effect, reads the active kernel tables, and verifies the AES-XTS and HMAC-SHA256 crypt target, the 32-byte tags, and journaled dm-integrity beneath both members before probing Btrfs. It checks that each stack ends at its selected physical partition and emits `FVCA_HOST_STORAGE_AUTHENTICATED` only once both stacks pass. The profile keeps discards disabled and prevents a same-UUID ordinary LUKS2 member from satisfying the authenticated selection. [Linux dm-integrity](https://docs.kernel.org/admin-guide/device-mapper/dm-integrity.html) · [Linux dm-crypt](https://docs.kernel.org/admin-guide/device-mapper/dm-crypt.html)
 
 The disposable fixture flips ciphertext beneath each member's primary Btrfs superblock and requires both decrypted reads to fail with zero bytes returned. It cuts VM power after a flushed record and subsequent writes, then verifies the retained record and scrubs the remounted pool. It also exercises single-member recovery and replacement. Use the same `tests/check-storage.py` command with the authenticated lab and its signed images to check Secure Boot activation, rejection of the plain member, and boot with the replacement. Physical NVMe interruption, TPM enrollment on the target platform, and performance qualification remain release gates.
+
+### Assess a surviving Host mirror member
+
+Keep each member's independent LUKS2 recovery credential, keyslot inventory and current `cryptsetup luksHeaderBackup` copy in protected off-node custody. The recovery signing system needs the reviewed Host storage selection and the current header backup for the selected member. Enter the credential only at the recovery console. Use a dedicated Secure Boot key on an isolated recovery machine. Keep that key outside the enrolled trust of the deployed Host and its TPM or update policy.
+
+Compose the offline recovery UKI from the reviewed native Hypervisor stage and its authenticated digest. Supply the ordinary Host public certificate so the composer can reject reuse of its signing key. Select the member and its independent keyslot from the inventory.
+
+```sh
+python3 tools/compose-host-recovery.py \
+  --staged-uki fvca-obs-hypervisor.efi --staging-certificate obs-stage.crt \
+  --staged-uki-sha256 APPROVED_UKI_SHA256 --host-certificate host-boot.crt \
+  --boot-certificate recovery.crt --boot-key recovery.key \
+  --storage deployed-host-storage.conf --member a --key-slot RECOVERY_SLOT \
+  --header-backup member-a.header --output host-assess-a.efi
+```
+
+Boot the signed EFI file from dedicated recovery media on the Secure Boot recovery machine with the selected member attached. Check the recovery machine's UTC clock before boot. The authorization starts at composition and lasts one hour by default. Its maximum lifetime is 24 hours, enforced against the recovery machine's RTC. Use `--serial-console` when the authorized operator console is serial. The UKI verifies the exact GPT identity and live header digest before prompting once. The credential opens only the selected slot. The assessment checks the read-only authenticated mapping and mounts the selected Btrfs RAID1 pool degraded with tree-log replay disabled. After unmounting and closing the mapping, it reports `FVCA_HOST_RECOVERY_VERIFIED` and powers off. The result covers the member identity and mountable allocation profiles. Header restoration, journal repair, writable replacement and full content validation require separate procedures. [cryptsetup header backup](https://gitlab.com/cryptsetup/cryptsetup/-/blob/main/man/cryptsetup-luksHeaderBackup.8.adoc) · [Btrfs recovery mount options](https://btrfs.readthedocs.io/en/latest/ch-mount-options.html)
 
 ### Select the Host TPM unlock profile
 

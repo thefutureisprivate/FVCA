@@ -1,0 +1,6 @@
+[Unit]
+Description=FVCA attended Host storage recovery
+DefaultDependencies=no
+Requires=fvca-host-recovery.service
+After=fvca-host-recovery.service
+OnFailure=poweroff.target

@@ -1,0 +1,22 @@
+[Unit]
+Description=Assess one authorized FVCA Host mirror member
+DefaultDependencies=no
+Requires=fvca-selinux-check.service systemd-udev-trigger.service systemd-ask-password-console.path
+After=fvca-selinux-check.service systemd-udev-trigger.service systemd-ask-password-console.path
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+AssertPathExists=/usr/lib/fvca/host-recovery
+OnSuccess=poweroff.target
+OnFailure=poweroff.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/fvca/assess-host-recovery
+RuntimeDirectory=fvca-host-recovery
+RuntimeDirectoryMode=0700
+UMask=0077
+LimitFSIZE=134217728
+TimeoutStartSec=100s
+PrivateNetwork=yes
+NoNewPrivileges=yes
+StandardOutput=journal+console

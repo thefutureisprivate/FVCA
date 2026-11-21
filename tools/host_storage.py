@@ -30,6 +30,7 @@ class Selection:
     unlock: str
     protection: str
     members: tuple[Member, Member]
+    filesystem: str
 
 
 def selection(path):
@@ -40,20 +41,21 @@ def selection(path):
         rf"FVCA-HOST-STORAGE-4\nunlock=(development-passphrase|tpm2-auto|tpm2-pin)\n"
         rf"protection=(development-luks2|{AUTHENTICATED})\n"
         rf"member_a=({uuid}),({uuid})\nmember_b=({uuid}),({uuid})\n"
-        rf"filesystem=btrfs\nfilesystem_uuid={uuid}\n"
+        rf"filesystem=btrfs\nfilesystem_uuid=({uuid})\n"
         rf"(?:token_a={token}\ntoken_b={token}\n)?",
         content.decode("ascii"),
     )
     if match is None:
         raise ValueError("invalid Hypervisor storage selection")
-    unlock, protection, partition_a, volume_a, partition_b, volume_b, index_a, digest_a, index_b, digest_b = match.groups()
+    (unlock, protection, partition_a, volume_a, partition_b, volume_b, filesystem,
+     index_a, digest_a, index_b, digest_b) = match.groups()
     if partition_a == partition_b or volume_a == volume_b:
         raise ValueError("storage selection must name distinct partitions and LUKS2 volumes")
     uses_tpm = unlock != "development-passphrase"
     if uses_tpm != (digest_a is not None) or (uses_tpm and digest_a == digest_b):
         raise ValueError("TPM storage selection requires separate authorization for both tokens")
     members = (Member(partition_a, volume_a, index_a, digest_a), Member(partition_b, volume_b, index_b, digest_b))
-    return Selection(content, unlock, protection, members)
+    return Selection(content, unlock, protection, members, filesystem)
 
 
 def unique_fields(pairs):

@@ -113,10 +113,26 @@ fn verify_mount(pool: &Path, target: &str, expected_devices: &[PathBuf], profile
     Ok(())
 }
 
+const HOST_LABEL: &str = ",defcontext=system_u:object_r:fvca_host_data_t:s0";
+const HOST_PROFILES: [&str; 3] = ["raid1", "raid1", "raid1"];
+
+pub fn assess_host_member(source: &Path, uuid: &str, target: &str) -> io::Result<()> {
+    verify_member(source, uuid, 2)?;
+    let device = sys_block(&fs::canonicalize(source)?)?;
+    fs::DirBuilder::new().mode(0o700).create(target)?;
+    run(Command::new(MOUNT).args([
+        "--internal-only", "-t", "btrfs", "-o",
+        &format!("ro,degraded,rescue=nologreplay,{OPTIONS}{HOST_LABEL}"),
+    ]).arg(source).arg(target))?;
+    let result = verify_mount(&Path::new("/sys/fs/btrfs").join(uuid), target, &[device], HOST_PROFILES);
+    run(Command::new(UMOUNT).args(["--internal-only", target]))?;
+    result
+}
+
 pub fn mount(pool: Pool<'_>, uuid: &str, target: &str) -> io::Result<()> {
     let (sources, profiles): (&[&Path], _) = match &pool {
         Pool::Guest(device) => (std::slice::from_ref(device), ["single", "dup", "dup"]),
-        Pool::Hypervisor(devices) => (devices, ["raid1", "raid1", "raid1"]),
+        Pool::Hypervisor(devices) => (devices, HOST_PROFILES),
     };
     let mut devices = Vec::new();
     for source in sources {
@@ -129,7 +145,7 @@ pub fn mount(pool: Pool<'_>, uuid: &str, target: &str) -> io::Result<()> {
     let selected = sources.iter().skip(1).map(|device| format!(",device={}", device.display())).collect::<String>();
     let label = match pool {
         Pool::Guest(_) => ",rootcontext=system_u:object_r:fvca_guest_data_t:s0",
-        Pool::Hypervisor(_) => ",defcontext=system_u:object_r:fvca_host_data_t:s0",
+        Pool::Hypervisor(_) => HOST_LABEL,
     };
 
     // Btrfs can replay the tree log even on a read-only mount. Inspect profiles

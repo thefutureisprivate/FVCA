@@ -2,10 +2,19 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::{invalid, sole_backing};
+use crate::invalid;
+
+pub fn sole_backing(mapped: &Path) -> io::Result<PathBuf> {
+    let mut slaves = fs::read_dir(mapped.join("slaves"))?;
+    let backing = slaves.next().transpose()?;
+    match backing {
+        Some(backing) if slaves.next().transpose()?.is_none() => fs::canonicalize(backing.path()),
+        _ => Err(invalid("Host storage mapping requires exactly one backing device")),
+    }
+}
 
 fn device(block: &Path) -> io::Result<String> {
     let device = fs::read_to_string(block.join("dev"))?;
@@ -43,7 +52,7 @@ fn positive(value: &str) -> Option<u64> {
     value.parse().ok().filter(|&number| number != 0)
 }
 
-pub(super) fn verify(volume: &Path, partition: &Path) -> io::Result<()> {
+pub fn verify(volume: &Path, partition: &Path) -> io::Result<PathBuf> {
     let volume_id = unprobed_device(volume)?;
     let journal = sole_backing(volume)?;
     if !journal.join("dm").is_dir() || sole_backing(&journal)? != partition {
@@ -77,5 +86,5 @@ pub(super) fn verify(volume: &Path, partition: &Path) -> io::Result<()> {
     {
         return Err(invalid("Host integrity journal does not cover the selected crypt target and partition"));
     }
-    Ok(())
+    Ok(journal)
 }
