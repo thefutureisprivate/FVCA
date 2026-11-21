@@ -10,6 +10,17 @@ export RUSTFLAGS="-Dwarnings"
 mkdir "$CARGO_HOME"
 lock=$(sha256sum "$SRCDIR/workload-admission/Cargo.lock")
 vendor="$SRCDIR/build/workload-admission-vendor/${lock%% *}"
+release_vendor="$SRCDIR/build/release-client-vendor/sources"
+if [[ "${FVCA_OBS_VENDOR:-}" == yes ]]; then
+    (
+        cd "$SRCDIR/build/obs-inputs"
+        sha256sum --check --strict fvca-rust-vendor.sha256
+        mkdir "$build_dir/vendor"
+        tar --zstd -xf fvca-rust-vendor.tar.zst -C "$build_dir/vendor"
+    )
+    vendor="$build_dir/vendor"
+    release_vendor="$vendor"
+fi
 if [[ ! -d "$vendor" ]]; then
     echo 'Prepare the checksum-locked workload dependencies with tools/fetch-workload-admission.sh' >&2
     exit 1
@@ -32,7 +43,6 @@ dependencies=$(patchelf --print-needed "$activation")
 test "${dependencies%%$'\n'*}" = "$allocator_library"
 
 # The Guest links only the shared intake library and the workload client.
-release_vendor="$SRCDIR/build/release-client-vendor/sources"
 if [[ ! -d "$release_vendor" ]]; then
     echo 'Prepare the checksum-locked release-client sources before building the Guest' >&2
     exit 1

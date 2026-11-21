@@ -62,14 +62,19 @@ Use the same QEMU command with `build/exec-check/fvca-dev-exec-check.raw` as the
 
 ## Open Build Service
 
-Use a dedicated x86-64 image repository with `obs/project.conf` and the Fedora 45 `update` and `standard` paths. Disable publication on the qualification project. The native `fvca-base` package builds the shared core and initramfs from the reviewed Git commit. OBS seeds the worker's offline RPM mirror from `obs/mkosi.conf`. The checked-out mkosi recipe applies its own version pins and checks the allocator archive before compiling it.
+Use a dedicated x86-64 image repository with `obs/project.conf` and the Fedora 45 `update` and `standard` paths. Disable publication on the qualification project. The native `fvca-base`, `fvca-hypervisor` and `fvca-service-guest` packages build their cores and initramfs from the reviewed Git commit. OBS extracts the package's dependency recipe from that commit to seed the worker's offline RPM mirror. The checked-out mkosi configuration applies the version pins and verifies the prepared source inputs.
 
 ```sh
 ./tools/fetch-allocator.sh
-python3 obs/prepare-base.py COMMIT build/allocator-upstream/hardened_malloc-14.tar.gz build/obs-base-sources
+./tools/fetch-fwupd.sh
+python3 obs/prepare-build.py COMMIT build/allocator-upstream/hardened_malloc-14.tar.gz build/obs-base-sources
+python3 obs/prepare-build.py COMMIT build/allocator-upstream/hardened_malloc-14.tar.gz build/obs-hypervisor-sources \
+  --role hypervisor --fwupd build/fwupd-source/fwupd-2.1.10.tar.xz
+python3 obs/prepare-build.py COMMIT build/allocator-upstream/hardened_malloc-14.tar.gz build/obs-service-guest-sources \
+  --role service-guest --vendor build/release-client-vendor/sources
 ```
 
-Commit the generated `_service` and allocator archive to the OBS package. The source service checks out the full immutable Git commit. The worker uses the OBS project's staging certificate for its UKI and verity signatures. Verify the returned disk with `tools/verify-base.py` and the OBS project certificate. Production authorization requires independent evidence and production keys. [OBS mkosi build documentation](https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-package-formats#sec-obs-mkosi)
+Prepare the Guest vendor directory with the locked `cargo vendor --versioned-dirs` command in the release-client section below. The source preparer checks the Cargo lockfiles from the selected commit and packages the exact crate set for both Guest binaries. Commit every generated file to its corresponding OBS package. The worker uses the OBS project's staging certificate for its UKI and verity signatures. Verify the returned disk with `tools/verify-base.py` and the OBS project certificate before using it as a role-specific runtime build input. Production authorization requires independent evidence and production keys. [OBS mkosi build documentation](https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-package-formats#sec-obs-mkosi)
 
 ## Appraise a Hypervisor boot quote
 
