@@ -49,6 +49,15 @@ def verify_cms(content, signature, certificate):
                     "-out", "/dev/null"], check=True)
 
 
+def verify_root(work, root_hash, certificate):
+    if re.fullmatch(r"[0-9a-f]{64}", root_hash) is None:
+        raise ValueError("the signed partition must specify a SHA-256 root hash")
+    content = work / "roothash"
+    content.write_text(root_hash, encoding="ascii")
+    verify_cms(content, work / "root.p7s", certificate)
+    subprocess.run(["veritysetup", "verify", work / "root", work / "verity", root_hash], check=True)
+
+
 def verify_verity(image, sector_size, partitions, certificate, work, expected_hash=None):
     for name in VERITY_PARTITIONS:
         extract_partition(image, partitions[name], sector_size, work / name)
@@ -67,8 +76,5 @@ def verify_verity(image, sector_size, partitions, certificate, work, expected_ha
 
     signature = work / "root.p7s"
     signature.write_bytes(base64.b64decode(signed_root["signature"], validate=True))
-    content = work / "roothash"
-    content.write_text(root_hash, encoding="ascii")
-    verify_cms(content, signature, certificate)
-    subprocess.run(["veritysetup", "verify", work / "root", work / "verity", root_hash], check=True)
+    verify_root(work, root_hash, certificate)
     return root_hash

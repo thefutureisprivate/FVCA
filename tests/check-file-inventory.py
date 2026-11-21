@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check file identity and fail-closed archive handling in role inventories."""
 
+from compression import zstd
 import hashlib
 from io import BytesIO
 from pathlib import Path
@@ -11,7 +12,7 @@ import unittest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from file_inventory import newc_inventory, tree_inventory
+from file_inventory import composed_initramfs, newc_inventory, tree_inventory
 
 
 class InventoryTest(unittest.TestCase):
@@ -25,9 +26,12 @@ class InventoryTest(unittest.TestCase):
         original.chmod(0o640)
         (self.root / "linked").hardlink_to(original)
         (self.root / "symlink").symlink_to("/missing/target")
-        self.archive = subprocess.check_output(
+        self.archive = self.archive_for(b".\0linked\0origin\0symlink\0")
+
+    def archive_for(self, paths):
+        return subprocess.check_output(
             ["cpio", "--quiet", "-o", "-0", "--format=newc", "--reproducible", "--owner=0:0"],
-            cwd=self.root, input=b".\0linked\0origin\0symlink\0",
+            cwd=self.root, input=paths,
         )
 
     def test_hardlink_and_symlink_records(self):
@@ -53,6 +57,23 @@ class InventoryTest(unittest.TestCase):
         for replacement in (b"../bad\0", b"origin\0"):
             with self.subTest(name=replacement), self.assertRaises(ValueError):
                 newc_inventory(BytesIO(self.archive.replace(b"linked\0", replacement, 1)))
+
+    def test_composed_initramfs_keeps_configuration_separate(self):
+        policy = self.root / "usr/lib/fvca"
+        policy.mkdir(parents=True)
+        (policy / "base").write_bytes(b"base")
+        (policy / "configuration").write_bytes(b"configuration")
+        base = zstd.compress(self.archive_for(b".\0usr\0usr/lib\0usr/lib/fvca\0usr/lib/fvca/base\0"))
+        aligned = base + b"\0" * (-len(base) % 4)
+        output = self.root / "initrd"
+        captured = {"/usr/lib/fvca/configuration": None}
+        output.write_bytes(aligned + self.archive_for(b"usr/lib/fvca/configuration\0"))
+        result = composed_initramfs(output, self.root, captured)
+        self.assertEqual(captured["/usr/lib/fvca/configuration"], b"configuration")
+        self.assertEqual([entry["path"] for entry in result["configuration_files"]], list(captured))
+        output.write_bytes(aligned + self.archive_for(b"usr/lib/fvca/base\0"))
+        with self.assertRaisesRegex(ValueError, "replaces a base initramfs file"):
+            composed_initramfs(output, self.root, {})
 
 
 if __name__ == "__main__":

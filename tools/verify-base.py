@@ -2,57 +2,13 @@
 """Verify the boot and root artifacts in an FVCA development disk off-node."""
 
 import argparse
-import json
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
 
-from image_verity import VERITY_PARTITIONS, read_layout, verify_verity
-from runtime_boot import BASE_ROOT_OPTIONS, DIRECT_ROOT_OPTIONS
-
-
-PARTITIONS = {
-    "esp": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
-    **VERITY_PARTITIONS,
-}
-BOOT_OPTIONS = {
-    "dm_verity.require_signatures": "1",
-    "enforcing": "1",
-    "proc_mem.force_override": "never",
-    "systemd.restrict_filesystem_access": "exec",
-    "systemd.verity_root_options": BASE_ROOT_OPTIONS,
-}
-
-
-def verify(image, boot_certificate, verity_certificate, work, *, direct_boot=False):
-    sector_size, partitions = read_layout(image, PARTITIONS)
-    uki = work / "boot.efi"
-    esp_offset = partitions["esp"]["start"] * sector_size
-    subprocess.run(["mcopy", "-i", f"{image}@@{esp_offset}", "::/EFI/BOOT/BOOTX64.EFI", uki], check=True)
-    subprocess.run(["sbverify", "--cert", boot_certificate, uki], check=True)
-    sections = json.loads(subprocess.check_output(["ukify", "--json=short", "inspect", uki]))
-    if sections.get("_profiles"):
-        raise ValueError("unexpected UKI profiles")
-
-    arguments = [arg.partition("=") for arg in sections[".cmdline"]["text"].split()]
-    options = BOOT_OPTIONS
-    if direct_boot:
-        options = {**BOOT_OPTIONS, "systemd.verity_root_options": DIRECT_ROOT_OPTIONS,
-                   "module.sig_enforce": "1", "lockdown": "integrity"}
-    for option, expected in options.items():
-        values = [value for name, _, value in arguments if name == option]
-        if values != [expected]:
-            raise ValueError(f"the signed UKI must specify exactly one {option}={expected}")
-
-    hashes = [value for name, _, value in arguments if name == "roothash"]
-    if len(hashes) != 1 or re.fullmatch(r"[0-9a-f]{64}", hashes[0]) is None:
-        raise ValueError("the signed UKI must specify one SHA-256 root hash")
-    root_hash = verify_verity(image, sector_size, partitions, verity_certificate, work, hashes[0])
-    print(f"Verified UKI execution policy, DDI signature and dm-verity data for {root_hash}")
-    return root_hash
+from core_image import extract_uki_section, verify
 
 
 def export_tree(root, root_hash, destination, manifest):
@@ -67,10 +23,7 @@ def export_tree(root, root_hash, destination, manifest):
 
 def export_initrd(work, destination):
     initrd = work / "initrd"
-    subprocess.run(
-        ["ukify", f"--section=.initrd:binary@{initrd}", "inspect", work / "boot.efi"],
-        check=True, stdout=subprocess.DEVNULL,
-    )
+    extract_uki_section(work / "boot.efi", "initrd", initrd)
     if not initrd.stat().st_size:
         raise ValueError("the verified UKI has an empty initramfs")
     with initrd.open("rb") as source, destination.open("xb") as output:

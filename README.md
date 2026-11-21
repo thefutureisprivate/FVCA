@@ -98,6 +98,23 @@ python3 tools/inventory-role.py hypervisor \
 
 Use `service-guest` and the OCI runtime disk for the Guest. The report binds the core, its native UKI initramfs, and the matching additive extension. It records paths, file hashes, permissions and links. Compare its package-manifest digests to the RPM review. Review EROFS ownership and extended attributes separately from the extracted file inventory. Keep the deployed boot tuple and workload evidence with the release. [Linux initramfs format](https://docs.kernel.org/driver-api/early-userspace/buffer-format.html) · [EROFS documentation](https://www.kernel.org/doc/html/latest/filesystems/erofs.html)
 
+### Inventory an assembled boot release
+
+Use the immutable Hypervisor slot image and the reviewed Secure Boot and Guest release certificates. The inventory verifies the signed GPT selection, core, VM runtime and Guest capsule before reporting their exact digests and files.
+
+```sh
+python3 tools/inventory-boot.py hypervisor --slot HOST_IMMUTABLE_GPT \
+  --boot-certificate HOST_BOOT_CRT --guest-release-certificate GUEST_RELEASE_CRT \
+  --output host-boot-inventory.json
+python3 tools/inventory-boot.py service-guest --bundle GUEST_DIRECT_BOOT_BUNDLE \
+  --boot-certificate GUEST_BOOT_CRT --runtime-certificate OCI_RUNTIME_CRT \
+  --guest-release-certificate GUEST_RELEASE_CRT --output guest-boot-inventory.json
+```
+
+Compare the Guest release digest in both reports. Each report records the files in the native initramfs and the signed configuration archive that ukify appended. The direct-boot check also matches the separate Linux, initramfs and command-line files to the signed UKI. [systemd ukify](https://www.freedesktop.org/software/systemd/man/latest/ukify.html)
+
+For a workload-bearing Guest, add `--workload-bundle AUTHORIZED_WORKLOAD` and `--admission-tool FVCA_WORKLOAD_ADMISSION` with the reviewed local admission binary. The inventory checks the workload under the policy and public keys in the signed Guest initramfs, then records the approved source, launch and installed root file hashes. The workload remains independently authorized and lives on the Guest data volume.
+
 On the separate signing system, pass the reviewed digests of the uncompressed disk and package manifest to the core authorizer.
 
 ```sh

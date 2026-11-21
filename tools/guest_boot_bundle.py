@@ -71,18 +71,22 @@ def verify(bundle, certificate):
     return cmdline.removesuffix("\n"), release
 
 
+def launch_record(tree, root, release):
+    if {entry.name for entry in tree.iterdir()} != set(BUNDLE_FILES):
+        raise ValueError("unexpected Guest boot disk contents")
+    digests = release["files"] | {name: sha256(tree / name) for name in ("release.json", "release.p7s")}
+    checksums = "".join(f"{digests[name]}  {name}\n" for name in BUNDLE_FILES)
+    return (f"FVCA-GUEST-LAUNCH-1\nbundle={root}\ncore={release['core_root']}\n"
+            f"runtime={release['runtime_root']}\n{checksums}").encode("ascii")
+
+
 def select_image(image, verity_certificate, release_certificate, work):
     sector, parts = read_layout(image, VERITY_PARTITIONS)
     root = verify_verity(image, sector, parts, verity_certificate, work)
     tree = work / "tree"
     run("fsck.erofs", f"--extract={tree}", "--preserve-perms", work / "root")
-    if {entry.name for entry in tree.iterdir()} != set(BUNDLE_FILES):
-        raise ValueError("unexpected Guest boot disk contents")
     _, release = verify(tree, release_certificate)
-    digests = release["files"] | {name: sha256(tree / name) for name in ("release.json", "release.p7s")}
-    checksums = "".join(f"{digests[name]}  {name}\n" for name in BUNDLE_FILES)
-    return root, (f"FVCA-GUEST-LAUNCH-1\nbundle={root}\ncore={release['core_root']}\n"
-                  f"runtime={release['runtime_root']}\n{checksums}").encode("ascii")
+    return root, launch_record(tree, root, release)
 
 
 def publish(args, work, disk, uki, runtime, cmdline, core_hash, runtime_hash):

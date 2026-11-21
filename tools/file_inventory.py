@@ -1,11 +1,13 @@
 """Inventory FVCA filesystem content and its mkosi newc initramfs."""
 
+from compression import zstd
 import hashlib
 import os
 from pathlib import Path
 import re
 import stat
 import subprocess
+import tempfile
 
 from runtime_tree import raise_walk_error
 
@@ -104,7 +106,7 @@ def resolve_links(groups):
                 link["hardlink"] = source["path"]
 
 
-def newc_inventory(stream):
+def newc_inventory(stream, *, capture=None):
     entries = {}
     hardlinks = {}
     while True:
@@ -131,7 +133,14 @@ def newc_inventory(stream):
             raise ValueError("initramfs root entry is not a directory")
         match entry["type"]:
             case "file":
-                entry.update(hash_bytes(stream, size))
+                if capture is not None and path in capture:
+                    if size > 1024 ** 2 or nlink != 1:
+                        raise ValueError(f"invalid boot authorization record at {path!r}")
+                    data = read_exact(stream, size)
+                    capture[path] = data
+                    entry.update(size=size, sha256=hashlib.sha256(data).hexdigest())
+                else:
+                    entry.update(hash_bytes(stream, size))
                 if nlink > 1:
                     hardlinks.setdefault((dev_major, dev_minor, ino), []).append(entry)
             case "symlink":
@@ -160,3 +169,28 @@ def initramfs_inventory(path: Path):
         if process.wait():
             raise ValueError("could not decompress the authenticated initramfs")
     return entries
+
+
+def composed_initramfs(path, work, capture):
+    """Read ukify's Zstandard initramfs and its aligned FVCA newc suffix."""
+    decoder = zstd.ZstdDecompressor()
+    with path.open("rb") as source, tempfile.TemporaryFile(dir=work) as expanded:
+        while not decoder.eof:
+            block = source.read(1024 * 1024) if decoder.needs_input else b""
+            if decoder.needs_input and not block:
+                raise ValueError("truncated Zstandard frame in the composed initramfs")
+            expanded.write(decoder.decompress(block, max_length=1024 * 1024))
+        source.seek(-len(decoder.unused_data), os.SEEK_CUR)
+        skip_padding(source, source.tell())
+        expanded.seek(0)
+        base = newc_inventory(expanded)
+        overlay = newc_inventory(source, capture=capture)
+    if any(entry["type"] != "file" or not re.fullmatch(r"/usr/lib/fvca/[^/]+", entry["path"])
+           for entry in overlay):
+        raise ValueError("unexpected file in the signed FVCA composition archive")
+    base_types = {entry["path"]: entry["type"] for entry in base}
+    if any(base_types.get(parent) != "directory" for parent in ("/usr", "/usr/lib", "/usr/lib/fvca")):
+        raise ValueError("the composed initramfs lacks its FVCA policy directory")
+    if any(entry["path"] in base_types for entry in overlay):
+        raise ValueError("the FVCA composition archive replaces a base initramfs file")
+    return {"base_files": base, "configuration_files": overlay}

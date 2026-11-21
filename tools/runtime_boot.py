@@ -81,17 +81,18 @@ def verify_initrd(initrd, uname, required, forbidden, role):
         raise ValueError(f"expected an unconfigured {role} initramfs")
 
 
+def composition_record(core_hash, runtime_hash, role, runtime):
+    return (f"FVCA-DEVELOPMENT-1\nrole={role}\nruntime={runtime}\n"
+            f"core={core_hash}\nruntime_root={runtime_hash}\n").encode("ascii")
+
+
 def composition_archive(work, boot_key, boot_certificate, core_hash, runtime_hash, role, runtime, *, extra=()):
     root_hash_file = work / "runtime.roothash"
     root_hash_file.write_text(runtime_hash, encoding="ascii")
     files = work / "usr/lib/fvca"
     files.mkdir(parents=True)
     composition = files / f"{role}.composition"
-    composition.write_text(
-        f"FVCA-DEVELOPMENT-1\nrole={role}\nruntime={runtime}\n"
-        f"core={core_hash}\nruntime_root={runtime_hash}\n",
-        encoding="ascii",
-    )
+    composition.write_bytes(composition_record(core_hash, runtime_hash, role, runtime))
     signature = files / f"{runtime}.p7s"
     # The runtime artifact passed independent signer verification. This signature
     # authorizes its root on the disposable kernel's existing verity keyring.
