@@ -1,5 +1,5 @@
 [Unit]
-Description=Assess one authorized FVCA Host mirror member
+Description=Run the signed FVCA Host storage recovery operation
 DefaultDependencies=no
 Requires=fvca-selinux-check.service systemd-udev-trigger.service systemd-ask-password-console.path
 After=fvca-selinux-check.service systemd-udev-trigger.service systemd-ask-password-console.path

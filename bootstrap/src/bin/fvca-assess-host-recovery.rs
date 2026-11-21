@@ -15,6 +15,9 @@ use fvca_initrd_bootstrap::{
     sys_block, verify_superblock,
 };
 
+#[path = "host-recovery/replacement.rs"]
+mod replacement;
+
 #[global_allocator]
 static ALLOCATOR: System = System;
 
@@ -34,6 +37,16 @@ struct HeaderMedia<'a> {
     bytes: u64,
 }
 
+struct Replacement<'a> {
+    failed_partition: &'a str,
+    missing_id: u64,
+    missing_uuid: &'a str,
+    partition: &'a str,
+    luks: &'a str,
+    header_digest: &'a str,
+    key_slot: &'a str,
+}
+
 struct Selection<'a> {
     partition: &'a str,
     luks: &'a str,
@@ -42,17 +55,18 @@ struct Selection<'a> {
     key_slot: &'a str,
     media: Option<HeaderMedia<'a>>,
     restore_from: Option<&'a str>,
+    replacement: Option<Replacement<'a>>,
     not_before: u64,
     expires: u64,
 }
 
 impl<'a> Selection<'a> {
     fn parse(text: &'a str) -> io::Result<Self> {
-        if text.len() > 512 || !text.ends_with('\n') || !text.is_ascii() || text.contains('\r') {
+        if text.len() > 768 || !text.ends_with('\n') || !text.is_ascii() || text.contains('\r') {
             return Err(invalid("invalid signed Host recovery selection"));
         }
         let mut lines = text.lines();
-        if lines.next() != Some("FVCA-HOST-RECOVERY-2") {
+        if lines.next() != Some("FVCA-HOST-RECOVERY-3") {
             return Err(invalid("unknown Host recovery selection format"));
         }
         let mut field = |key| {
@@ -85,6 +99,31 @@ impl<'a> Selection<'a> {
             digest if media.is_some() => Some(runtime::hash(digest)?),
             _ => return Err(invalid("header restoration requires signed backup media")),
         };
+        let replacement = match field("replacement=")? {
+            "none" => None,
+            record => {
+                let values: Vec<_> = record.split(',').collect();
+                let [failed, id, missing, target, target_luks, digest, slot] = values.as_slice()
+                else {
+                    return Err(invalid("invalid signed mirror replacement selection"));
+                };
+                let missing_id = number(id)?;
+                if media.is_some() || missing_id == 0 || number(slot)? > 31 || failed == target
+                    || *failed == partition || *target == partition || *target_luks == luks
+                {
+                    return Err(invalid("mirror replacement requires distinct authorized members"));
+                }
+                Some(Replacement {
+                    failed_partition: recovery::uuid(failed)?,
+                    missing_id,
+                    missing_uuid: recovery::uuid(missing)?,
+                    partition: recovery::uuid(target)?,
+                    luks: recovery::uuid(target_luks)?,
+                    header_digest: runtime::hash(digest)?,
+                    key_slot: slot,
+                })
+            }
+        };
         let not_before = number(field("not_before=")?)?;
         let expires = number(field("expires=")?)?;
         if lines.next().is_some() || number(key_slot)? > 31
@@ -92,7 +131,9 @@ impl<'a> Selection<'a> {
         {
             return Err(invalid("invalid Host recovery keyslot or validity window"));
         }
-        Ok(Self { partition, luks, filesystem, header_digest, key_slot, media, restore_from, not_before, expires })
+        Ok(Self {
+            partition, luks, filesystem, header_digest, key_slot, media, restore_from, replacement, not_before, expires,
+        })
     }
 
     fn verify_time(&self) -> io::Result<()> {
@@ -166,19 +207,23 @@ fn with_write_barrier(
     result
 }
 
-fn open_member(selection: &Selection<'_>, source: &Path) -> io::Result<()> {
+fn open_member(
+    source: &Path, mapper: &str, header: &str, key_slot: &str, readonly: bool, prompt: &str,
+) -> io::Result<()> {
     let mut ask = Command::new("/usr/bin/systemd-ask-password")
         .env_clear()
-        .args(["--no-tty", "--timeout=55", "--echo=masked", "-n", "Enter FVCA independent recovery credential:"])
+        .args(["--no-tty", "--timeout=55", "--echo=masked", "-n", prompt])
         .stdout(Stdio::piped())
         .spawn()?;
-    let opened = run(Command::new(CRYPTSETUP)
-        .args([
-            "open", "--type", "luks2", "--readonly", "--disable-external-tokens", "--header", HEADER,
-            "--key-slot", selection.key_slot, "--key-file", "-",
-        ])
+    let mut command = Command::new(CRYPTSETUP);
+    command.args(["open", "--type", "luks2", "--disable-external-tokens", "--header", header,
+                  "--key-slot", key_slot, "--key-file", "-"]);
+    if readonly {
+        command.arg("--readonly");
+    }
+    let opened = run(command
         .arg(source)
-        .arg(MAPPER)
+        .arg(mapper)
         .stdin(ask.stdout.take().ok_or_else(|| invalid("missing recovery credential pipe"))?));
     if opened.is_err() {
         let _ = ask.kill();
@@ -193,9 +238,26 @@ fn open_member(selection: &Selection<'_>, source: &Path) -> io::Result<()> {
         }
     });
     if result.is_err() {
-        run(Command::new(CRYPTSETUP).args(["close", MAPPER]))?;
+        close_member(mapper)?;
     }
     result
+}
+
+fn close_member(mapper: &str) -> io::Result<()> {
+    run(Command::new(CRYPTSETUP).args(["close", mapper]))
+}
+
+fn backup_header(source: &Path, luks: &str, header: &str) -> io::Result<()> {
+    verify_superblock(source, "crypto_LUKS", luks, Some("2"))?;
+    run(Command::new(CRYPTSETUP).args(["luksHeaderBackup", "--header-backup-file", header]).arg(source))
+}
+
+fn verify_header(path: &str, luks: &str, digest: &str) -> io::Result<()> {
+    let header = File::open(path)?;
+    if !header.metadata()?.is_file() || recovery::sha256(header)? != digest {
+        return Err(invalid("LUKS2 header differs from the signed recovery header"));
+    }
+    verify_superblock(Path::new(path), "crypto_LUKS", luks, Some("2"))
 }
 
 fn load_header(selection: &Selection<'_>, source: &Path, partition: &Path) -> io::Result<()> {
@@ -214,21 +276,14 @@ fn load_header(selection: &Selection<'_>, source: &Path, partition: &Path) -> io
             return Err(invalid("incomplete backup header read"));
         }
     } else {
-        verify_superblock(source, "crypto_LUKS", selection.luks, Some("2"))?;
-        run(Command::new(CRYPTSETUP)
-            .args(["luksHeaderBackup", "--header-backup-file", HEADER])
-            .arg(source))?;
+        backup_header(source, selection.luks, HEADER)?;
     }
-    let header = File::open(HEADER)?;
-    if !header.metadata()?.is_file() || recovery::sha256(header)? != selection.header_digest {
-        return Err(invalid("LUKS2 header differs from the signed recovery header"));
-    }
-    verify_superblock(Path::new(HEADER), "crypto_LUKS", selection.luks, Some("2"))
+    verify_header(HEADER, selection.luks, selection.header_digest)
 }
 
 fn assess_member(selection: &Selection<'_>, source: &Path, barrier: &Path) -> io::Result<()> {
     selection.verify_time()?;
-    open_member(selection, source)?;
+    open_member(source, MAPPER, HEADER, selection.key_slot, true, "Enter FVCA independent recovery credential:")?;
     let result = (|| {
         selection.verify_time()?;
         let volume = Path::new(VOLUME);
@@ -239,7 +294,7 @@ fn assess_member(selection: &Selection<'_>, source: &Path, barrier: &Path) -> io
         }
         btrfs::assess_host_member(volume, selection.filesystem, MOUNT)
     })();
-    run(Command::new(CRYPTSETUP).args(["close", MAPPER]))?;
+    close_member(MAPPER)?;
     result
 }
 
@@ -301,6 +356,13 @@ fn assess() -> io::Result<()> {
     }
     let disk = File::open(&source)?;
     let pinned = PathBuf::from(format!("/proc/{}/fd/{}", std::process::id(), disk.as_raw_fd()));
+    if let Some(plan) = &selection.replacement {
+        let unit = "/usr/lib/systemd/system/fvca-host-recovery.service.d/90-replacement.conf";
+        if fs::read_to_string(unit)? != "[Service]\nTimeoutStartSec=24h\n" {
+            return Err(invalid("missing signed replacement service deadline"));
+        }
+        return replacement::replace(&selection, plan, &source, &pinned, &partition);
+    }
     let restore = selection.restore_from.zip(selection.media.as_ref().map(|media| media.bytes));
     if let Some((previous, bytes)) = restore {
         require_restore_prefix(&selection, disk.try_clone()?, bytes, previous)?;

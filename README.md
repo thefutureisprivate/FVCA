@@ -786,6 +786,26 @@ For an in-place header restore, also supply `--restore-from-sha256 CURRENT_PREFI
 
 Keep the same signed backup carrier for retries. A rerun accepts the exact restored prefix after authenticating the payload again. An interrupted write that leaves a different prefix requires fresh authorization for the observed bytes. Restoring an older header can revive previously enrolled keyslots and tokens, so preserve the current authorized enrollment in off-node custody. [cryptsetup header restoration](https://gitlab.com/cryptsetup/cryptsetup/-/blob/v2.8.8/man/cryptsetup-luksHeaderRestore.8.adoc)
 
+### Replace a missing Host mirror member
+
+Use the separately trusted Secure Boot recovery machine. Record the original Btrfs device IDs and native member UUIDs during enrollment and retain this inventory with the protected header backups. Detach the failed disk. Prepare a blank replacement with the approved 4 KiB LUKS2 AES-XTS and HMAC-SHA256 integrity profile, its own GPT and LUKS identities, and an independent recovery keyslot. Its authenticated mapping must be at least as large as the missing Btrfs member. Review a new Host storage selection that preserves the survivor and substitutes the replacement. The replacement ceremony uses the survivor and replacement header backups and their independent console credentials.
+
+```sh
+python3 tools/compose-host-recovery.py \
+  --staged-uki fvca-obs-hypervisor.efi --staging-certificate obs-stage.crt \
+  --staged-uki-sha256 APPROVED_UKI_SHA256 --host-certificate host-boot.crt \
+  --boot-certificate recovery.crt --boot-key recovery.key \
+  --storage deployed-host-storage.conf --member a --key-slot SURVIVOR_SLOT \
+  --header-backup member-a.header --replacement-storage repaired-host-storage.conf \
+  --replacement-header-backup new-member.header --replacement-key-slot NEW_SLOT \
+  --missing-devid FAILED_BTRFS_ID --missing-member-uuid FAILED_BTRFS_UUID \
+  --output host-replace-member.efi
+```
+
+The signed operation checks both raw identities and live header digests before it permits writable dm-integrity journal replay on the selected members. It verifies the authenticated mappings, checks the missing device and candidate capacity, and runs Btrfs device replacement in an isolated maintenance mount. If power is lost during copying, reboot the same authorized pair under a valid replacement authorization. The kernel can resume the committed operation when the matching temporary Btrfs target and surviving member are present. The recovery image verifies that state before enabling the resume.
+
+The completed recovery converts only temporary SINGLE allocations to RAID1, verifies both members and all allocation profiles, and runs bandwidth-limited scrubs on both. It reports `FVCA_HOST_MIRROR_REPLACED` after the pool is synchronized and unmounted. Use a separately approved normal Hypervisor boot image and the reviewed repaired storage selection to return the appliance to service. Keep the failed member's prior authorization and any historical copies subject to the storage retirement policy. [Btrfs device replacement](https://btrfs.readthedocs.io/en/latest/btrfs-replace.html) · [Btrfs balance filters](https://btrfs.readthedocs.io/en/latest/btrfs-balance.html)
+
 ### Select the Host TPM unlock profile
 
 Select `unlock=tpm2-auto` for normal unattended operation or `unlock=tpm2-pin` for attended boot. After the Btrfs filesystem identity, add `token_a=INDEX,SHA256` and `token_b=INDEX,SHA256` to the storage selection. Each digest covers the exact `cryptsetup token export` output from that member. Pass the selection with `--storage`, the two exports with `--tpm-token-a` and `--tpm-token-b`, and the RSA PCR signing key with `--pcr-key`. The assembler checks the unlock profile, SHA-256 PCR bank, direct PCRs 7, 12 and 13, signed PCR 11, and policy reference. It signs PCR 11 only for the `enter-initrd` phase. [systemd-cryptenroll](https://www.freedesktop.org/software/systemd/man/262/systemd-cryptenroll.html)

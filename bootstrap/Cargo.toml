@@ -24,6 +24,10 @@ name = "fvca-storage-scrub"
 required-features = ["storage-scrub"]
 
 [[bin]]
+name = "fvca-assess-host-recovery"
+required-features = ["storage-scrub"]
+
+[[bin]]
 name = "fvca-backup-worker"
 required-features = ["backup"]
 

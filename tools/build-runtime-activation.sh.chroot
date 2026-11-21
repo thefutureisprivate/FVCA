@@ -9,7 +9,7 @@ export RUSTFLAGS="-Dwarnings"
 
 target=x86_64-unknown-linux-gnu
 binaries=(fvca-activate-runtime fvca-assess-host-recovery fvca-check-hypervisor-epoch fvca-set-boot-next fvca-set-boot-order fvca-verify-boot-approval)
-features=(--features promotion)
+features=(--features promotion,storage-scrub)
 if [[ -n "${FVCA_GUEST_DATA_SELECTION:-}" ]]; then
     binaries=(fvca-activate-guest-data)
     features=()
@@ -30,6 +30,7 @@ if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-storage-support-v4"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-recovery-write-barrier-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-recovery-header-media-v1"
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-mirror-replacement-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-network-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-workload-network-v2"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-storage-tpm-auto-support-v1"

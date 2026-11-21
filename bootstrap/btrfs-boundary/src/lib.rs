@@ -1,10 +1,12 @@
 //! Narrow x86-64 Linux UAPI for the selected Btrfs storage profile.
 
-use std::ffi::{CStr, c_char, c_int, c_uint, c_ulong};
+use std::ffi::{CStr, OsStr, c_char, c_int, c_uint, c_ulong};
 use std::fs::{self, File};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
 
 // x86-64 Linux UAPI BTRFS_IOC_TREE_SEARCH, using a 4096-byte search buffer.
 const TREE_SEARCH: c_ulong = 0xd000_9411;
@@ -23,6 +25,9 @@ const FS_INFO: c_ulong = 0x8400_941f;
 const DEV_INFO: c_ulong = 0xd000_941e;
 const GET_DEV_STATS: c_ulong = 0xc408_9434;
 const SCRUB: c_ulong = 0xc400_941b;
+const DEV_REPLACE: c_ulong = 0xca28_9435;
+const BALANCE_V2: c_ulong = 0xc400_9420;
+const BALANCE_PROGRESS: c_ulong = 0x8400_9422;
 const READ_ONLY: u64 = 1 << 1;
 const ROOT_READ_ONLY: u64 = 1;
 const RAID1: u64 = 1 << 4;
@@ -90,9 +95,30 @@ struct DevInfo {
     allocated: u64,
     total: u64,
     filesystem: [u8; 16],
-    other: [u64; 505],
+    reserved: [u64; 377],
+    path: [u8; 1024],
 }
 
+#[repr(C)]
+struct ReplaceArgs {
+    command: u64,
+    result: u64,
+    device_or_state: u64,
+    mode_or_progress: u64,
+    source_name_or_counters: [u8; 1025],
+    target_name: [u8; 1025],
+    padding: [u8; 6],
+    reserved: [u64; 64],
+}
+
+#[repr(C)]
+struct BalanceArgs {
+    flags: u64,
+    state: u64,
+    filters: [[u64; 17]; 3],
+    counts: [u64; 3],
+    reserved: [u64; 72],
+}
 #[repr(C)]
 struct DevStats {
     id: u64,
@@ -134,6 +160,8 @@ const _: () = assert!(size_of::<FsInfo>() == 1024);
 const _: () = assert!(size_of::<DevInfo>() == 4096);
 const _: () = assert!(size_of::<DevStats>() == 1032);
 const _: () = assert!(size_of::<ScrubArgs>() == 1024);
+const _: () = assert!(size_of::<ReplaceArgs>() == 2600);
+const _: () = assert!(size_of::<BalanceArgs>() == 1024);
 
 unsafe extern "C" {
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
@@ -279,23 +307,133 @@ fn devices(pool: &File, info: &FsInfo) -> io::Result<Vec<DevInfo>> {
             return Err(io::Error::other("unexpected Btrfs device count"));
         }
         let id = entry.file_name().to_str().and_then(|name| name.parse().ok())
+            .filter(|&id| id != 0)
             .ok_or_else(|| io::Error::other("invalid Btrfs device ID"))?;
-        let mut device = DevInfo { id, uuid: [0; 16], allocated: 0, total: 0, filesystem: [0; 16], other: [0; 505] };
-        // DEV_INFO returns one device into the caller's 4096-byte buffer.
-        if unsafe { ioctl(pool.as_raw_fd(), DEV_INFO, &mut device as *mut DevInfo) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if id == 0 || device.id != id || device.filesystem != info.uuid || device.total == 0
-            || device.allocated > device.total {
-            return Err(io::Error::other("unexpected Btrfs mirror device"));
-        }
-        devices.push(device);
+        devices.push(device_info(pool, id, info.uuid)?);
     }
     devices.sort_unstable_by_key(|device| device.id);
     if devices.len() != expected {
         return Err(io::Error::other("Btrfs device list is incomplete"));
     }
     Ok(devices)
+}
+
+fn device_info(pool: &File, id: u64, fsid: [u8; 16]) -> io::Result<DevInfo> {
+    let mut device = DevInfo {
+        id, uuid: [0; 16], allocated: 0, total: 0, filesystem: [0; 16], reserved: [0; 377], path: [0; 1024],
+    };
+    // DEV_INFO returns one device into the caller's 4096-byte buffer.
+    if unsafe { ioctl(pool.as_raw_fd(), DEV_INFO, &mut device as *mut DevInfo) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if device.id != id || device.filesystem != fsid || device.uuid == [0; 16] || device.total == 0
+        || device.allocated > device.total {
+        return Err(io::Error::other("unexpected Btrfs mirror device"));
+    }
+    Ok(device)
+}
+
+pub struct ReplacementMember {
+    pub uuid: String,
+    pub bytes: u64,
+    pub path: Option<PathBuf>,
+}
+
+pub fn replacement_member(pool: &File, fsid: &str, id: u64, replacing: bool) -> io::Result<ReplacementMember> {
+    // An unfinished replacement adds the reserved device ID zero to FS_INFO.
+    let info = filesystem(pool, if replacing { 3 } else { 2 })?;
+    if uuid(info.uuid) != fsid {
+        return Err(io::Error::other("Btrfs replacement pool has an unexpected filesystem identity"));
+    }
+    let device = device_info(pool, id, info.uuid)?;
+    let path = CStr::from_bytes_until_nul(&device.path).map_err(io::Error::other)?.to_bytes();
+    Ok(ReplacementMember {
+        uuid: uuid(device.uuid),
+        bytes: device.total,
+        path: (!path.is_empty()).then(|| PathBuf::from(OsStr::from_bytes(path))),
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplacementState {
+    NeverStarted,
+    Started,
+    Finished,
+    Canceled,
+    Suspended,
+}
+
+fn replace_ioctl(pool: &File, command: u64, missing: u64, target: &[u8]) -> io::Result<ReplaceArgs> {
+    let mut request = ReplaceArgs {
+        command, result: u64::MAX, device_or_state: missing, mode_or_progress: 0,
+        source_name_or_counters: [0; 1025], target_name: [0; 1025], padding: [0; 6], reserved: [0; 64],
+    };
+    if target.len() >= request.target_name.len() {
+        return Err(io::Error::other("Btrfs replacement target path exceeds the kernel limit"));
+    }
+    request.target_name[..target.len()].copy_from_slice(target);
+    // The ioctl uses the same fixed buffer for start parameters and status.
+    if unsafe { ioctl(pool.as_raw_fd(), DEV_REPLACE, &mut request as *mut ReplaceArgs) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if request.result != 0 {
+        return Err(io::Error::other(format!("Btrfs replacement result {}", request.result)));
+    }
+    Ok(request)
+}
+
+pub fn start_missing_replacement(pool: &File, missing: u64, target: &CStr) -> io::Result<()> {
+    if missing == 0 || target.to_bytes().is_empty() {
+        return Err(io::Error::other("Btrfs replacement requires an absent device ID and a target"));
+    }
+    replace_ioctl(pool, 0, missing, target.to_bytes()).map(|_| ())
+}
+
+pub fn replacement_status(pool: &File) -> io::Result<(ReplacementState, u64, u64)> {
+    let result = replace_ioctl(pool, 1, 0, &[])?;
+    let state = match result.device_or_state {
+        0 => ReplacementState::NeverStarted,
+        1 => ReplacementState::Started,
+        2 => ReplacementState::Finished,
+        3 => ReplacementState::Canceled,
+        4 => ReplacementState::Suspended,
+        _ => return Err(io::Error::other("unknown Btrfs replacement state")),
+    };
+    // Status puts the timestamps first in the shared source-name field.
+    let counters = result.source_name_or_counters;
+    let writes = u64::from_ne_bytes(counters[16..24].try_into().map_err(io::Error::other)?);
+    let reads = u64::from_ne_bytes(counters[24..32].try_into().map_err(io::Error::other)?);
+    Ok((state, writes, reads))
+}
+
+pub fn repair_single_allocations(pool: &File) -> io::Result<()> {
+    const TYPES: u64 = 7;
+    const RESUME: u64 = 1 << 4;
+    let mut policy = [0; 17];
+    policy[0] = 1 << 48; // BTRFS_AVAIL_ALLOC_BIT_SINGLE
+    policy[7] = RAID1;
+    policy[8] = 1 | (1 << 8) | (1 << 9); // PROFILES, CONVERT, SOFT
+    let filters = [policy; 3];
+    let mut observed = BalanceArgs { flags: 0, state: 0, filters: [[0; 17]; 3], counts: [0; 3], reserved: [0; 72] };
+    // A paused balance can only be resumed with this operation's exact filters.
+    let flags = if unsafe { ioctl(pool.as_raw_fd(), BALANCE_PROGRESS, &mut observed as *mut BalanceArgs) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::NotConnected {
+            return Err(error);
+        }
+        TYPES
+    } else {
+        if observed.flags & !RESUME != TYPES || observed.filters != filters || observed.state != 0 {
+            return Err(io::Error::other("a different or active Btrfs balance prevents mirror repair"));
+        }
+        RESUME
+    };
+    let mut request = BalanceArgs { flags, state: 0, filters, counts: [0; 3], reserved: [0; 72] };
+    // BALANCE_V2 takes a fixed set of data, metadata and system filters.
+    if unsafe { ioctl(pool.as_raw_fd(), BALANCE_V2, &mut request as *mut BalanceArgs) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn mirror_devices(pool: &File, info: &FsInfo) -> io::Result<[DevInfo; 2]> {

@@ -70,7 +70,7 @@ pub enum Pool<'a> {
     Hypervisor([&'a Path; 2]),
 }
 
-fn verify_member(source: &Path, uuid: &str, expected_count: usize) -> io::Result<()> {
+pub fn verify_member(source: &Path, uuid: &str, expected_count: usize) -> io::Result<()> {
     verify_superblock(source, "btrfs", uuid, None)?;
     // The primary superblock is at 64 KiB. Its little-endian num_devices field
     // is at byte 0x88 in the Btrfs on-disk superblock structure.
@@ -82,7 +82,7 @@ fn verify_member(source: &Path, uuid: &str, expected_count: usize) -> io::Result
     Ok(())
 }
 
-fn verify_mount(pool: &Path, target: &str, expected_devices: &[PathBuf], profiles: [&str; 3]) -> io::Result<()> {
+fn verify_devices(pool: &Path, target: &str, expected_devices: &[PathBuf]) -> io::Result<()> {
     let root = fs::metadata(target)?;
     if root.uid() != 0 || root.gid() != 0 || root.permissions().mode() & 0o7777 != 0o700 {
         return Err(invalid("data filesystem root must be owned by root:root with mode 0700"));
@@ -94,6 +94,11 @@ fn verify_mount(pool: &Path, target: &str, expected_devices: &[PathBuf], profile
     if actual != expected_devices {
         return Err(invalid("Btrfs mounted with devices outside the signed selection"));
     }
+    Ok(())
+}
+
+fn verify_mount(pool: &Path, target: &str, expected_devices: &[PathBuf], profiles: [&str; 3]) -> io::Result<()> {
+    verify_devices(pool, target, expected_devices)?;
     for (kind, profile) in ["data", "metadata", "system"].into_iter().zip(profiles) {
         let allocation = pool.join("allocation").join(kind);
         let mut selected = false;
@@ -115,6 +120,66 @@ fn verify_mount(pool: &Path, target: &str, expected_devices: &[PathBuf], profile
 
 const HOST_LABEL: &str = ",defcontext=system_u:object_r:fvca_host_data_t:s0";
 const HOST_PROFILES: [&str; 3] = ["raid1", "raid1", "raid1"];
+
+#[cfg(feature = "storage-scrub")]
+pub fn verify_replacement_mount(
+    uuid: &str, target: &str, expected_devices: &[PathBuf],
+) -> io::Result<()> {
+    let sysfs = Path::new("/sys/fs/btrfs").join(uuid);
+    let mut devices = expected_devices.to_vec();
+    devices.sort_unstable();
+    verify_devices(&sysfs, target, &devices)?;
+    for kind in ["data", "metadata", "system"] {
+        let mut profiles = 0;
+        for entry in fs::read_dir(sysfs.join("allocation").join(kind))? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                if !matches!(entry.file_name().to_str(), Some("raid1" | "single")) {
+                    return Err(invalid("mirror replacement encountered an unapproved allocation profile"));
+                }
+                profiles += 1;
+            }
+        }
+        if profiles == 0 {
+            return Err(invalid("mirror replacement has incomplete Btrfs allocation accounting"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "storage-scrub")]
+pub enum ReplacementMount {
+    Inspect,
+    Resume,
+    Write,
+}
+
+#[cfg(feature = "storage-scrub")]
+pub fn with_replacement_mount<T>(
+    source: &Path, companion: Option<&Path>, target: &str, mode: ReplacementMount,
+    work: impl FnOnce(&File) -> io::Result<T>,
+) -> io::Result<T> {
+    let mode = match mode {
+        ReplacementMount::Inspect => "ro,rescue=nologreplay",
+        ReplacementMount::Resume => "ro",
+        ReplacementMount::Write => "rw",
+    };
+    let device = companion.map(|path| format!(",device={}", path.display())).unwrap_or_default();
+    let options = format!("{mode},degraded,nodiscard,noatime,{OPTIONS}{HOST_LABEL}{device}");
+    run(Command::new(MOUNT).args(["--internal-only", "-t", "btrfs", "-o", &options])
+        .arg(source).arg(target))?;
+    let result = File::open(target).and_then(|pool| work(&pool));
+    run(Command::new(UMOUNT).args(["--internal-only", target]))?;
+    result
+}
+
+#[cfg(feature = "storage-scrub")]
+pub fn resume_replacement_mount(target: &str) -> io::Result<()> {
+    run(Command::new(MOUNT).args([
+        "--internal-only", "-t", "btrfs", "-o",
+        &format!("remount,rw,degraded,nodiscard,noatime,{OPTIONS}{HOST_LABEL}"), target,
+    ]))
+}
 
 pub fn assess_host_member(source: &Path, uuid: &str, target: &str) -> io::Result<()> {
     verify_member(source, uuid, 2)?;
