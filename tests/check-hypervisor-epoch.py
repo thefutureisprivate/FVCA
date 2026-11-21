@@ -17,6 +17,12 @@ ACCEPTED = b"FVCA_HYPERVISOR_EPOCH_ACCEPTED"
 REFUSED = b"FVCA_HYPERVISOR_EPOCH_REFUSED"
 UNLOCKED = b"FVCA_HOST_STORAGE_TPM_UNLOCKED"
 AUTO = b"FVCA_HOST_STORAGE_UNLOCK_PROFILE tpm2-auto"
+UNSEAL_FAILED = b"Failed to unseal secret using TPM2"
+
+
+def post_epoch_refusal(output, accepted, diagnostic):
+    marker = re.search(re.escape(accepted) + rb"(?:\r|\n|$)", output)
+    return REFUSED not in output and marker is not None and marker.end() <= output.find(diagnostic)
 
 
 def qualify(args):
@@ -52,6 +58,22 @@ def qualify(args):
     if args.auto_unlock:
         cases.append(("unapproved-measured-input", args.eligible, None, args.states / "counter-two", second, second,
                       b'"/usr/bin/cryptsetup" exited with'))
+    if args.reset_eligible is not None:
+        if not args.auto_unlock:
+            raise ValueError("the TPM clear matrix requires the automatic unlock fixture")
+        returned_floor = (args.states / "reenrolled-floor").read_bytes()
+        restored = int.from_bytes(returned_floor, "big")
+        if len(returned_floor) != 8 or restored == 0:
+            raise ValueError("expected the actual nonzero counter value after TPM clear")
+        slot = args.reset_eligible
+        epoch = max(second, restored)
+        cases.extend((
+            ("reset-control", slot, None, args.states / "counter-two", epoch, second, None),
+            ("cleared-tpm", slot, None, args.states / "cleared", epoch, 0,
+             b"TPM refused read command 0x00000169"),
+            ("counter-reenrolled-after-clear", slot, None, args.states / "reenrolled-after-clear", epoch, restored,
+             UNSEAL_FAILED),
+        ))
     for name, disk, peer, state, epoch, floor, reason in cases:
         extra_input = name == "unapproved-measured-input"
         args.disk = disk
@@ -85,13 +107,17 @@ def qualify(args):
                 raise ValueError(f"{name} did not check the epoch before unlocking authenticated Btrfs")
         else:
             if extra_input:
-                gate = (marker in output and REFUSED not in output
+                gate = (post_epoch_refusal(output, marker, reason)
                         and b"fvca.unapproved-lab-input=1" in output)
+            elif name == "counter-reenrolled-after-clear":
+                gate = (post_epoch_refusal(output, marker, reason)
+                        and b'"/usr/bin/cryptsetup" exited with' in output)
             else:
                 gate = REFUSED in output and ACCEPTED not in output
             forbidden = (AUTO, UNLOCKED, storage.ACTIVE, storage.HOST_AUTHENTICATED,
                          storage.HOST_PROFILES, b"FVCA_VM_RUNTIME_ACTIVE", b"FVCA_SERVICE_GUEST_READY")
             if (prompts or prompt is not None or not gate or reason not in output or storage.FAIL not in output
+                    or re.search(rb"Key slot [0-9]+ unlocked\.", output)
                     or any(mark in output for mark in forbidden)):
                 raise ValueError(f"{name} did not fail closed without prompting")
         print(f"{name} passed", flush=True)
@@ -107,4 +133,6 @@ if __name__ == "__main__":
     unlock.add_argument("--pin-file", type=Path, help="supply the disposable PIN for tpm2-pin boots")
     parser.add_argument("--paired-slots", nargs=2, type=Path, metavar=("A", "B"),
                         help="also boot both provisioned slots at each floor using their integrated Host members")
+    parser.add_argument("--reset-eligible", type=Path, metavar="SLOT",
+                        help="boot a slot composed with epoch-after-clear.conf against the TPM clear fixtures")
     qualify(parser.parse_args())
