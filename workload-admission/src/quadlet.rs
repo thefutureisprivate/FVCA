@@ -137,7 +137,7 @@ pub fn render(
                 ("HealthInterval", health.interval),
                 ("HealthTimeout", health.timeout),
                 ("HealthStartPeriod", health.start_period),
-                ("HealthStartInterval", health.start_interval),
+                ("HealthStartupInterval", health.start_interval),
             ] {
                 if let Some(value) = value.filter(|value| *value != 0) {
                     writeln!(source, "{key}={value}ns")?;

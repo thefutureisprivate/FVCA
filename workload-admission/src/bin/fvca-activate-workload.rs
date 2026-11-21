@@ -440,9 +440,7 @@ fn require_io_limit(read: u32, write: u32) -> Result<()> {
     let path = cgroup
         .strip_prefix("0::")
         .and_then(|line| line.strip_suffix('\n'));
-    if path != Some(PAYLOAD_CGROUP)
-        && path.and_then(|path| path.strip_suffix("/control")) != Some(PAYLOAD_CGROUP)
-    {
+    if path != Some(PAYLOAD_CGROUP) {
         return Err(io::Error::other(
             "workload start check is outside the expected service cgroup",
         )
