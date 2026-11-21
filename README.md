@@ -87,6 +87,17 @@ python3 obs/review-rpms.py hypervisor \
 
 Use `service-guest` with `oci-runtime.manifest` for the Guest. The report records exact package identities, archive SHA-256 digests, source RPM names, and licenses. It matches the core RPMs to the recorded OBS worker inputs and checks shared package versions across each core and runtime. Keep the report with the separate image-content and custom-binary build evidence. [Fedora package signing keys](https://fedoraproject.org/security/) · [RPM verification policy](https://rpm.org/docs/latest/man/rpmkeys.8.html)
 
+Record the shipped files from the verified images. Keep each image's uncompressed mkosi manifest next to the corresponding raw disk with the same basename.
+
+```sh
+python3 tools/inventory-role.py hypervisor \
+  --core core.raw --core-certificate obs-stage.crt \
+  --runtime vm-runtime.raw --runtime-certificate vm-runtime.crt \
+  --output hypervisor-file-inventory.json
+```
+
+Use `service-guest` and the OCI runtime disk for the Guest. The report binds the core, its native UKI initramfs, and the matching additive extension. It records paths, file hashes, permissions and links. Compare its package-manifest digests to the RPM review. Review EROFS ownership and extended attributes separately from the extracted file inventory. Keep the deployed boot tuple and workload evidence with the release. [Linux initramfs format](https://docs.kernel.org/driver-api/early-userspace/buffer-format.html) · [EROFS documentation](https://www.kernel.org/doc/html/latest/filesystems/erofs.html)
+
 On the separate signing system, pass the reviewed digests of the uncompressed disk and package manifest to the core authorizer.
 
 ```sh
