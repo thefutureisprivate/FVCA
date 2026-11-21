@@ -103,6 +103,11 @@ provision() {
     (
         umask 077
         cp --sparse=always --reflink=never /dev/vdc "$destination"
+        if [[ -d /management ]]; then
+            mkdir -m0700 /mnt/management
+            cp /management/tls.crt /management/tls.key /mnt/management/
+            echo FVCA_STORAGE_LAB_MANAGEMENT_STAGED
+        fi
     )
     sync
     umount /mnt

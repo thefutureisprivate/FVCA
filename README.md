@@ -1147,6 +1147,19 @@ python3 tests/check-guest-commissioning.py --disk HOST_GPT_RAW --variables OVMF_
 
 The check requires normal Guest readiness after commissioning and again on a cold start with the same mirror. The altered seed must fail before the launcher starts a Guest.
 
+For the managed KVM check, use a disposable TPM-enrolled mirror and a 4 KiB signed GPT slot composed with `--managed-guest-commissioning`. QEMU emulates an Intel NIC supported by the Hypervisor's `igb` driver. The signed management uplink selects PCI `0000:00:06.0`, MAC `52:54:00:35:5e:01`, address `10.0.2.15/24`, and operator address `10.0.2.2`. Use `gateway=none` and enroll the listener at `10.0.2.15:8443`. The test exposes it on an ephemeral loopback port through QEMU. Use `tests/storage-lab.sh --commissioning --management TLS_DIRECTORY` to stage the lab TLS chain and key before enrolling the mirror's TPM tokens.
+
+The private lab directory contains `mirror/member-a.raw`, `mirror/member-b.raw`, `management.json`, `server-name`, `tls/ca.pem`, the mode-`0600` runner keys `keys/operator.key` and `keys/commission_operator.key`, and `tofu-mirror/` from the locked provider build. Supply the seed used at composition, the verified Guest bundle root, the TPM-measuring Secure Boot OVMF and its matching enrolled variables, and the stopped TPM state at its enrolled floor.
+
+```sh
+python3 -B tests/check-managed-guest-commissioning.py \
+  --disk HOST_GPT_RAW --firmware OVMF_CODE --variables OVMF_VARS --tpm-state STOPPED_SWTPM_STATE \
+  --lab LAB_DIRECTORY --seed GUEST_DATA_RAW --bundle-sha256 GUEST_VERITY_ROOT \
+  --output NEW_EVIDENCE_DIRECTORY
+```
+
+The check refuses a plan for a different seed and an apply without the dedicated key. It requires the Host to stay reachable while the Guest slot is vacant, and verifies Guest agent readiness, the original operation after a cold boot and refusal of destroy. It discards the writable mirror copies, local provider installation, plans and state when the checks finish.
+
 ### Stopped Service Guest captures
 
 Start `fvca-capture-stopped@CAPTURE_UUID.service` as a privileged Hypervisor operator using a fresh capture UUID. The coordinator holds a lease against a new Guest start, checks Btrfs mirror headroom for a full disk rewrite and retained release files, and saves the exact authorized Guest release once per bundle digest. It requests an orderly stop if the Guest is running. A Guest that was already stopped needs a matching receipt from its last verified shutdown.

@@ -13,8 +13,16 @@ elif [[ "${1:-}" == --authenticated ]]; then
     protection=luks2-xts-hmac-sha256
     shift
 fi
+management=
+if [[ "$mode" == commissioning && "${1:-}" == --management ]]; then
+    management=$(realpath -e -- "${2:?expected the disposable management TLS directory}")
+    shift 2
+    for name in tls.crt tls.key; do
+        [[ -f "$management/$name" && ! -L "$management/$name" ]]
+    done
+fi
 if [[ $# -lt 1 || $# -gt 3 || "$1" == *,* || ( "$mode" == commissioning && $# -lt 2 ) ]]; then
-    echo 'Usage: tests/storage-lab.sh [--authenticated|--commissioning] NEW_OUTPUT_DIRECTORY [GUEST_SEED_DISK [MIRROR_MEMBER_BYTES]]' >&2
+    echo 'Usage: tests/storage-lab.sh [--authenticated|--commissioning [--management TLS_DIRECTORY]] NEW_OUTPUT_DIRECTORY [GUEST_SEED_DISK [MIRROR_MEMBER_BYTES]]' >&2
     exit 2
 fi
 guest_seed=
@@ -56,7 +64,7 @@ fi
 kernel=$(uname -r)
 modules="/usr/lib/modules/$kernel"
 root=$(mktemp -d)
-trap 'rm -rf -- "$root"' EXIT
+trap 'rm -f -- "$output/lab.cpio.gz"; rm -rf -- "$root"' EXIT
 
 mkdir -p "$root"/{usr/{bin,lib64},proc,sys,dev,run,mnt,etc}
 mkdir -p "$root$modules"
@@ -75,6 +83,11 @@ sed -n -e 's/^partition=/guest_partition=/p' -e 's/^filesystem_uuid=/guest_files
     "$tests/guest-storage.conf" > "$root/guest-ids"
 printf '%s' "$(openssl rand -hex 32)" > "$output/storage.key"
 install -m400 "$output/storage.key" "$root/storage.key"
+if [[ -n "$management" ]]; then
+    for name in tls.crt tls.key; do
+        install -Dm600 "$management/$name" "$root/management/$name"
+    done
+fi
 
 binaries=(bash btrfs chattr chmod cp cryptsetup mkdir mkfs.btrfs modprobe mount mv poweroff rm sfdisk sleep sync umount)
 modules_to_copy=(dm_crypt)
@@ -102,7 +115,6 @@ cp "$modules"/modules.* "$root$modules/"
     find . -print0 | cpio --quiet -0 -o -H newc --owner=0:0 | gzip -1
 ) > "$output/lab.cpio.gz"
 rm -rf -- "$root"
-trap - EXIT
 
 boot() {
     local mode=$1
@@ -143,6 +155,9 @@ if [[ "$mode" == commissioning ]]; then
     boot commissioning "${mirror[@]}" \
         -drive "if=none,id=guest,format=raw,readonly=on,file=$guest_seed" -device virtio-blk-pci,drive=guest,serial=fvca-lab-guest-seed
     grep -q FVCA_STORAGE_LAB_COMMISSIONING_SEED_READY "$output/commissioning.log"
+    if [[ -n "$management" ]]; then
+        grep -q FVCA_STORAGE_LAB_MANAGEMENT_STAGED "$output/commissioning.log"
+    fi
     rm -- "$output/lab.cpio.gz"
     printf 'Prepared a vacant Service Guest slot and staged the seed on %s\n' "$output"
     exit 0
@@ -228,6 +243,7 @@ grep -q FVCA_STORAGE_REBUILD_OK "$output/replace.log"
 boot verify \
     -drive "if=none,id=b,format=raw,file=$output/replacement.raw" -device virtio-blk-pci,drive=b,serial=fvca-lab-replacement
 grep -q 'FVCA_STORAGE_DEGRADED_READ_OK replacement' "$output/verify.log"
+rm -- "$output/lab.cpio.gz"
 
 # Present the old GPT UUID over a different LUKS2 volume to test the two
 # independent boundaries in the signed member identity.
