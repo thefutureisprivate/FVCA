@@ -2,7 +2,6 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use openssl::sha::sha256;
-use openssl::x509::X509;
 use serde::Deserialize;
 
 use crate::records::{Deployment, Derivation, Platform, Provenance};
@@ -313,21 +312,13 @@ pub(crate) fn verify(
                 || policy.certificate_identity.is_some()
                 || policy.certificate_issuer.is_some()
                 || policy.permit_authority.as_deref() != Some(pin)
-                || digest(&sha256(&certificate)) != pin
                 || derivation.permit.as_deref() != Some(digest(&sha256(&body)).as_str())
             {
                 return Err(invalid(
                     "unsigned permit differs from its enrolled authority or source policy",
                 ));
             }
-            let signer = X509::from_der(&certificate)?;
-            let key = signer.public_key()?;
-            if signer.to_der()? != certificate
-                || trust.deployment.public_key()?.public_eq(&key)
-                || trust.workload.public_key()?.public_eq(&key)
-            {
-                return Err(invalid("unsigned permit requires a distinct authority key"));
-            }
+            let signer = trust.permit_authority(&certificate)?;
             verify_signature(&body, &decode(&signature, SIGNATURE_LIMIT)?, &signer)?;
             let permit: Permit = serde_json::from_slice(&body)?;
             permit.check(derivation, deployment, now)?;

@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 
+use fvca_workload_admission::revocation::NOTICE_LIMIT;
 use fvca_workload_admission::{
     ARTIFACT_LIMIT, TRANSITION_MEMBERS, Trust, VerifiedWorkload, verify_transition_offer,
 };
@@ -75,6 +76,18 @@ pub struct Discovery {
     expires: i64,
 }
 
+pub struct Refresh {
+    repo: Repository,
+    metadata: tempfile::TempDir,
+    policy: Policy,
+    expires: i64,
+}
+
+pub struct PermitNotice {
+    pub filename: String,
+    pub bytes: Vec<u8>,
+}
+
 fn hash(input: &[u8]) -> String {
     hex::encode(Sha256::digest(input))
 }
@@ -119,6 +132,13 @@ impl Policy {
             "fvca-workload.{}.{}.{}.json",
             self.guest, self.service, self.channel,
         ))?)
+    }
+
+    fn revocation_prefix(&self) -> String {
+        format!(
+            "fvca-permit.{}.{}.{}.",
+            self.guest, self.service, self.channel
+        )
     }
 }
 
@@ -200,12 +220,12 @@ fn member_length(repo: &Repository, name: &TargetName, limit: u64) -> Result<u64
     Ok(entry.length)
 }
 
-/// Refresh the pinned repository and its independently monotonic workload head.
-pub async fn discover(
+/// Refresh the pinned repository before resolving notices and the independent workload head.
+pub async fn refresh(
     enrollment: Enrollment<'_>,
     trust: &Trust,
     channel_state: &Path,
-) -> Result<Discovery> {
+) -> Result<Refresh> {
     let policy = Policy::load(&enrollment, trust)?;
     state::directory(channel_state)?;
     let depot = Depot::from_config(
@@ -220,30 +240,94 @@ pub async fn discover(
         metadata.path(),
     )
     .await?;
-    let target = policy.head_target()?;
-    member_length(&repo, &target, HEAD_BYTES)?;
-    let bytes = repo
-        .read_target(&target)
-        .await?
-        .ok_or_else(|| invalid("workload channel head disappeared"))?
-        .into_vec()
-        .await?;
-    let head: Head = serde_json::from_slice(&bytes)?;
-    head.validate(&policy, jiff::Timestamp::now().as_second())?;
-    let expires = head
+    let expires = repo
+        .root()
+        .signed
         .expires
-        .min(repo.root().signed.expires.as_second())
+        .as_second()
         .min(repo.timestamp().signed.expires.as_second())
         .min(repo.snapshot().signed.expires.as_second())
         .min(repo.targets().signed.expires.as_second());
-    remember_head(channel_state, &head, &bytes)?;
-    Ok(Discovery {
+    Ok(Refresh {
         repo,
-        _metadata: metadata,
-        head,
-        max_artifact_bytes: policy.max_artifact_bytes,
+        metadata,
+        policy,
         expires,
     })
+}
+
+impl Refresh {
+    pub fn require_fresh(&self) -> Result<()> {
+        if jiff::Timestamp::now().as_second() >= self.expires {
+            return Err(invalid("workload repository metadata expired during refresh").into());
+        }
+        Ok(())
+    }
+
+    pub async fn permit_notices(&self, trust: &Trust) -> Result<Vec<PermitNotice>> {
+        if !trust.accepts_permit_notices() {
+            return Ok(Vec::new());
+        }
+        let prefix = self.policy.revocation_prefix();
+        let mut budget = METADATA_BYTES;
+        let mut targets = Vec::new();
+        for target in self.repo.targets().signed.targets.keys() {
+            let Some(filename) = target.raw().strip_prefix(&prefix) else {
+                continue;
+            };
+            if !filename.split_once('.').is_some_and(|(digest, suffix)| {
+                hex_digest(digest) && matches!(suffix, "block.json" | "stop.json")
+            }) {
+                return Err(invalid("invalid permit revocation target name").into());
+            }
+            let length = member_length(&self.repo, target, NOTICE_LIMIT)?;
+            budget = budget
+                .checked_sub(length)
+                .ok_or_else(|| invalid("permit revocations exceed their aggregate byte limit"))?;
+            targets.push((target, filename));
+        }
+        let mut notices = Vec::with_capacity(targets.len());
+        for (target, filename) in targets {
+            self.require_fresh()?;
+            let bytes = self
+                .repo
+                .read_target(target)
+                .await?
+                .ok_or_else(|| invalid("permit revocation target disappeared"))?
+                .into_vec()
+                .await?;
+            admission(trust.verify_permit_notice(filename, &bytes))?;
+            notices.push(PermitNotice {
+                filename: filename.to_owned(),
+                bytes,
+            });
+        }
+        self.require_fresh()?;
+        Ok(notices)
+    }
+
+    pub async fn discover(self, channel_state: &Path) -> Result<Discovery> {
+        let target = self.policy.head_target()?;
+        member_length(&self.repo, &target, HEAD_BYTES)?;
+        let bytes = self
+            .repo
+            .read_target(&target)
+            .await?
+            .ok_or_else(|| invalid("workload channel head disappeared"))?
+            .into_vec()
+            .await?;
+        let head: Head = serde_json::from_slice(&bytes)?;
+        head.validate(&self.policy, jiff::Timestamp::now().as_second())?;
+        self.require_fresh()?;
+        remember_head(channel_state, &head, &bytes)?;
+        Ok(Discovery {
+            expires: head.expires.min(self.expires),
+            repo: self.repo,
+            _metadata: self.metadata,
+            head,
+            max_artifact_bytes: self.policy.max_artifact_bytes,
+        })
+    }
 }
 
 impl Discovery {

@@ -1,14 +1,14 @@
 //! Read exact, independently signed permit revocations on the selected Guest data pool.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use openssl::sha::sha256;
 use openssl::x509::X509;
-use rustix::fs::{Mode, OFlags, openat};
+use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, mkdirat, openat, renameat_with, unlinkat};
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,10 @@ use crate::{
     Result, SIGNATURE_LIMIT, Trust, digest, invalid, is_digest, revocation_id, verify_signature,
 };
 
-const ENVELOPE_LIMIT: u64 = 48 * 1024;
+pub const NOTICE_LIMIT: u64 = 64 * 1024;
+const STORE: &str = "workload-updates";
+const NOTICES: &str = "permit-revocations";
+const TEMPORARY: &str = ".channel-revocation.new";
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +65,7 @@ impl Action {
 struct Envelope {
     record: String,
     signature: String,
+    authority: String,
 }
 
 #[derive(Deserialize)]
@@ -92,11 +96,11 @@ impl Ledger {
         Ok(Self { pool, device })
     }
 
-    fn check(&self, permit: &PermitIdentity, certificate: &X509) -> Result<Option<Action>> {
-        let Some(store) = self.directory(&self.pool, "workload-updates")? else {
+    fn check(&self, permit: &PermitIdentity, trust: &Trust) -> Result<Option<Action>> {
+        let Some(store) = self.directory(&self.pool, STORE)? else {
             return Ok(None);
         };
-        let Some(directory) = self.directory(&store, "permit-revocations")? else {
+        let Some(directory) = self.directory(&store, NOTICES)? else {
             return Ok(None);
         };
         for action in [Action::Stop, Action::BlockNewStarts] {
@@ -106,26 +110,95 @@ impl Ledger {
                     .strip_prefix("sha256:")
                     .expect("validated permit digest"),
             );
-            let Some(file) = open_member(&directory, &filename, OFlags::NONBLOCK | OFlags::NOCTTY)?
-            else {
+            let Some(bytes) = self.read_notice(&directory, &filename)? else {
                 continue;
             };
-            let metadata = file.metadata()?;
-            if !metadata.is_file()
-                || metadata.dev() != self.device
-                || metadata.uid() != 0
-                || metadata.gid() != 0
-                || metadata.nlink() != 1
-                || metadata.mode() & 0o7777 != 0o400
-            {
-                return Err(invalid(
-                    "permit revocation must be a root-owned 0400 file on the selected pool",
-                ));
-            }
-            verify_revocation(file, permit, action, certificate)?;
+            verify_envelope(&bytes, trust)?.check_permit(permit, action)?;
             return Ok(Some(action));
         }
         Ok(None)
+    }
+
+    fn read_notice(&self, directory: &File, name: &str) -> Result<Option<Vec<u8>>> {
+        let Some(file) = open_member(directory, name, OFlags::NONBLOCK | OFlags::NOCTTY)? else {
+            return Ok(None);
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.dev() != self.device
+            || metadata.uid() != 0
+            || metadata.gid() != 0
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o7777 != 0o400
+        {
+            return Err(invalid(
+                "permit revocation must be a root-owned 0400 file on the selected pool",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(NOTICE_LIMIT + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > NOTICE_LIMIT {
+            return Err(invalid("permit revocation envelope exceeds its bound"));
+        }
+        Ok(Some(bytes))
+    }
+
+    fn retain(&self, filename: &str, bytes: &[u8]) -> Result<bool> {
+        let store = self
+            .directory(&self.pool, STORE)?
+            .ok_or_else(|| invalid("the authenticated workload store is unavailable"))?;
+        match mkdirat(&store, NOTICES, Mode::from_bits_truncate(0o700)) {
+            Ok(()) | Err(Errno::EXIST) => store.sync_all()?,
+            Err(error) => return Err(error.into()),
+        }
+        let directory = self
+            .directory(&store, NOTICES)?
+            .ok_or_else(|| invalid("the permit revocation directory disappeared"))?;
+        // The channel caller holds the workload lifecycle lease for publication.
+        remove_temporary(&directory)?;
+        if let Some(existing) = self.read_notice(&directory, filename)? {
+            if existing != bytes {
+                return Err(invalid(
+                    "conflicting content for an immutable permit revocation notice",
+                ));
+            }
+            directory.sync_all()?;
+            return Ok(false);
+        }
+
+        let result = (|| -> Result<()> {
+            let descriptor = openat(
+                &directory,
+                TEMPORARY,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_bits_truncate(0o400),
+            )?;
+            let mut file = File::from(descriptor);
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            renameat_with(
+                &directory,
+                TEMPORARY,
+                &directory,
+                filename,
+                RenameFlags::NOREPLACE,
+            )?;
+            directory.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            remove_temporary(&directory)?;
+        }
+        result.map(|()| true)
+    }
+
+    fn clear_partial(&self) -> Result<()> {
+        if let Some(store) = self.directory(&self.pool, STORE)?
+            && let Some(directory) = self.directory(&store, NOTICES)?
+        {
+            remove_temporary(&directory)?;
+        }
+        Ok(())
     }
 
     fn directory(&self, parent: &File, name: &str) -> Result<Option<File>> {
@@ -134,6 +207,14 @@ impl Ledger {
             check_directory(opened, self.device)?;
         }
         Ok(directory)
+    }
+}
+
+fn remove_temporary(directory: &File) -> io::Result<()> {
+    match unlinkat(directory, TEMPORARY, AtFlags::empty()) {
+        Ok(()) => directory.sync_all(),
+        Err(Errno::NOENT) => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -173,47 +254,45 @@ fn decode(value: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn verify_revocation(
-    file: File,
-    permit: &PermitIdentity,
-    action: Action,
-    certificate: &X509,
-) -> Result<()> {
-    let mut bytes = Vec::new();
-    file.take(ENVELOPE_LIMIT + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > ENVELOPE_LIMIT {
+fn verify_envelope(bytes: &[u8], trust: &Trust) -> Result<Revocation> {
+    if bytes.len() as u64 > NOTICE_LIMIT {
         return Err(invalid("permit revocation envelope exceeds its bound"));
     }
-    verify_envelope(&bytes, permit, action, certificate)
-}
-
-fn verify_envelope(
-    bytes: &[u8],
-    permit: &PermitIdentity,
-    action: Action,
-    certificate: &X509,
-) -> Result<()> {
     let envelope: Envelope = serde_json::from_slice(bytes)?;
+    let certificate = trust.permit_authority(&decode(&envelope.authority)?)?;
     let record = decode(&envelope.record)?;
-    verify_signature(&record, &decode(&envelope.signature)?, certificate)?;
+    verify_signature(&record, &decode(&envelope.signature)?, &certificate)?;
     let record: Revocation = serde_json::from_slice(&record)?;
     if record.schema != "fvca-workload-permit-revocation-v1"
-        || record.guest != permit.guest
-        || record.service != permit.service
-        || record.permit_id != permit.id
-        || record.permit != permit.permit
-        || record.action != action
-        || !(permit.issued_at..=i64::MAX as u64).contains(&record.revoked_at)
+        || !trust.identifies(&record.guest, &record.service)
+        || !revocation_id(&record.permit_id)
+        || !is_digest(&record.permit)
+        || !(1..=i64::MAX as u64).contains(&record.revoked_at)
         || record.reason.is_empty()
         || record.reason.chars().count() > 512
         || record.reason.trim() != record.reason
         || record.reason.chars().any(char::is_control)
     {
         return Err(invalid(
-            "signed revocation does not bind the enrolled permit and requested action",
+            "signed revocation does not bind the enrolled Guest and service",
         ));
     }
-    Ok(())
+    Ok(record)
+}
+
+impl Revocation {
+    fn check_permit(&self, permit: &PermitIdentity, action: Action) -> Result<()> {
+        if self.permit_id != permit.id
+            || self.permit != permit.permit
+            || self.action != action
+            || self.revoked_at < permit.issued_at
+        {
+            return Err(invalid(
+                "signed revocation does not bind the enrolled permit and requested action",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -268,7 +347,8 @@ mod tests {
         )?
         .to_der()?;
         Ok(serde_json::to_vec(
-            &json!({"record": STANDARD.encode(record), "signature": STANDARD.encode(signature)}),
+            &json!({"record": STANDARD.encode(record), "signature": STANDARD.encode(signature),
+                    "authority": STANDARD.encode(certificate.to_der()?)}),
         )?)
     }
 
@@ -286,11 +366,27 @@ mod tests {
         };
         let statement = json!({"schema":"fvca-workload-permit-revocation-v1", "guest":permit.guest, "service":permit.service,
             "permit_id": permit.id, "permit":permit.permit, "action":"stop", "revoked_at":90, "reason":"Fixture stop notice"});
+        let trust = Trust::new(
+            crate::Scope {
+                guest: permit.guest.clone(),
+                service: permit.service.clone(),
+                source_policy: digest(&sha256(b"scope")),
+                minimum_epoch: 1,
+                revoked: vec![],
+                unsigned_permit_authority: Some(digest(&sha256(&certificate.to_der()?))),
+            },
+            signer()?.0,
+            signer()?.0,
+        )?;
         let exact = envelope(&statement, &certificate, &key)?;
-        verify_envelope(&exact, &permit, Action::Stop, &certificate)?;
-        assert!(verify_envelope(&exact, &permit, Action::BlockNewStarts, &certificate).is_err());
-        let (other, _) = signer()?;
-        assert!(verify_envelope(&exact, &permit, Action::Stop, &other).is_err());
+        verify_envelope(&exact, &trust)?.check_permit(&permit, Action::Stop)?;
+        assert!(
+            verify_envelope(&exact, &trust)?
+                .check_permit(&permit, Action::BlockNewStarts)
+                .is_err()
+        );
+        let (other, other_key) = signer()?;
+        assert!(verify_envelope(&envelope(&statement, &other, &other_key)?, &trust).is_err());
         for (field, value) in [
             ("guest", json!("guest-two")),
             ("permit", json!(digest(&sha256(b"other permit")))),
@@ -301,7 +397,9 @@ mod tests {
             changed[field] = value;
             let signed = envelope(&changed, &certificate, &key)?;
             assert!(
-                verify_envelope(&signed, &permit, Action::Stop, &certificate).is_err(),
+                verify_envelope(&signed, &trust)
+                    .and_then(|receipt| receipt.check_permit(&permit, Action::Stop))
+                    .is_err(),
                 "{field}"
             );
         }
@@ -310,6 +408,43 @@ mod tests {
 }
 
 impl Trust {
+    pub fn accepts_permit_notices(&self) -> bool {
+        self.scope.unsigned_permit_authority.is_some()
+    }
+
+    /// Clear an interrupted publication while holding the workload lifecycle lease.
+    pub fn clear_partial_permit_notice(&self) -> Result<()> {
+        if let Some(ledger) = &self.revocations {
+            ledger.clear_partial()?;
+        }
+        Ok(())
+    }
+
+    pub fn verify_permit_notice(&self, filename: &str, bytes: &[u8]) -> Result<()> {
+        let record = verify_envelope(bytes, self)?;
+        let permit = record
+            .permit
+            .strip_prefix("sha256:")
+            .expect("validated permit digest");
+        if filename != record.action.filename(permit) {
+            return Err(invalid(
+                "revocation target name differs from its signed permit and action",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Publish authenticated bytes after acquiring the workload lifecycle lease.
+    pub fn retain_permit_notice(&self, filename: &str, bytes: &[u8]) -> Result<bool> {
+        self.verify_permit_notice(filename, bytes)?;
+        self.revocations
+            .as_ref()
+            .ok_or_else(|| {
+                invalid("permit revocation publication requires the selected Guest pool")
+            })?
+            .retain(filename, bytes)
+    }
+
     /// Attach the authoritative local revocation store to verification on an appliance.
     pub fn with_permit_revocations(mut self, pool: &Path, device: u64) -> Result<Self> {
         if self.scope.unsigned_permit_authority.is_some() {
@@ -331,20 +466,9 @@ impl Trust {
                 "permit identity differs from the authenticated Guest scope",
             ));
         }
-        let der = decode(&permit.authority)?;
-        let certificate = X509::from_der(&der)?;
-        let key = certificate.public_key()?;
-        if self.scope.unsigned_permit_authority.as_deref() != Some(digest(&sha256(&der)).as_str())
-            || certificate.to_der()? != der
-            || self.deployment.public_key()?.public_eq(&key)
-            || self.workload.public_key()?.public_eq(&key)
-        {
-            return Err(invalid(
-                "permit identity requires the distinct enrolled authority",
-            ));
-        }
+        self.permit_authority(&decode(&permit.authority)?)?;
         if let Some(ledger) = &self.revocations
-            && let Some(action) = ledger.check(permit, &certificate)?
+            && let Some(action) = ledger.check(permit, self)?
         {
             return Ok(Some(action));
         }
@@ -353,5 +477,20 @@ impl Trust {
             .revoked
             .contains(&permit.id)
             .then_some(Action::BlockNewStarts))
+    }
+
+    pub(crate) fn permit_authority(&self, der: &[u8]) -> Result<X509> {
+        let certificate = X509::from_der(der)?;
+        let key = certificate.public_key()?;
+        if self.scope.unsigned_permit_authority.as_deref() != Some(digest(&sha256(der)).as_str())
+            || certificate.to_der()? != der
+            || self.deployment.public_key()?.public_eq(&key)
+            || self.workload.public_key()?.public_eq(&key)
+        {
+            return Err(invalid(
+                "unsigned permit requires a distinct authority key matching the Guest enrollment",
+            ));
+        }
+        Ok(certificate)
     }
 }

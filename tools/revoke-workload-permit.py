@@ -3,6 +3,7 @@
 
 import argparse
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import time
@@ -10,7 +11,7 @@ import time
 from image_verity import verify_cms
 from workload_build import publish
 import workload_oci as oci
-from workload_permit import LIMIT, portable, read_signed_permit
+from workload_permit import LIMIT, certificate, portable, read_signed_permit
 
 
 def revoke(args, work):
@@ -32,19 +33,24 @@ def revoke(args, work):
         "permit_id": request["revocation_id"], "permit": digest, "action": args.action,
         "revoked_at": revoked_at, "reason": args.reason,
     }))
-    certificate = work / "authority.crt"
+    authority = work / "authority.crt"
     subprocess.run([
         "openssl", "cms", "-sign", "-binary", "-nocerts", "-noattr", "-outform", "DER", "-in", record,
-        "-signer", certificate, "-inkey", args.authority_key, "-out", signature,
+        "-signer", authority, "-inkey", args.authority_key, "-out", signature,
     ], check=True, timeout=30)
-    verify_cms(record, signature, certificate)
+    verify_cms(record, signature, authority)
     output = work / "delivery"
     output.mkdir(mode=0o700)
     suffix = "stop" if args.action == "stop" else "block"
     filename = f"{oci.digest_hex(digest)}.{suffix}.json"
+    if args.channel is not None:
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", args.channel):
+            raise ValueError("expected a canonical workload channel name")
+        filename = f"fvca-permit.{request['guest']}.{request['service']}.{args.channel}.{filename}"
     envelope = output / filename
     envelope.write_bytes(oci.json_bytes({"record": portable(oci.read_bytes(record, LIMIT)),
-                                         "signature": portable(oci.read_bytes(signature, LIMIT))}))
+                                         "signature": portable(oci.read_bytes(signature, LIMIT)),
+                                         "authority": portable(certificate(authority)[0])}))
     envelope.chmod(0o400)
     publish(output, args.output)
     return filename
@@ -56,6 +62,7 @@ def main():
         parser.add_argument(f"--{name}", required=True, type=Path)
     parser.add_argument("--action", required=True, choices=("block-new-starts", "stop"))
     parser.add_argument("--reason", required=True)
+    parser.add_argument("--channel", help="name the notice for publication on this workload TUF channel")
     args = parser.parse_args()
     try:
         with tempfile.TemporaryDirectory(prefix=".fvca-workload-revocation-", dir=args.output.parent) as temporary:

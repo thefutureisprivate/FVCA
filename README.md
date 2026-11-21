@@ -1396,7 +1396,11 @@ python3 tools/revoke-workload-permit.py --permit reviewed-permit \
 
 Use the trusted Guest data intake writer to publish the exact receipt under `/run/fvca/guest-data/workload-updates/permit-revocations/` on the selected Btrfs pool. Use root-owned `0700` directories and a root-owned `0400` receipt. Flush the file, publish it by a same-filesystem rename without replacement, and flush the directory. Keep both receipts when escalating a block to a stop. The Guest rechecks the notice at boot, start, staging, and trial commit. A valid stop notice authorizes the monitor to stop only the generated workload service. A malformed notice fences new starts and produces a warning.
 
-Keep the authority's revocation records independently of Guest captures. Reapply the current records before booting restored data and include revoked permit UUIDs in the current signed Guest enrollment. The workload TUF channel checks local revocations. Delivery of revocation receipts through the channel remains open.
+For automatic delivery, add `--channel stable` to the signing command and publish the generated target in the enrolled channel's top-level TUF targets with consistent snapshots. Retain the original target bytes for repeat publication. Each notice carries the public issuer certificate, which the Guest checks against its signed enrollment. The normal workload refresh authenticates the complete notice set before attempting the workload head, so an expired or withdrawn workload offer does not suppress a valid notice. A refresh accepts notices up to 64 KiB each and 1 MiB in total. [TUF targets and consistent snapshots](https://theupdateframework.github.io/specification/latest/#consistent-snapshots)
+
+The client persists each exact notice on Btrfs before staging an offer. It accepts retries of identical bytes and rejects replacement of an existing notice. Removing a target from subsequent TUF metadata cannot remove a retained local notice. Keep the authority's records independently of Guest captures. Reapply the current records before booting restored data and include revoked permit UUIDs in the current signed Guest enrollment.
+
+Use `tests/check-workload-revocation-channel.py` with the development workload channel client and verifier, a rootless Fedora builder image, and an output directory on Btrfs. It exercises the normal Guest entry point with signed TUF metadata and an independently signed notice. The existing workload channel tests also exercise HTTPS transport.
 
 ### Verify an executable-only workload transition
 

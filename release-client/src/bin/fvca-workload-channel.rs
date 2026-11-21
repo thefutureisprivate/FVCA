@@ -232,20 +232,16 @@ async fn guest() -> Result<()> {
     let spool = store.join(".channel-download");
     let discarded = store.join(".channel-discard");
     let owner = channel_state.join("delivery.json");
-    let identity = {
+    {
         let _lease = lease()?;
         remove_file(ready)?;
-        if present(&store.join("trial"))? {
-            println!("FVCA_WORKLOAD_CHANNEL_DEFERRED trial-recovery");
-            return Ok(());
-        }
-        mounted()?
-    };
+        admission(trust.clear_partial_permit_notice())?;
+    }
     clear_area(&spool, device)?;
     clear_area(&discarded, device)?;
     let policy = state::read(&trust_directory.join(channel::POLICY), CONFIG_BYTES)?;
     let depot = state::read(&trust_directory.join("channel-depot.json"), CONFIG_BYTES)?;
-    let discovery = workload::discover(
+    let refresh = workload::refresh(
         Enrollment {
             policy: &policy,
             initial_root: state::read(&trust_directory.join("channel-root.json"), METADATA_BYTES)?,
@@ -255,6 +251,22 @@ async fn guest() -> Result<()> {
         &channel_state,
     )
     .await?;
+    let notices = refresh.permit_notices(&trust).await?;
+    let identity = {
+        let _lease = lease()?;
+        refresh.require_fresh()?;
+        for notice in notices {
+            if admission(trust.retain_permit_notice(&notice.filename, &notice.bytes))? {
+                println!("FVCA_WORKLOAD_PERMIT_NOTICE_RETAINED {}", notice.filename);
+            }
+        }
+        if present(&store.join("trial"))? {
+            println!("FVCA_WORKLOAD_CHANNEL_DEFERRED trial-recovery");
+            return Ok(());
+        }
+        mounted()?
+    };
+    let discovery = refresh.discover(&channel_state).await?;
     {
         let _lease = lease()?;
         unchanged(store, &identity)?;
@@ -343,7 +355,10 @@ async fn prepare(args: &[String]) -> Result<()> {
         initial_root: state::read(Path::new(root), METADATA_BYTES)?,
         depot_config: &config,
     };
-    let discovery = workload::discover(enrollment, &trust, channel_state).await?;
+    let discovery = workload::refresh(enrollment, &trust, channel_state)
+        .await?
+        .discover(channel_state)
+        .await?;
     if let Some(prepared) = discovery
         .fetch(
             &trust,

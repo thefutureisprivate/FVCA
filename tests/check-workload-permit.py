@@ -218,6 +218,7 @@ class PermitTests(TestCase):
         envelope = self.work / "delivery" / f"{oci.digest_hex(permit_digest)}.stop.json"
         self.assertEqual(envelope.stat().st_mode & 0o777, 0o400)
         payload = oci.parse_json(envelope.read_bytes())
+        self.assertEqual(oci.sha256(base64.b64decode(payload["authority"], validate=True)), self.policy["permit_authority"])
         record, proof = self.work / "revocation.json", self.work / "revocation.p7s"
         record.write_bytes(base64.b64decode(payload["record"], validate=True))
         proof.write_bytes(base64.b64decode(payload["signature"], validate=True))
