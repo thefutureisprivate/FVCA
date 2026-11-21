@@ -6,7 +6,6 @@ build_dir=$(mktemp -d)
 trap 'rm -rf "$build_dir"' EXIT
 export CARGO_HOME="$build_dir/cargo"
 export CARGO_TARGET_DIR="$build_dir/target"
-export RUSTFLAGS="-Dwarnings"
 mkdir "$CARGO_HOME"
 lock=$(sha256sum "$SRCDIR/workload-admission/Cargo.lock")
 vendor="$SRCDIR/build/workload-admission-vendor/${lock%% *}"
@@ -33,6 +32,8 @@ replace-with = "fvca-vendor"
 directory = "$vendor"
 EOF
 target=x86_64-unknown-linux-gnu
+# Keep temporary vendor paths out of compiled source locations and panic messages.
+CARGO_ENCODED_RUSTFLAGS="-Dwarnings"$'\x1f'"--remap-path-prefix=$vendor=/usr/src/fvca/vendor" \
 cargo build --frozen --release --target "$target" --bin fvca-activate-workload \
     --manifest-path "$SRCDIR/workload-admission/Cargo.toml"
 
@@ -55,6 +56,7 @@ replace-with = "fvca-vendor"
 directory = "$release_vendor"
 EOF
 export PKG_CONFIG=/usr/bin/pkgconf
+CARGO_ENCODED_RUSTFLAGS="-Dwarnings"$'\x1f'"--remap-path-prefix=$release_vendor=/usr/src/fvca/vendor" \
 cargo build --frozen --release --target "$target" --no-default-features --features appliance,workload \
     --bin fvca-workload-channel --manifest-path "$SRCDIR/release-client/Cargo.toml"
 channel="$DESTDIR/usr/lib/fvca/workload-channel"

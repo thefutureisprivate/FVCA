@@ -104,6 +104,8 @@ Use `service-guest` and the OCI runtime disk for the Guest. The report binds the
 
 Preserve the reviewed Git revision and package inputs. Verify the OBS image and manifest against their signed checksums. Supply each build's public certificate and keep its uncompressed mkosi manifest next to its image with the same basename. Use `hypervisor` for the corresponding Host core.
 
+To reconstruct the source tree from Git, use `git -c tar.umask=0022 archive` and extract it with `tar --same-permissions` to preserve the expected overlay modes.
+
 ```sh
 python3 tools/compare-core-rebuild.py service-guest \
   --reference obs-core.raw --reference-certificate obs-stage.crt \
