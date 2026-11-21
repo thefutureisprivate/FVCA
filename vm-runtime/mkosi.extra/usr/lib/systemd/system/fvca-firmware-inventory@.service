@@ -1,0 +1,36 @@
+[Unit]
+Description=FVCA read-only firmware inventory collector
+After=fvca-base-ready.service
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+CollectMode=inactive-or-failed
+
+[Service]
+Type=oneshot
+User=fvca-firmware-reader
+Group=fvca-firmware-reader
+SELinuxContext=system_u:system_r:fvca_firmware_reader_t:s0
+ExecStart=/usr/libexec/fvca/release-client --serve-firmware-inventory
+TimeoutStartSec=2s
+CapabilityBoundingSet=
+InaccessiblePaths=/run/fvca -/run/credentials -/run/dbus -/run/systemd/private -/run/libvirt
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=disconnected
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+NoExecPaths=/run /tmp /var
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+TasksMax=2
+UMask=0077

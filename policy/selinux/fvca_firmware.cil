@@ -1,5 +1,6 @@
 ; Reuse Fedora's system bus socket and configuration labels for the private bus.
-(filecon "/run/fvca/firmware-bus-(inventory|writer)" socket (system_u object_r system_dbusd_var_run_t ((s0) (s0))))
+(filecon "/run/fvca/firmware-bus-writer" socket (system_u object_r system_dbusd_var_run_t ((s0) (s0))))
+(filecon "/run/fvca-firmware-bus/inventory" socket (system_u object_r system_dbusd_var_run_t ((s0) (s0))))
 (filecon "/usr/lib/fvca/firmware-bus-(common|inventory|writer)\.conf" file (system_u object_r dbusd_etc_t ((s0) (s0))))
 (filecon "/run/fvca-firmware(-writer)?(/.*)?" any (system_u object_r fwupd_var_lib_t ((s0) (s0))))
 

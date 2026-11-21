@@ -1,6 +1,7 @@
 //! Authenticate requests on the network and authorize them again at the Host broker.
 
 pub(crate) mod boot_quote;
+pub(crate) mod firmware_inventory;
 pub(crate) mod firmware_status;
 mod intent;
 mod listener;
@@ -244,6 +245,9 @@ enum Outcome {
     HostFirmwareStatus {
         firmware: Box<crate::firmware::StatusSnapshot>,
     },
+    HostFirmwareInventory {
+        inventory: Box<crate::firmware::InventoryPage>,
+    },
     HostLocalCaptures {
         captures: Vec<local_captures::Capture>,
         next: Option<local_captures::Cursor>,
@@ -293,6 +297,23 @@ async fn dispatch(
             Ok(Outcome::HostFirmwareStatus {
                 firmware: Box::new(firmware),
             })
+        }
+        Operation::HostFirmwareInventory { after } => {
+            if after.as_ref().is_some_and(|cursor| !cursor.valid()) {
+                return Err(Refusal::InvalidFirmwareInventoryCursor);
+            }
+            match firmware_inventory::request(after.as_ref())
+                .await
+                .map_err(|_| Refusal::HostFirmwareInventoryUnavailable)?
+            {
+                crate::firmware::InventoryReply::Page(inventory) => {
+                    Ok(Outcome::HostFirmwareInventory { inventory })
+                }
+                crate::firmware::InventoryReply::Changed => Err(Refusal::FirmwareInventoryChanged),
+                crate::firmware::InventoryReply::InvalidCursor => {
+                    Err(Refusal::InvalidFirmwareInventoryCursor)
+                }
+            }
         }
         Operation::HostLocalCaptures { after } => {
             let (captures, next) = local_captures::list(after.clone()).await?;

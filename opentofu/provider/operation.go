@@ -88,7 +88,7 @@ func (s submission) validAt(now int64) bool {
 func requireReceipt(r response, id, guest string, next binding, cpu, memory int64) error {
 	if r.Result != "configuration-operation" || r.OperationID != id || r.Code != "" ||
 		r.BootConfiguration != nil || r.ConfigurationEnrolled != nil ||
-		r.HostTrial != nil || r.Observed != nil || r.Firmware != nil || r.Activation != "" ||
+		r.HostTrial != nil || r.Observed != nil || r.Firmware != nil || r.Inventory != nil || r.Activation != "" ||
 		r.Configuration == nil || !r.Configuration.valid(guest) {
 		return errors.New("Host did not return the exact configuration operation")
 	}

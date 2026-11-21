@@ -48,6 +48,8 @@ MANAGEMENT_UNITS = {
     Path("usr/lib/systemd/system/fvca-attestation@.service"),
     Path("usr/lib/systemd/system/fvca-firmware-status.socket"),
     Path("usr/lib/systemd/system/fvca-firmware-status@.service"),
+    Path("usr/lib/systemd/system/fvca-firmware-inventory.socket"),
+    Path("usr/lib/systemd/system/fvca-firmware-inventory@.service"),
 }
 MANAGEMENT_USERDB = Path("usr/lib/userdb")
 MANAGEMENT_RECORDS = tuple(f"fvca-management.{kind}" for kind in ("user", "group"))
@@ -58,7 +60,7 @@ FIRMWARE_UPDATE_UNITS = tuple(
         "fvca-fwupd-writer.service",
     )
 )
-FIRMWARE_UPDATE_SUPPORT = Path("usr/lib/fvca/firmware-update-support-v15")
+FIRMWARE_UPDATE_SUPPORT = Path("usr/lib/fvca/firmware-update-support-v16")
 BASE_BINDING = Path("usr/share/fvca/vm-runtime-base.roothash")
 EXTENSION_RELEASE = Path("usr/lib/extension-release.d/extension-release.vm-runtime")
 REQUIRED_FILES = {

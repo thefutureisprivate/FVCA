@@ -1,0 +1,9 @@
+{
+  "userName": "fvca-firmware-reader",
+  "uid": 62001,
+  "gid": 62001,
+  "disposition": "system",
+  "homeDirectory": "/nonexistent",
+  "shell": "/usr/sbin/nologin",
+  "locked": true
+}

@@ -525,13 +525,15 @@ def assemble(args, work):
             if path.is_symlink() or not path.is_file():
                 raise ValueError("the VM runtime lacks scheduled Service Guest updates")
     if args.firmware_update_owner is not None:
-        required += ("usr/lib/fvca/firmware-update-enrollment-v11", "usr/bin/chcon", "usr/bin/mount", "usr/bin/sha256sum")
+        required += ("usr/lib/fvca/firmware-update-enrollment-v12", "usr/bin/chcon", "usr/bin/mount", "usr/bin/sha256sum")
         for tree, members in (
             (prepared / "root", tuple(Path(member) for member in (
                 "usr/libexec/fwupd/fwupd", "usr/lib/systemd/system/fvca-fwupd.service",
                 "usr/lib/systemd/system/fvca-firmware-bus@.service", "usr/lib/systemd/system/fvca-firmware-bus@.socket",
+                "usr/lib/systemd/system/fvca-firmware-bus@inventory.socket.d/20-reader.conf",
                 "usr/lib/fvca/firmware-bus-common.conf", "usr/lib/fvca/firmware-bus-inventory.conf",
                 "usr/lib/fvca/firmware-bus-writer.conf", "usr/share/fvca/firmware-build.txt",
+                "usr/lib/userdb/fvca-firmware-reader.user", "usr/lib/userdb/fvca-firmware-reader.group",
             ))),
             (runtime_work / "tree", (*vm_runtime.FIRMWARE_UPDATE_UNITS, vm_runtime.FIRMWARE_UPDATE_SUPPORT)),
         ):
@@ -550,6 +552,8 @@ def assemble(args, work):
         if (not re.search(r"^capsule_writer_patch_sha256=[0-9a-f]{64}$", provenance, re.MULTILINE)
                 or "capsule_writer=v5" not in provenance.splitlines()):
             raise ValueError("scheduled Host firmware requires the confined native capsule writer")
+        if "inventory_reader=v1" not in provenance.splitlines():
+            raise ValueError("scheduled Host firmware requires the dedicated read-only bus account")
     if args.boot_trial_candidate is not None:
         recorder = runtime_work / "tree" / vm_runtime.TRIAL_HEALTH
         if recorder.is_symlink() or not recorder.is_file() or recorder.stat().st_mode & 0o111 == 0:

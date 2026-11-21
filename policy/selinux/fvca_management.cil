@@ -4,13 +4,15 @@
 (type fvca_management_broker_t)
 (type fvca_attestation_t)
 (type fvca_firmware_observer_t)
+(type fvca_firmware_reader_t)
 (typeattribute fvca_management_domain)
-(typeattributeset fvca_management_domain (fvca_management_gateway_t fvca_management_broker_t fvca_attestation_t fvca_firmware_observer_t))
+(typeattributeset fvca_management_domain (fvca_management_gateway_t fvca_management_broker_t fvca_attestation_t fvca_firmware_observer_t fvca_firmware_reader_t))
 (typeattributeset domain (fvca_management_domain))
 (roletype system_r fvca_management_gateway_t)
 (roletype system_r fvca_management_broker_t)
 (roletype system_r fvca_attestation_t)
 (roletype system_r fvca_firmware_observer_t)
+(roletype system_r fvca_firmware_reader_t)
 
 (allow init_t fvca_management_domain (process (getattr sigkill signal transition)))
 (allow init_t fvca_management_domain (process2 (nnp_transition)))
@@ -89,7 +91,7 @@
 (typeattributeset file_type (fvca_firmware_status_socket_t))
 (roletype object_r fvca_firmware_status_socket_t)
 (filecon "/run/fvca-firmware-status" dir (system_u object_r fvca_firmware_status_socket_t ((s0) (s0))))
-(filecon "/run/fvca-firmware-status/status\.sock" socket (system_u object_r fvca_firmware_status_socket_t ((s0) (s0))))
+(filecon "/run/fvca-firmware-status/(status|inventory)\.sock" socket (system_u object_r fvca_firmware_status_socket_t ((s0) (s0))))
 (allow fvca_firmware_status_socket_t tmpfs_t (filesystem (associate)))
 (allow init_t fvca_firmware_status_socket_t (dir (add_name create getattr open read remove_name rmdir search setattr write)))
 (allow init_t fvca_firmware_status_socket_t (sock_file (create getattr relabelto setattr unlink write)))
@@ -105,6 +107,17 @@
 (allow fvca_firmware_observer_t tmpfs_t (file (getattr open read)))
 (allow fvca_firmware_observer_t var_run_t (file (getattr open read)))
 (allow fvca_firmware_observer_t init_var_run_t (file (getattr open read)))
+
+; The non-root inventory reader has no access to firmware state or writer IPC.
+(allow init_t fvca_firmware_reader_t (unix_stream_socket (accept bind create getattr getopt listen read setopt shutdown write)))
+(allow fvca_management_broker_t fvca_firmware_reader_t (unix_stream_socket (connectto)))
+(allow fvca_firmware_reader_t self (unix_stream_socket (connect create getattr getopt ioctl read setopt shutdown write)))
+(allow fvca_firmware_reader_t system_dbusd_var_run_t (sock_file (getattr write)))
+(allow fvca_firmware_reader_t system_dbusd_t (unix_stream_socket (connectto)))
+(allow fvca_firmware_reader_t system_dbusd_t (dbus (send_msg)))
+(allow system_dbusd_t fvca_firmware_reader_t (dbus (send_msg)))
+(allow fvca_firmware_reader_t fwupd_t (dbus (send_msg)))
+(allow fwupd_t fvca_firmware_reader_t (dbus (send_msg)))
 
 ; The broker's mount namespace hides this one Host credential directory.
 (type fvca_management_credentials_t)

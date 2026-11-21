@@ -47,8 +47,13 @@ for file in etc/fwupd/remotes.d/lvfs.conf usr/share/fwupd/quirks.d/builtin.quirk
     install -Dm644 "$work/staged/$file" "$DESTDIR/$file"
 done
 for file in etc/fwupd/fwupd.conf usr/lib/fvca/firmware-bus-{common,inventory,writer}.conf \
-    usr/lib/systemd/system/{fvca-firmware-bus@.socket,fvca-firmware-bus@.service,fvca-fwupd.service}; do
+    usr/lib/userdb/fvca-firmware-reader.{user,group} \
+    usr/lib/systemd/system/{fvca-firmware-bus@.socket,fvca-firmware-bus@.service,fvca-fwupd.service} \
+    usr/lib/systemd/system/fvca-firmware-bus@inventory.socket.d/20-reader.conf; do
     install -Dm644 "$SRCDIR/mkosi.hypervisor-core/$file" "$DESTDIR/$file"
+done
+for kind in user group; do
+    ln -s "fvca-firmware-reader.$kind" "$DESTDIR/usr/lib/userdb/62001.$kind"
 done
 install -Dm644 "$work/source/COPYING" "$DESTDIR/usr/share/licenses/fvca-fwupd/COPYING"
 install -Dm644 /usr/share/licenses/dbus-daemon/COPYING "$DESTDIR/usr/share/licenses/dbus-daemon/COPYING"
@@ -59,7 +64,7 @@ install -Dm644 /usr/share/licenses/dbus-daemon/COPYING "$DESTDIR/usr/share/licen
     printf '%s\n' 'cabinet_payload_size=v1'
     printf '%s\n' 'operation_history=v1'
     printf '%s\n' 'device_preflight=v1'
-    printf '%s\n' 'capsule_writer=v5'
+    printf '%s\n' 'capsule_writer=v5' 'inventory_reader=v1'
     rpm -q dbus-daemon dbus-libs gcc glib2 libxmlb meson
     sha256sum "$SRCDIR/tools/fwupd-inventory.patch" | cut -d ' ' -f1 | sed 's/^/patch_sha256=/'
     sha256sum "$SRCDIR/tools/fwupd-catalog.patch" | cut -d ' ' -f1 | sed 's/^/catalog_patch_sha256=/'

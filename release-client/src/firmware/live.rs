@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{Result, invalid, state};
 
-const ADDRESS: &CStr = c"unix:path=/run/fvca/firmware-bus-inventory";
+const ADDRESS: &CStr = c"unix:path=/run/fvca-firmware-bus/inventory";
 const WRITER_ADDRESS: &CStr = c"unix:path=/run/fvca/firmware-bus-writer";
 const DAEMON: &str = "/usr/libexec/fwupd/fwupd";
 const FWUPD: &CStr = c"org.freedesktop.fwupd";
@@ -34,8 +34,7 @@ struct Peer {
 }
 
 impl Peer {
-    fn connect(address: &CStr, expected_uid: u32, executable: &Path) -> Result<Self> {
-        let bus = Bus::connect(address)?;
+    fn identify(bus: Bus, expected_uid: u32) -> Result<Self> {
         let mut resolved = bus.call(DBUS, DBUS_PATH, DBUS, c"GetNameOwner", &[FWUPD])?;
         let owner = resolved.string()?;
         resolved.finish()?;
@@ -46,22 +45,27 @@ impl Peer {
         let mut uid = bus.call(DBUS, DBUS_PATH, DBUS, c"GetConnectionUnixUser", &[&owner])?;
         let user = uid.u32()?;
         uid.finish()?;
-        let mut process = bus.call(
+        if user != expected_uid {
+            return Err(invalid("fwupd D-Bus owner has an unexpected UID").into());
+        }
+        Ok(Self { bus, owner })
+    }
+
+    fn connect(address: &CStr, expected_uid: u32, executable: &Path) -> Result<Self> {
+        let peer = Self::identify(Bus::connect(address, true)?, expected_uid)?;
+        let mut process = peer.bus.call(
             DBUS,
             DBUS_PATH,
             DBUS,
             c"GetConnectionUnixProcessID",
-            &[&owner],
+            &[&peer.owner],
         )?;
         let pid = process.u32()?;
         process.finish()?;
-        if user != expected_uid
-            || pid == 0
-            || fs::read_link(format!("/proc/{pid}/exe"))? != executable
-        {
+        if pid == 0 || fs::read_link(format!("/proc/{pid}/exe"))? != executable {
             return Err(invalid("fwupd D-Bus owner is not the expected daemon process").into());
         }
-        Ok(Self { bus, owner })
+        Ok(peer)
     }
 
     fn property<T>(
@@ -92,9 +96,9 @@ impl Peer {
     }
 
     fn devices(&self) -> Result<Devices> {
-        let mut reply = self
-            .bus
-            .call(&self.owner, c"/", FWUPD, c"GetDevices", &[])?;
+        let Some(mut reply) = self.bus.devices(&self.owner)? else {
+            return Ok(Devices { devices: vec![] });
+        };
         let devices = reply.array(c"a{sv}", device)?;
         reply.finish()?;
         Ok(Devices { devices })
@@ -141,6 +145,23 @@ impl Peer {
             _ => Err(invalid("fwupd did not report a terminal update state").into()),
         }
     }
+}
+
+pub(super) fn inventory() -> Result<(String, Devices)> {
+    let peer = Peer::identify(Bus::connect(ADDRESS, false)?, 0)?;
+    let mut context = peer.bus.call(
+        DBUS,
+        DBUS_PATH,
+        DBUS,
+        c"GetConnectionSELinuxSecurityContext",
+        &[&peer.owner],
+    )?;
+    let label = context.bytes()?;
+    context.finish()?;
+    if label != b"system_u:system_r:fwupd_t:s0" {
+        return Err(invalid("firmware inventory requires the confined fwupd peer").into());
+    }
+    Ok((peer.version()?, peer.devices()?))
 }
 
 // Wire bit positions of the fwupd D-Bus ABI, including every flag used by admission.

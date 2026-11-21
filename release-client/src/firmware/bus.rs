@@ -23,6 +23,20 @@ struct SdBusMessage {
     _private: [u8; 0],
 }
 
+#[repr(C)]
+struct SdBusError {
+    name: *const c_char,
+    message: *const c_char,
+    need_free: c_int,
+}
+
+impl Drop for SdBusError {
+    fn drop(&mut self) {
+        // sd-bus owns any strings associated with this error.
+        unsafe { sd_bus_error_free(self) };
+    }
+}
+
 // sd-bus is supplied by the systemd base. Use the installed ELF ABI directly.
 #[link(name = "libsystemd.so.0", kind = "dylib", modifiers = "+verbatim")]
 unsafe extern "C" {
@@ -36,9 +50,11 @@ unsafe extern "C" {
         bus: *mut SdBus,
         message: *mut SdBusMessage,
         timeout: u64,
-        error: *mut c_void,
+        error: *mut SdBusError,
         output: *mut *mut SdBusMessage,
     ) -> c_int;
+    fn sd_bus_error_free(error: *mut SdBusError);
+    fn sd_bus_error_has_name(error: *const SdBusError, name: *const c_char) -> c_int;
     fn sd_bus_message_new_method_call(
         bus: *mut SdBus,
         output: *mut *mut SdBusMessage,
@@ -94,7 +110,7 @@ impl Drop for Bus {
 }
 
 impl Bus {
-    pub(super) fn connect(address: &CStr) -> Result<Self> {
+    pub(super) fn connect(address: &CStr, pass_fds: bool) -> Result<Self> {
         let mut ptr = ptr::null_mut();
         // sd_bus_new assigns the sole reference on success.
         check(unsafe { sd_bus_new(&mut ptr) })?;
@@ -103,7 +119,7 @@ impl Bus {
         unsafe {
             check(sd_bus_set_address(bus.0.as_ptr(), address.as_ptr()))?;
             check(sd_bus_set_bus_client(bus.0.as_ptr(), 1))?;
-            check(sd_bus_negotiate_fds(bus.0.as_ptr(), 1))?;
+            check(sd_bus_negotiate_fds(bus.0.as_ptr(), c_int::from(pass_fds)))?;
             check(sd_bus_start(bus.0.as_ptr()))?;
         }
         Ok(bus)
@@ -122,6 +138,35 @@ impl Bus {
             call.append(b's', value.as_ptr().cast())?;
         }
         self.send(&call, CALL_TIMEOUT)
+    }
+
+    pub(super) fn devices(&self, owner: &CStr) -> Result<Option<Message>> {
+        let request = self.prepare(owner, c"/", c"org.freedesktop.fwupd", c"GetDevices")?;
+        let mut reply = ptr::null_mut();
+        let mut error = SdBusError {
+            name: ptr::null(),
+            message: ptr::null(),
+            need_free: 0,
+        };
+        // Both output pointers live through the call and the error is always freed.
+        let status = unsafe {
+            sd_bus_call(
+                self.0.as_ptr(),
+                request.0.as_ptr(),
+                CALL_TIMEOUT,
+                &mut error,
+                &mut reply,
+            )
+        };
+        if status < 0
+            && unsafe {
+                sd_bus_error_has_name(&error, c"org.freedesktop.fwupd.NothingToDo".as_ptr()) > 0
+            }
+        {
+            return Ok(None);
+        }
+        check(status)?;
+        Ok(Some(Message::owned(reply)?))
     }
 
     pub(super) fn import_lvfs(
@@ -281,6 +326,21 @@ impl Message {
             )
         })?;
         Ok(value)
+    }
+
+    pub(super) fn bytes(&mut self) -> Result<Vec<u8>> {
+        self.array(c"y", |message| {
+            let mut value = 0u8;
+            // Type y takes a pointer to uint8_t.
+            read(unsafe {
+                sd_bus_message_read_basic(
+                    message.0.as_ptr(),
+                    b'y' as c_char,
+                    std::ptr::from_mut(&mut value).cast(),
+                )
+            })?;
+            Ok(value)
+        })
     }
 
     pub(super) fn u64(&mut self) -> Result<u64> {

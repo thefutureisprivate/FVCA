@@ -47,8 +47,8 @@ pub fn publish_management_enrollment(cmdline: &str) -> io::Result<()> {
         ));
     }
     for marker in [
-        "/usr/lib/fvca/management-policy-v4",
-        "/sysroot/usr/lib/fvca/management-services-v4",
+        "/usr/lib/fvca/management-policy-v5",
+        "/sysroot/usr/lib/fvca/management-services-v5",
     ] {
         let support = fs::symlink_metadata(marker)?;
         if !support.is_file() || support.len() != 0 {
@@ -421,6 +421,7 @@ pub fn activate_firmware_if_selected(
         eprintln!("FVCA_HOST_FIRMWARE_BOOT_EVIDENCE_BLOCKED {error}");
     }
     publish_depot(FIRMWARE_STATE, "fvca-firmware-update", &owner)?;
+    enable_unit("fvca-fwupd.service")?;
     enable_timer("fvca-firmware-update")?;
     if recovery {
         enable_unit("fvca-firmware-recovery.service")?;

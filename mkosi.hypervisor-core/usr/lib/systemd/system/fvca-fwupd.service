@@ -8,7 +8,7 @@ ConditionVirtualization=!container
 Type=notify
 NotifyAccess=main
 ExecStart=/usr/libexec/fwupd/fwupd
-Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/fvca/firmware-bus-inventory
+Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/fvca-firmware-bus/inventory
 TimeoutStartSec=60s
 RuntimeDirectory=fvca-firmware
 RuntimeDirectoryMode=0700

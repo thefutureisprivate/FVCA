@@ -27,7 +27,7 @@ UMask=0077
 # The launcher drops both capabilities from every set before executing fwupd.
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SETPCAP
 DevicePolicy=closed
-InaccessiblePaths=-/run/dbus -/run/systemd/private -/run/libvirt -/run/fvca/firmware-bus-inventory
+InaccessiblePaths=-/run/dbus -/run/systemd/private -/run/libvirt -/run/fvca-firmware-bus
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 NoExecPaths=/run /tmp /var

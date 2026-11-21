@@ -104,6 +104,7 @@ def assemble(args, work):
         "usr/libexec/fwupd", "usr/lib64/libfwupd.so.3", "usr/bin/fwupdmgr", "usr/bin/fwupdtool",
         "usr/lib/fvca/firmware-bus-common.conf", "usr/lib/fvca/firmware-bus-inventory.conf",
         "usr/lib/fvca/firmware-bus-writer.conf", "usr/share/fvca/firmware-build.txt",
+        "usr/lib/userdb/fvca-firmware-reader.user", "usr/lib/userdb/fvca-firmware-reader.group",
     )):
         raise ValueError("Service Guest core carries the Host firmware facility")
     verify_initrd(args.initrd, uname, (*ACTIVATION_FILES, "usr/lib/fvca/storage-scrub-enrollment-v1"),

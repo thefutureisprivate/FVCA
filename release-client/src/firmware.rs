@@ -5,6 +5,7 @@ mod boot;
 mod bus;
 mod capsule;
 mod dispatch;
+mod inventory;
 mod live;
 mod qualification;
 mod result;
@@ -12,6 +13,9 @@ mod status;
 mod transition;
 mod writer;
 
+pub(crate) use inventory::{
+    InventoryCursor, InventoryPage, InventoryReply, READER_UID, inventory_page,
+};
 pub(crate) use status::StatusSnapshot;
 pub(crate) use writer::serve as serve_writer;
 

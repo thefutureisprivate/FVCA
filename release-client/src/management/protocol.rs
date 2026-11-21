@@ -86,6 +86,9 @@ pub(super) enum Operation {
     HostStorageHealth {},
     HostBackupStatus {},
     HostFirmwareStatus {},
+    HostFirmwareInventory {
+        after: Option<crate::firmware::InventoryCursor>,
+    },
     HostLocalCaptures {
         after: Option<Cursor>,
     },
@@ -180,6 +183,7 @@ pub(super) fn authorize(enrollment: &Enrollment, packet: &[u8], now: u64) -> Res
         | Operation::HostStorageHealth {}
         | Operation::HostBackupStatus {}
         | Operation::HostFirmwareStatus {}
+        | Operation::HostFirmwareInventory { .. }
         | Operation::HostLocalCaptures { .. }
         | Operation::HostLocalCapture { .. }
         | Operation::Preflight { .. }
@@ -251,6 +255,9 @@ pub(super) enum Refusal {
     HostStorageHealthUnavailable,
     HostBackupStatusUnavailable,
     HostFirmwareStatusUnavailable,
+    HostFirmwareInventoryUnavailable,
+    FirmwareInventoryChanged,
+    InvalidFirmwareInventoryCursor,
     HostCaptureCatalogUnavailable,
     UnknownHostCapture,
     InvalidHostCaptureCursor,
@@ -472,6 +479,7 @@ mod tests {
         let health = json!({"type": "host-storage-health"});
         let backup = json!({"type": "host-backup-status"});
         let firmware = json!({"type": "host-firmware-status"});
+        let inventory = json!({"type": "host-firmware-inventory"});
         let catalog = json!({"type": "host-local-captures"});
         let capture = json!({"type": "host-local-capture", "capture_id": host});
         let quote = json!({"type": "boot-quote", "challenge": "a4".repeat(32)});
@@ -488,6 +496,7 @@ mod tests {
             assert!(authorize(&enrollment, &request(health.clone(), other)?, 20).is_err());
             assert!(authorize(&enrollment, &request(backup.clone(), other)?, 20).is_err());
             assert!(authorize(&enrollment, &request(firmware.clone(), other)?, 20).is_err());
+            assert!(authorize(&enrollment, &request(inventory.clone(), other)?, 20).is_err());
             assert!(authorize(&enrollment, &request(catalog.clone(), other)?, 20).is_err());
             assert!(authorize(&enrollment, &request(capture.clone(), other)?, 20).is_err());
         }
@@ -504,6 +513,10 @@ mod tests {
             Operation::HostFirmwareStatus {}
         ));
         assert!(matches!(
+            authorize(&enrollment, &request(inventory, &reader)?, 20)?.operation,
+            Operation::HostFirmwareInventory { after: None }
+        ));
+        assert!(matches!(
             authorize(&enrollment, &request(catalog, &reader)?, 20)?.operation,
             Operation::HostLocalCaptures { after: None }
         ));
@@ -518,6 +531,7 @@ mod tests {
             json!({"type": "host-backup-status", "start": true}),
             json!({"type": "host-backup-status", "repository": "arbitrary"}),
             json!({"type": "host-firmware-status", "activate": true}),
+            json!({"type": "host-firmware-inventory", "method": "UpdateMetadata"}),
             json!({"type": "host-local-captures", "expire": true}),
             json!({"type": "host-local-capture", "capture_id": host, "path": "/etc/shadow"}),
         ] {

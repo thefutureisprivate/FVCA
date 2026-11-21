@@ -554,6 +554,7 @@ fn run() -> Result<()> {
             Some("--serve-management") => return runtime()?.block_on(management::gateway()),
             Some("--serve-boot-quote") => return management::boot_quote::serve(),
             Some("--serve-firmware-status") => return management::firmware_status::serve(),
+            Some("--serve-firmware-inventory") => return management::firmware_inventory::serve(),
             Some("--collect-boot-quote") => return attestation::collect_from_stdin(),
             _ => (),
         }

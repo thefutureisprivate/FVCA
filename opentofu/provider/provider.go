@@ -63,6 +63,7 @@ func (p *fvcaProvider) DataSources(_ context.Context) []func() datasource.DataSo
 	return []func() datasource.DataSource{
 		func() datasource.DataSource { return &guestConfigurationPlan{} },
 		func() datasource.DataSource { return &hostFirmware{} },
+		func() datasource.DataSource { return &hostFirmwareInventory{} },
 	}
 }
 

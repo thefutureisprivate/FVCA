@@ -1,0 +1,23 @@
+[Unit]
+Description=Private FVCA firmware inventory socket
+DefaultDependencies=no
+After=fvca-base-ready.service fvca-fwupd.service
+Before=shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/run/fvca/management.json
+ConditionPathExists=/run/fvca/firmware-update-owner
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+
+[Socket]
+ListenStream=/run/fvca-firmware-status/inventory.sock
+ExecStartPost=/usr/bin/chcon --no-dereference system_u:object_r:fvca_firmware_status_socket_t:s0 /run/fvca-firmware-status/inventory.sock
+FileDescriptorName=firmware-inventory
+Accept=yes
+AcceptFileDescriptors=no
+MaxConnections=8
+DirectoryMode=0700
+SocketMode=0600
+Backlog=8
+PollLimitIntervalSec=1s
+PollLimitBurst=16

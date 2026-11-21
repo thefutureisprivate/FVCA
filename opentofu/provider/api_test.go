@@ -34,6 +34,28 @@ func TestFirmwareStatusKeepsPendingAndRecordedOperationSeparate(t *testing.T) {
 	}
 }
 
+func TestFirmwareInventoryBindsPaginationToOneGeneration(t *testing.T) {
+	generation := strings.Repeat("c", 64)
+	device := inventoryDevice{
+		ID: strings.Repeat("b", 40), Plugin: "nvme",
+		GUIDs: []string{}, Protocols: []string{"org.nvmexpress"}, Vendors: []string{},
+	}
+	page := inventoryPage{Version: "2.1.10", CheckedAt: 100, Generation: generation, Device: &device}
+	after := inventoryCursor{Generation: generation, After: strings.Repeat("a", 40)}
+	if !page.valid(&after) {
+		t.Fatal("rejected a later device within the same inventory")
+	}
+	page.Next = &after
+	if page.valid(nil) {
+		t.Fatal("accepted a continuation that does not follow the device")
+	}
+	page.Next = nil
+	page.Generation = strings.Repeat("d", 64)
+	if page.valid(&after) {
+		t.Fatal("accepted a continuation from a changed inventory")
+	}
+}
+
 func TestPreflightBindsFullConfiguration(t *testing.T) {
 	defaults := settings{VCPUs: 2, MemoryMiB: 2048}
 	revision := uint64(1)
