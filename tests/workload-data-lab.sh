@@ -92,6 +92,7 @@ PY
     truncate -s "$partition_bytes" "$image"
     "${builder[@]}" mkfs.btrfs --quiet --force --nodiscard --data single --metadata dup \
         --uuid "$filesystem" --rootdir "$tree" "$image"
+    podman unshare rm -rf -- "$tree"
     if (( $(stat -c %s -- "$image") > partition_bytes )); then
         echo 'The seeded Btrfs filesystem exceeds the template partition. Use a larger Guest template.' >&2
         exit 1
@@ -99,5 +100,6 @@ PY
     guest="$temporary/$name.raw"
     cp --reflink=auto --sparse=always -- "$template" "$guest"
     dd if="$image" of="$guest" bs=1M oflag=seek_bytes seek="$((start * 512))" conv=notrunc status=none
+    rm -- "$image"
     mv -- "$guest" "$output/$name.raw"
 done

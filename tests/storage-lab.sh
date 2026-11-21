@@ -94,6 +94,8 @@ cp "$modules"/modules.* "$root$modules/"
     cd "$root"
     find . -print0 | cpio --quiet -0 -o -H newc --owner=0:0 | gzip -1
 ) > "$output/lab.cpio.gz"
+rm -rf -- "$root"
+trap - EXIT
 
 boot() {
     local mode=$1
