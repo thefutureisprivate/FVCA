@@ -22,7 +22,7 @@ COMMAND_LINE = " ".join((
     "rd.systemd.mask=initrd-switch-root.target",
     "rd.systemd.mask=initrd-switch-root.service",
     "rd.systemd.mask=sysroot.mount",
-    "rd.systemd.gpt_auto=no", "systemd.gpt_auto=no",
+    "rd.systemd.gpt_auto=no", "systemd.gpt_auto=no", "systemd.import_credentials=no",
     *DISABLE_AUTOMATIC_EXTENSIONS, *SECURE_KERNEL_OPTIONS,
     "selinux=1", "enforcing=1", "dm_verity.require_signatures=1",
     "proc_mem.force_override=never", "systemd.restrict_filesystem_access=exec",
@@ -34,7 +34,7 @@ REQUIRED = (
     "usr/lib/fvca/assess-host-recovery",
     "usr/lib/systemd/system/fvca-host-recovery.service",
     "usr/lib/systemd/system/fvca-host-recovery.target",
-    "usr/bin/blockdev", "usr/bin/cryptsetup", "usr/bin/sha256sum", "usr/bin/systemd-ask-password",
+    "usr/bin/losetup", "usr/bin/cryptsetup", "usr/bin/sha256sum", "usr/bin/systemd-ask-password",
 )
 FORBIDDEN = (
     POLICY, f"{POLICY}.cmdline", "usr/lib/fvca/host-storage", "usr/lib/fvca/service-guest.composition",

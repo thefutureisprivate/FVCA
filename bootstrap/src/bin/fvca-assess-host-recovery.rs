@@ -22,6 +22,7 @@ const VOLUME: &str = "/dev/mapper/fvca-recovery";
 const HEADER: &str = "/run/fvca-host-recovery/member.header";
 const MOUNT: &str = "/run/fvca-host-recovery/pool";
 const CRYPTSETUP: &str = "/usr/bin/cryptsetup";
+const LOSETUP: &str = "/usr/bin/losetup";
 
 struct Selection<'a> {
     partition: &'a str,
@@ -94,6 +95,47 @@ fn verify_readonly(device: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn with_write_barrier(
+    source: &Path,
+    partition: &Path,
+    assess: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    // A block-device read-only ioctl alone warns on writes from stacked
+    // drivers. The read-only loop driver rejects those writes, including
+    // journal replay issued below the read-only dm-crypt mapping.
+    let output = Command::new(LOSETUP).env_clear()
+        .args(["--find", "--show", "--read-only", "--sector-size", "4096"])
+        .arg(source)
+        .output()?;
+    if !output.status.success() {
+        return Err(invalid("could not establish the Host recovery write barrier"));
+    }
+    let text = std::str::from_utf8(&output.stdout).map_err(io::Error::other)?;
+    let path = text.strip_suffix('\n').ok_or_else(|| invalid("invalid recovery loop device"))?;
+    if !path.strip_prefix("/dev/loop").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    }) {
+        return Err(invalid("invalid recovery loop device"));
+    }
+    let path = Path::new(path);
+    let result = (|| {
+        let block = sys_block(path)?;
+        verify_readonly(&block)?;
+        let loop_info = block.join("loop");
+        let backing = fs::read_to_string(loop_info.join("backing_file"))?;
+        if backing.strip_suffix('\n').map(Path::new) != Some(source)
+            || fs::read_to_string(loop_info.join("offset"))? != "0\n"
+            || fs::read_to_string(loop_info.join("sizelimit"))? != "0\n"
+            || fs::read_to_string(block.join("size"))? != fs::read_to_string(partition.join("size"))?
+        {
+            return Err(invalid("Host recovery loop device does not cover the selected partition"));
+        }
+        assess(path, &block)
+    })();
+    run(Command::new(LOSETUP).arg("--detach").arg(path))?;
+    result
+}
+
 fn open_member(selection: &Selection<'_>, source: &Path) -> io::Result<()> {
     let mut ask = Command::new("/usr/bin/systemd-ask-password")
         .env_clear()
@@ -126,49 +168,49 @@ fn open_member(selection: &Selection<'_>, source: &Path) -> io::Result<()> {
     result
 }
 
-fn assess() -> io::Result<()> {
-    fvca_allocator_binding::require_allocator()?;
-    if fs::read_to_string("/proc/cmdline")? != fs::read_to_string("/usr/lib/fvca/host-recovery.cmdline")? {
-        return Err(invalid("the kernel command line differs from the signed Host recovery policy"));
-    }
-    kernel_policy::require_signed_modules()?;
-    let text = fs::read_to_string(SELECTION)?;
-    let selection = Selection::parse(&text)?;
-    selection.verify_time()?;
-    kernel_policy::load_modules(&[
-        "virtio_pci", "virtio_blk", "nvme", "dm_crypt", "dm_integrity", "authenc", "hmac", "xts", "btrfs",
-    ])?;
-    kernel_policy::seal()?;
-    let source = locate(selection.partition)?;
-    let partition = sys_block(&source)?;
-    if !partition.join("partition").is_file() {
-        return Err(invalid("authorized Host recovery member is not a partition"));
-    }
-    run(Command::new("/usr/bin/blockdev").arg("--setro").arg(&source))?;
-    verify_readonly(&partition)?;
-    verify_superblock(&source, "crypto_LUKS", selection.luks, Some("2"))?;
+fn assess_member(selection: &Selection<'_>, source: &Path, barrier: &Path) -> io::Result<()> {
+    verify_superblock(source, "crypto_LUKS", selection.luks, Some("2"))?;
     run(Command::new(CRYPTSETUP)
         .args(["luksHeaderBackup", "--header-backup-file", HEADER])
-        .arg(&source))?;
+        .arg(source))?;
     let header = File::open(HEADER)?;
     if !header.metadata()?.is_file() || recovery::sha256(header)? != selection.header_digest {
         return Err(invalid("live LUKS2 header differs from the signed recovery header"));
     }
     selection.verify_time()?;
-    open_member(&selection, &source)?;
+    open_member(selection, source)?;
     let result = (|| {
         fs::remove_file(HEADER)?;
         selection.verify_time()?;
         let volume = Path::new(VOLUME);
         let mapped = sys_block(&fs::canonicalize(volume)?)?;
-        let journal = storage_integrity::verify(&mapped, &partition)?;
-        for device in [&partition, &journal, &mapped] {
+        let journal = storage_integrity::verify(&mapped, barrier)?;
+        for device in [barrier, &journal, &mapped] {
             verify_readonly(device)?;
         }
         btrfs::assess_host_member(volume, selection.filesystem, MOUNT)
     })();
     run(Command::new(CRYPTSETUP).args(["close", MAPPER]))?;
-    result?;
+    result
+}
+
+fn assess() -> io::Result<()> {
+    fvca_allocator_binding::require_allocator()?;
+    kernel_policy::require_signed_modules()?;
+    let text = fs::read_to_string(SELECTION)?;
+    let selection = Selection::parse(&text)?;
+    selection.verify_time()?;
+    kernel_policy::load_modules(&[
+        "virtio_pci", "virtio_blk", "nvme", "loop", "dm_crypt", "dm_integrity",
+        "authenc", "hmac", "xts", "btrfs",
+    ])?;
+    kernel_policy::seal()?;
+    let source = fs::canonicalize(locate(selection.partition)?)?;
+    let partition = sys_block(&source)?;
+    if !partition.join("partition").is_file() {
+        return Err(invalid("authorized Host recovery member is not a partition"));
+    }
+    with_write_barrier(&source, &partition, |backing, barrier| assess_member(&selection, backing, barrier))?;
     println!("FVCA_HOST_RECOVERY_VERIFIED {} raid1 read-only", selection.filesystem);
     Ok(())
 }

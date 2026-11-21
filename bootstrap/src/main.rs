@@ -30,6 +30,18 @@ fn label_initramfs() -> io::Result<()> {
     Ok(())
 }
 
+fn verify_recovery_boot() -> io::Result<()> {
+    if Path::new("/usr/lib/fvca/host-recovery").try_exists()? {
+        run(Command::new("/usr/bin/mount").args([
+            "--internal-only", "-t", "proc", "-o", "nosuid,nodev,noexec", "proc", "/proc",
+        ]))?;
+        if fs::read_to_string("/proc/cmdline")? != fs::read_to_string("/usr/lib/fvca/host-recovery.cmdline")? {
+            return Err(invalid("the kernel command line differs from the signed Host recovery policy"));
+        }
+    }
+    Ok(())
+}
+
 fn load_verity() -> io::Result<()> {
     let direct = direct_boot::prepare()?;
     let workload = match fs::symlink_metadata(WORKLOAD_VERITY_CERTIFICATE) {
@@ -56,6 +68,10 @@ fn main() -> ExitCode {
     }
     if let Err(error) = fvca_allocator_binding::require_allocator() {
         eprintln!("FVCA bootstrap allocator check failed: {error}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(error) = verify_recovery_boot() {
+        eprintln!("FVCA_HOST_RECOVERY_REFUSED {error}");
         return ExitCode::FAILURE;
     }
     // CPIO has no xattrs. Label the UKI's initramfs before systemd loads the policy.
