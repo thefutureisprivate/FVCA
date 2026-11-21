@@ -46,6 +46,8 @@ MANAGEMENT_UNITS = {
 } | {
     Path("usr/lib/systemd/system/fvca-attestation.socket"),
     Path("usr/lib/systemd/system/fvca-attestation@.service"),
+    Path("usr/lib/systemd/system/fvca-firmware-status.socket"),
+    Path("usr/lib/systemd/system/fvca-firmware-status@.service"),
 }
 MANAGEMENT_USERDB = Path("usr/lib/userdb")
 MANAGEMENT_RECORDS = tuple(f"fvca-management.{kind}" for kind in ("user", "group"))

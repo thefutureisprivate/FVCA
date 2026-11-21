@@ -1,6 +1,8 @@
 # FVCA OpenTofu provider
 
-The off-node provider `registry.opentofu.org/thefutureisprivate/fvca` version `0.2.0` implements the `fvca_guest_configuration_plan` data source and the `fvca_guest_configuration` resource for an enrolled Service Guest. The `fvca-appliance` module preflights typed CPU and memory settings by default. Set `manage_guest = true` to track the settings in OpenTofu and submit them on apply. Automatic Host release observations remain separate from the desired configuration revision.
+The off-node provider `registry.opentofu.org/thefutureisprivate/fvca` version `0.3.0` implements the `fvca_guest_configuration_plan` data source and the `fvca_guest_configuration` resource for an enrolled Service Guest. The `fvca-appliance` module preflights typed CPU and memory settings by default. Set `manage_guest = true` to track the settings in OpenTofu and submit them on apply. Automatic Host release observations remain separate from the desired configuration revision.
+
+Use the `fvca_host_firmware` data source with the enrolled `host_id` to observe firmware independently of Guest configuration. Its computed attributes include enrollment, current activation, and the last discovery or recovery check. The data source uses the existing management read key and TLS pin.
 
 The example uses OpenTofu `1.13.9`, a Linux amd64 runner and a locally built provider. The checked-in lock file pins the provider package. The Host endpoint and Guest must already be enrolled as described in the appliance README.
 

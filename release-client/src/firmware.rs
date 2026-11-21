@@ -8,9 +8,11 @@ mod dispatch;
 mod live;
 mod qualification;
 mod result;
+mod status;
 mod transition;
 mod writer;
 
+pub(crate) use status::StatusSnapshot;
 pub(crate) use writer::serve as serve_writer;
 
 use std::fs::{self, File, Permissions};

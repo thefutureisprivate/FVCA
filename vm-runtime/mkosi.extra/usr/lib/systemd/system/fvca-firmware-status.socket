@@ -1,0 +1,23 @@
+[Unit]
+Description=Private FVCA firmware observation socket
+DefaultDependencies=no
+After=fvca-base-ready.service
+Before=shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/run/fvca/management.json
+AssertPathIsMountPoint=/run/fvca/host-data
+AssertSecurity=uefi-secureboot
+AssertSecurity=selinux
+
+[Socket]
+ListenStream=/run/fvca-firmware-status/status.sock
+ExecStartPost=/usr/bin/chcon --no-dereference system_u:object_r:fvca_firmware_status_socket_t:s0 /run/fvca-firmware-status/status.sock
+FileDescriptorName=firmware-status
+Accept=yes
+AcceptFileDescriptors=no
+MaxConnections=8
+DirectoryMode=0700
+SocketMode=0600
+Backlog=8
+PollLimitIntervalSec=1s
+PollLimitBurst=16

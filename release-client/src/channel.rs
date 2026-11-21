@@ -138,7 +138,9 @@ pub(super) fn observed_host_release() -> Result<Option<ObservedRelease>> {
     let pinned = match handoff::require_pool_directory(directory) {
         Ok(pinned) => pinned,
         Err(error)
-            if error.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOENT) =>
+            if error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) =>
         {
             return Ok(None);
         }

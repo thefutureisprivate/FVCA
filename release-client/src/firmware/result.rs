@@ -79,7 +79,7 @@ fn require_success(
     Ok(())
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum Assessment {
     TargetReported,
@@ -161,7 +161,7 @@ fn collect(
     Ok((assessment, observed, qualified.after, recovery))
 }
 
-fn staged_record(directory: &File, name: &str, limit: u64) -> Result<Vec<u8>> {
+pub(super) fn staged_record(directory: &File, name: &str, limit: u64) -> Result<Vec<u8>> {
     let file = handoff::open_child(
         directory,
         name,

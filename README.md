@@ -869,6 +869,10 @@ The broker delegates only the 32-byte challenge to the SELinux-confined collecto
 
 The [off-node OpenTofu provider and module](opentofu/README.md) use this protocol for authenticated Guest configuration preflight and separate release observations.
 
+Send `{"type":"host-firmware-status"}` with the management read key for firmware enrollment, the current activation identity and phase, and the last discovery or recovery check. A staged check reports the exact device, offer and archive digests, qualified source and target versions, and recorded eligibility. A recovery check can report the operation it assessed and the observed result. Check timestamps and freshness describe that observation. `last_check_unavailable` signals that the observer could not verify the saved check.
+
+This operation remains available while a pending firmware activation fences Guest startup. A separate enforcing SELinux service reads bounded records on the authenticated Btrfs pool. The observer has read-only mounts and receives one private Unix connection from the broker. Its sandbox blocks the firmware buses. A `host-firmware-status-unavailable` reply means the observer could not read the current activation state.
+
 Send `{"type":"host-storage-health"}` with the enrolled read operator key to inspect the mounted Hypervisor Btrfs pool. The result `host-storage-health` returns the filesystem UUID, RAID1 profile and observed read-only state under `pool`. The `data`, `metadata` and `system` records each report logical `total_bytes` and `used_bytes` in allocated chunks. Each of the two `members` reports its Btrfs device ID, byte span visible to Btrfs, allocated bytes, and the kernel's cumulative write, read, flush, corruption and generation error counters. The request takes no arguments. A `host-storage-health-unavailable` refusal means a complete observation could not be made. [Linux Btrfs UAPI](https://github.com/torvalds/linux/blob/master/include/uapi/linux/btrfs.h)
 
 #### Scheduled Btrfs scrub

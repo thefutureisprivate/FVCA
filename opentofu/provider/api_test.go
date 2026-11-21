@@ -2,8 +2,37 @@ package main
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
+
+func TestFirmwareStatusKeepsPendingAndRecordedOperationSeparate(t *testing.T) {
+	enrolled, unavailable := true, false
+	operation := &firmwareActivation{
+		Transaction: "dce9f9d8-344d-418c-870b-8784cbdf76ef", Device: strings.Repeat("b", 40),
+		Offer: strings.Repeat("c", 64), Phase: "outcome-unknown",
+	}
+	view := &firmwareStatus{Schema: "fvca-host-firmware-status-v1", Enrolled: &enrolled,
+		Unavailable: &unavailable, Activation: operation,
+		Check: &firmwareCheck{Disposition: "outcome-unknown", CheckedAt: 100, Operation: operation}}
+	if !view.valid() {
+		t.Fatal("rejected an unresolved operation")
+	}
+	view.Activation = nil
+	if !view.valid() {
+		t.Fatal("expected retained observation to be independent of current activation")
+	}
+	view.Check.Disposition = "staged"
+	if view.valid() {
+		t.Fatal("accepted an unidentified staged offer")
+	}
+	view.Check = nil
+	view.Activation = operation
+	unavailable = true
+	if !view.valid() {
+		t.Fatal("invalid last-check history hid an active operation")
+	}
+}
 
 func TestPreflightBindsFullConfiguration(t *testing.T) {
 	defaults := settings{VCPUs: 2, MemoryMiB: 2048}

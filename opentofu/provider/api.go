@@ -167,20 +167,21 @@ type release struct {
 }
 
 type response struct {
-	Schema                string    `json:"schema"`
-	Nonce                 string    `json:"nonce"`
-	Host                  string    `json:"host"`
-	Guest                 string    `json:"guest"`
-	Result                string    `json:"result"`
-	Code                  string    `json:"code"`
-	BootConfiguration     *settings `json:"boot_configuration"`
-	ConfigurationEnrolled *bool     `json:"configuration_enrolled"`
-	HostTrial             *bool     `json:"host_trial"`
-	Observed              *release  `json:"observed_release"`
-	Configuration         *settings `json:"configuration"`
-	Activation            string    `json:"activation"`
-	OperationID           string    `json:"operation_id"`
-	OperationState        string    `json:"state"`
+	Schema                string          `json:"schema"`
+	Nonce                 string          `json:"nonce"`
+	Host                  string          `json:"host"`
+	Guest                 string          `json:"guest"`
+	Result                string          `json:"result"`
+	Code                  string          `json:"code"`
+	BootConfiguration     *settings       `json:"boot_configuration"`
+	ConfigurationEnrolled *bool           `json:"configuration_enrolled"`
+	HostTrial             *bool           `json:"host_trial"`
+	Observed              *release        `json:"observed_release"`
+	Firmware              *firmwareStatus `json:"firmware"`
+	Configuration         *settings       `json:"configuration"`
+	Activation            string          `json:"activation"`
+	OperationID           string          `json:"operation_id"`
+	OperationState        string          `json:"state"`
 }
 
 type request struct {
@@ -205,7 +206,8 @@ func (c *client) signedExchange(ctx context.Context, host, guest string, operati
 		return response{}, errors.New("could not generate a request nonce")
 	}
 	now := time.Now().Unix()
-	sent := request{"fvca-management-request-v1", host, guest, hex.EncodeToString(nonce), now, now + 25, operation}
+	// Allow two seconds of clock skew within the 30-second protocol bound.
+	sent := request{"fvca-management-request-v1", host, guest, hex.EncodeToString(nonce), now - 2, now + 25, operation}
 	body, err := json.Marshal(sent)
 	if err != nil || len(body)+ed25519.SignatureSize > requestLimit {
 		return response{}, errors.New("management request exceeds its size bound")
@@ -282,7 +284,7 @@ func (c *client) status(ctx context.Context, host, guest string) (response, erro
 	}
 	if status.Result != "status" || status.BootConfiguration == nil || !status.BootConfiguration.valid(guest) ||
 		status.ConfigurationEnrolled == nil || status.HostTrial == nil || status.Code != "" ||
-		status.Configuration != nil || status.Activation != "" ||
+		status.Configuration != nil || status.Activation != "" || status.Firmware != nil ||
 		status.OperationID != "" || status.OperationState != "" ||
 		(status.Observed != nil && (status.Observed.Epoch < 1 || status.Observed.Sequence < 1 || !isDigest(status.Observed.SHA256))) {
 		return response{}, errors.New("invalid boot configuration or release in Host status")
@@ -312,7 +314,7 @@ func (c *client) preflight(ctx context.Context, host, guest string, cpu, memory 
 	if !*status.ConfigurationEnrolled || *status.HostTrial || approval.Result != "preflight" || approval.Configuration == nil ||
 		!approval.Configuration.valid(guest) || approval.Code != "" || approval.BootConfiguration != nil ||
 		approval.ConfigurationEnrolled != nil || approval.HostTrial != nil || approval.Observed != nil ||
-		approval.OperationState != "" || approval.OperationID != "" {
+		approval.OperationState != "" || approval.OperationID != "" || approval.Firmware != nil {
 		return plan{}, errors.New("invalid Host preflight result")
 	}
 	next := *approval.Configuration

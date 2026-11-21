@@ -553,6 +553,7 @@ fn run() -> Result<()> {
             Some("--serve-management-broker") => return runtime()?.block_on(management::broker()),
             Some("--serve-management") => return runtime()?.block_on(management::gateway()),
             Some("--serve-boot-quote") => return management::boot_quote::serve(),
+            Some("--serve-firmware-status") => return management::firmware_status::serve(),
             Some("--collect-boot-quote") => return attestation::collect_from_stdin(),
             _ => (),
         }

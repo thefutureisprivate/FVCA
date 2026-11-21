@@ -1,6 +1,7 @@
 //! Authenticate requests on the network and authorize them again at the Host broker.
 
 pub(crate) mod boot_quote;
+pub(crate) mod firmware_status;
 mod intent;
 mod listener;
 mod local_captures;
@@ -240,6 +241,9 @@ enum Outcome {
     HostBackupStatus {
         scheduled: Option<storage_health::ScheduledBackup>,
     },
+    HostFirmwareStatus {
+        firmware: Box<crate::firmware::StatusSnapshot>,
+    },
     HostLocalCaptures {
         captures: Vec<local_captures::Capture>,
         next: Option<local_captures::Cursor>,
@@ -281,6 +285,14 @@ async fn dispatch(
         Operation::HostBackupStatus {} => {
             let scheduled = storage_health::backup().await?;
             Ok(Outcome::HostBackupStatus { scheduled })
+        }
+        Operation::HostFirmwareStatus {} => {
+            let firmware = firmware_status::request()
+                .await
+                .map_err(|_| Refusal::HostFirmwareStatusUnavailable)?;
+            Ok(Outcome::HostFirmwareStatus {
+                firmware: Box::new(firmware),
+            })
         }
         Operation::HostLocalCaptures { after } => {
             let (captures, next) = local_captures::list(after.clone()).await?;

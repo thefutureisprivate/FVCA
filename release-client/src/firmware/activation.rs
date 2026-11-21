@@ -23,7 +23,7 @@ const DIRECTORY: OFlags = OFlags::RDONLY.union(OFlags::DIRECTORY);
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum Phase {
+pub(super) enum Phase {
     Draining,
     Flashing,
     RebootPending,
@@ -39,7 +39,7 @@ pub(super) struct Activation {
     pub(super) boot_id: String,
     pub(super) offer_sha256: String,
     pub(super) device_id: String,
-    phase: Phase,
+    pub(super) phase: Phase,
     guest_was_active: bool,
     pub(super) mains_required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

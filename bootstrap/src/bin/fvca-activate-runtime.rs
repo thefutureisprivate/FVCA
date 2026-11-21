@@ -136,6 +136,7 @@ fn activate() -> io::Result<()> {
         hypervisor_trial::stop_candidate_watchdog_for_firmware(&cmdline)?;
         println!("FVCA_HOST_FIRMWARE_RECOVERY_REQUIRED");
         if !enroll_firmware(true)? {
+            host_update::publish_management_enrollment(&cmdline)?;
             kernel_policy::seal()?;
             println!("FVCA_VM_RUNTIME_ACTIVE {}", verified_runtime.extension);
             return Ok(());
@@ -185,7 +186,7 @@ fn activate() -> io::Result<()> {
         hypervisor_trial::publish_running_context(esp, &verified_runtime, guest, epoch)?;
         host_update::activate_if_selected()?;
     }
-    if !recovering && !firmware_pending {
+    if !recovering {
         host_update::publish_management_enrollment(&cmdline)?;
     }
     if !recovering && !Path::new("/run/fvca/boot-trial-started").try_exists()? {

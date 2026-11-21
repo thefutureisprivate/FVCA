@@ -1,8 +1,8 @@
 [Unit]
 Description=Private FVCA management broker socket
 DefaultDependencies=no
-Wants=fvca-attestation.socket
-After=fvca-base-ready.service fvca-attestation.socket
+Wants=fvca-attestation.socket fvca-firmware-status.socket
+After=fvca-base-ready.service fvca-attestation.socket fvca-firmware-status.socket
 Before=shutdown.target
 Conflicts=shutdown.target
 ConditionPathExists=/run/fvca/management.json
