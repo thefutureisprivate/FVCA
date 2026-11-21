@@ -122,7 +122,7 @@ def prepare_core(args, work):
     prepared = work / "core"
     run("python3", TOOLS / "verify-base.py", args.core, args.boot_certificate, "--extract-root", prepared)
     for path in ("usr/libexec/fvca/storage-scrub", "usr/lib/systemd/system/fvca-storage-scrub.service",
-                 "usr/lib/systemd/system/fvca-storage-scrub.timer"):
+                 "usr/lib/systemd/system/fvca-storage-scrub.timer", "usr/lib/fvca/storage-scrub-enrollment-v2"):
         component = prepared / "root" / path
         if component.is_symlink() or not component.is_file():
             raise ValueError(f"the verified core lacks Btrfs scrub support at {path}")

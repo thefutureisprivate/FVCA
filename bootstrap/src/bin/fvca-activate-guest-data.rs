@@ -51,7 +51,7 @@ fn activate() -> io::Result<()> {
     fs::write(format!("{drop_in}/10-guest-data.conf"), format!(
         "[Service]\nExecStartPre=/usr/bin/findmnt --mountpoint {DATA} --source PARTUUID={part} --types btrfs --options rw,nodev,nosuid,noexec\n",
     ))?;
-    btrfs::mount(btrfs::Pool::Guest(&source), filesystem, DATA)?;
+    btrfs::mount(btrfs::Pool::Guest(&source), filesystem, DATA, part)?;
     if Path::new(direct_boot::READY_IN_INITRD).try_exists()? {
         OpenOptions::new().write(true).create_new(true).mode(0o600).open(direct_boot::READY_IN_CORE)?;
     }

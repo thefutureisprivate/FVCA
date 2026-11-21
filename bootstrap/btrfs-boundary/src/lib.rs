@@ -1,5 +1,7 @@
 //! Narrow x86-64 Linux UAPI for the selected Btrfs storage profile.
 
+pub mod scrub_scope;
+
 use std::ffi::{CStr, OsStr, c_char, c_int, c_uint, c_ulong};
 use std::fs::{self, File};
 use std::io;

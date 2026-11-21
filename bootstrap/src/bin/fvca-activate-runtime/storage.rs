@@ -163,7 +163,13 @@ fn open_data(selection: &Selection<'_>, sources: &[PathBuf; 2]) -> io::Result<()
         if selection.authenticated {
             println!("FVCA_HOST_STORAGE_AUTHENTICATED");
         }
-        btrfs::mount(Pool::Hypervisor(volumes), selection.filesystem, DATA)
+        // Order by physical partition identity so equivalent A/B ordering has
+        // no effect on the coverage of a previous scrub.
+        let mut backing = selection.members.each_ref().map(|member| (member.partition, member.luks));
+        backing.sort_unstable();
+        let [(part_a, luks_a), (part_b, luks_b)] = backing;
+        btrfs::mount(Pool::Hypervisor(volumes), selection.filesystem, DATA,
+                     &format!("{part_a}:{luks_a},{part_b}:{luks_b}"))
     })();
     if result.is_err() {
         for mapper in MAPPERS[..opened].iter().rev() {

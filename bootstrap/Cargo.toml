@@ -7,17 +7,17 @@ publish = false
 
 [dependencies]
 fvca-allocator-binding = { path = "allocator-binding" }
-fvca-btrfs-boundary = { path = "btrfs-boundary", optional = true }
+fvca-btrfs-boundary = { path = "btrfs-boundary" }
 fvca-libvirt-boundary = { path = "libvirt-boundary", optional = true }
 fvca-signature-boundary = { path = "signature-boundary", optional = true }
 fvca-trial-authorization = { path = "trial-authorization" }
 fvca-watchdog-boundary = { path = "watchdog-boundary" }
 
 [features]
-libvirt = ["dep:fvca-btrfs-boundary", "dep:fvca-libvirt-boundary"]
+libvirt = ["dep:fvca-libvirt-boundary"]
 backup = []
 promotion = ["dep:fvca-signature-boundary"]
-storage-scrub = ["dep:fvca-btrfs-boundary"]
+storage-scrub = []
 
 [[bin]]
 name = "fvca-storage-scrub"

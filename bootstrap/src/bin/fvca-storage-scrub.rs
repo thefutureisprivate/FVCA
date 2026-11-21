@@ -7,9 +7,10 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use fvca_btrfs_boundary::scrub_scope::{Scope, read_selection};
 use fvca_btrfs_boundary::{ScrubProgress, scrub, scrub_members};
 use fvca_initrd_bootstrap::{
-    btrfs::{SCRUB_DIRECTORY, SCRUB_LIMIT, SCRUB_SELECTION, scrub_limit},
+    btrfs::{SCRUB_DIRECTORY, SCRUB_LIMIT, scrub_limit},
     identity, invalid,
 };
 
@@ -49,7 +50,7 @@ fn seconds(time: SystemTime) -> io::Result<u64> {
 }
 
 struct Report<'a> {
-    fsid: &'a str,
+    scope: Scope<'a>,
     boot_id: &'a str,
     started: u64,
     finished: u64,
@@ -63,13 +64,13 @@ impl Report<'_> {
     fn write(&self, directory: &Path) -> io::Result<()> {
         let body = format!(
             concat!(
-                "{{\"schema\":\"fvca-btrfs-scrub-v1\",\"filesystem_uuid\":\"{}\",\"boot_id\":\"{}\",",
+                "{}\"boot_id\":\"{}\",",
                 "\"started_at\":{},\"finished_at\":{},\"outcome\":\"{}\",",
                 "\"members\":{},\"completed_members\":{},\"data_bytes\":{},\"metadata_bytes\":{},",
                 "\"no_checksum_blocks\":{},\"corrected_errors\":{},\"uncorrectable_errors\":{},",
                 "\"allocation_errors\":{}}}"
             ),
-            self.fsid,
+            self.scope.receipt_prefix(),
             self.boot_id,
             self.started,
             self.finished,
@@ -121,24 +122,30 @@ impl Report<'_> {
     }
 }
 
-fn due(directory: &Path, now: SystemTime) -> io::Result<bool> {
-    match fs::symlink_metadata(directory.join("report.json")) {
-        Ok(meta)
-            if meta.is_file()
-                && meta.uid() == 0
-                && meta.gid() == 0
-                && meta.nlink() == 1
-                && meta.mode() & 0o7777 == 0o600 =>
-        {
-            Ok(now
-                .duration_since(meta.modified()?)
-                .map_err(io::Error::other)?
-                >= PERIOD)
-        }
-        Ok(_) => Err(invalid("scrub history must be a private receipt")),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
-        Err(error) => Err(error),
+fn due(directory: &Path, now: SystemTime, scope: &Scope<'_>) -> io::Result<bool> {
+    let receipt = match OpenOptions::new()
+        .read(true)
+        .custom_flags(OPEN_CHECKS)
+        .open(directory.join("report.json"))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    let meta = receipt.metadata()?;
+    if !meta.is_file()
+        || meta.uid() != 0
+        || meta.gid() != 0
+        || meta.nlink() != 1
+        || meta.mode() & 0o7777 != 0o600
+    {
+        return Err(invalid("scrub history must be a private receipt"));
     }
+    Ok(!scope.covers(receipt, meta.len())?
+        || now
+            .duration_since(meta.modified()?)
+            .map_err(io::Error::other)?
+            >= PERIOD)
 }
 
 fn execute() -> io::Result<()> {
@@ -155,17 +162,11 @@ fn execute() -> io::Result<()> {
     if unsafe { signal(SIGTERM, cancel) } == usize::MAX {
         return Err(io::Error::last_os_error());
     }
-    let selection = read(SCRUB_SELECTION, 128)?;
-    let mut lines = selection.lines();
-    let target = match lines.next() {
-        Some(target @ ("/run/fvca/host-data" | "/run/fvca/guest-data")) => target,
-        _ => return Err(invalid("no verified scrub mount selected")),
-    };
+    let selection = read_selection()?;
+    let scope = Scope::parse(&selection)?;
+    let target = scope.target;
     let uuid_groups = [8, 4, 4, 4, 12];
-    let fsid = identity(lines.next().unwrap_or_default(), "", &uuid_groups, '-')?;
-    if lines.next().is_some() {
-        return Err(invalid("unexpected scrub selection fields"));
-    }
+    let fsid = scope.filesystem;
     let pool = OpenOptions::new()
         .read(true)
         .custom_flags(OPEN_CHECKS)
@@ -186,14 +187,14 @@ fn execute() -> io::Result<()> {
         return Err(invalid("expected a private verified data mount"));
     }
     let now = SystemTime::now();
-    if !due(&directory, now)? {
+    if !due(&directory, now, &scope)? {
         return Ok(());
     }
     let devices = scrub_members(&pool, fsid, target == "/run/fvca/host-data")?;
     let boot = read("/proc/sys/kernel/random/boot_id", 37)?;
     let boot_id = identity(boot.trim_end(), "", &uuid_groups, '-')?;
     let mut report = Report {
-        fsid,
+        scope,
         boot_id,
         started: seconds(now)?,
         finished: 0,

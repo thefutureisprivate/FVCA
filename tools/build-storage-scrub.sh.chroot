@@ -12,3 +12,4 @@ manifest="$SRCDIR/bootstrap/Cargo.toml"
 cargo build --frozen --release --target "$target" --manifest-path "$manifest" --features storage-scrub --bin fvca-storage-scrub
 source="$CARGO_TARGET_DIR/$target/release/fvca-storage-scrub"
 install -Dm755 "$source" "$DESTDIR/usr/libexec/fvca/storage-scrub"
+install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/storage-scrub-enrollment-v2"

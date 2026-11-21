@@ -167,7 +167,7 @@ def assemble(args, work):
         raise ValueError("Service Guest core carries the Host firmware facility")
     if channel and not (root / "usr/lib/fvca/workload-channel").is_file():
         raise ValueError("the Guest core lacks workload channel support")
-    required = (*ACTIVATION_FILES, "usr/lib/fvca/storage-scrub-enrollment-v1",
+    required = (*ACTIVATION_FILES, "usr/lib/fvca/storage-scrub-enrollment-v2",
                 f"usr/lib/modules/{uname}/kernel/net/netfilter/nft_limit.ko.xz")
     if channel:
         required += (WORKLOAD_CHANNEL_SUPPORT,)

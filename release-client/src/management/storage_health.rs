@@ -6,8 +6,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use fvca_btrfs_boundary::SpaceUsage;
+use fvca_btrfs_boundary::scrub_scope::{RECEIPT_LIMIT, SCHEMA, Scope, read_selection};
 use fvca_trial_authorization::backup_job;
-use rustix::fs::{StatVfsMountFlags, fstatvfs};
+use rustix::fs::{OFlags, StatVfsMountFlags, fstatvfs};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -37,6 +38,7 @@ enum ScrubOutcome {
 struct ScrubReport {
     schema: String,
     filesystem_uuid: String,
+    storage_members: String,
     boot_id: String,
     started_at: u64,
     finished_at: u64,
@@ -52,22 +54,35 @@ struct ScrubReport {
 }
 
 fn last_scrub(fsid: &str) -> Result<Option<ScrubReport>> {
+    let selection = read_selection()?;
+    let scope = Scope::parse(&selection)?;
+    if scope.target != "/run/fvca/host-data" || scope.filesystem != fsid {
+        return Err(invalid("verified scrub scope does not match the current Host pool").into());
+    }
     const DIRECTORY: &str = "/run/fvca/host-data/.fvca-scrub";
-    let _directory = handoff::require_pool_directory(Path::new(DIRECTORY))?;
-    let file = match state::open_regular(&Path::new(DIRECTORY).join("report.json")) {
+    let directory = handoff::require_pool_directory(Path::new(DIRECTORY))?;
+    let file = match handoff::open_child(
+        &directory,
+        "report.json",
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY,
+    ) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     handoff::private_file(&file)?;
     let mut bytes = Vec::new();
-    file.take(1025).read_to_end(&mut bytes)?;
-    if bytes.len() > 1024 {
+    file.take(RECEIPT_LIMIT + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > RECEIPT_LIMIT {
         return Err(invalid("scrub receipt exceeds its size limit").into());
     }
-    let report: ScrubReport = serde_json::from_slice(&bytes)?;
-    if report.schema != "fvca-btrfs-scrub-v1"
-        || report.filesystem_uuid != fsid
+    decode_scrub(&bytes, &scope)
+}
+
+fn decode_scrub(bytes: &[u8], scope: &Scope<'_>) -> Result<Option<ScrubReport>> {
+    let report: ScrubReport = serde_json::from_slice(bytes)?;
+    if report.schema != SCHEMA
+        || report.filesystem_uuid != scope.filesystem
         || !valid_uuid(&report.boot_id)
         || report.started_at == 0
         || report.members != 2
@@ -79,7 +94,9 @@ fn last_scrub(fsid: &str) -> Result<Option<ScrubReport>> {
     {
         return Err(invalid("scrub receipt does not match the current Host pool").into());
     }
-    Ok(Some(report))
+    // A replacement can retain both the filesystem UUID and Btrfs device
+    // identities. The old receipt cannot establish coverage of the new disk.
+    Ok((report.storage_members == scope.backing).then_some(report))
 }
 
 fn report() -> Result<Value> {
@@ -205,4 +222,49 @@ fn backup_report() -> Result<Option<ScheduledBackup>> {
 
 pub(super) async fn backup() -> std::result::Result<Option<ScheduledBackup>, Refusal> {
     observe(backup_report, Refusal::HostBackupStatusUnavailable).await
+}
+
+#[cfg(test)]
+mod scrub_tests {
+    use super::*;
+
+    #[test]
+    fn last_scrub_does_not_report_previous_backing() {
+        let fsid = "24c81473-0929-48ed-8729-47cf01f65bba";
+        let original = concat!(
+            "4485c51b-9500-4460-a72a-7fb0c98bc604:8c3a4b4f-18af-44ed-b62b-18ad3de6984c,",
+            "72d7b824-717b-401f-8133-7d6ef53e1c7e:ad176afb-2775-4bca-9a70-45eb7e67fbc2"
+        );
+        let replacement = concat!(
+            "4485c51b-9500-4460-a72a-7fb0c98bc604:8c3a4b4f-18af-44ed-b62b-18ad3de6984c,",
+            "ec803886-0e97-4eef-b90f-e61491ca1b30:c0089b3a-4069-4fcb-b055-8318bef54dfb"
+        );
+        let mut receipt = json!({
+            "schema": SCHEMA,
+            "filesystem_uuid": fsid,
+            "storage_members": original,
+            "boot_id": "7aa3686c-ed57-41fa-9452-bd406eaf2691",
+            "started_at": 1,
+            "finished_at": 2,
+            "outcome": "completed",
+            "members": 2,
+            "completed_members": 2,
+            "data_bytes": 42,
+            "metadata_bytes": 42,
+            "no_checksum_blocks": 0,
+            "corrected_errors": 0,
+            "uncorrectable_errors": 0,
+            "allocation_errors": 0
+        });
+        let selection = format!("/run/fvca/host-data\n{fsid}\n{original}\n");
+        let repaired_selection = format!("/run/fvca/host-data\n{fsid}\n{replacement}\n");
+        let old = Scope::parse(&selection).unwrap();
+        let new = Scope::parse(&repaired_selection).unwrap();
+        let previous = serde_json::to_vec(&receipt).unwrap();
+        assert!(decode_scrub(&previous, &old).unwrap().is_some());
+        assert!(decode_scrub(&previous, &new).unwrap().is_none());
+        receipt["storage_members"] = json!(replacement);
+        let current = serde_json::to_vec(&receipt).unwrap();
+        assert!(decode_scrub(&current, &new).unwrap().is_some());
+    }
 }

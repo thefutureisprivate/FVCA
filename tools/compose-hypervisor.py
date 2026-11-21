@@ -536,7 +536,7 @@ def assemble(args, work):
     if storage is not None:
         required += ("usr/lib/fvca/host-storage-support-v4", "usr/bin/dmsetup",
                      "usr/lib/udev/rules.d/12-fvca-host-storage.rules",
-                     "usr/lib/fvca/storage-scrub-enrollment-v1")
+                     "usr/lib/fvca/storage-scrub-enrollment-v2")
     if auto:
         required += ("usr/lib/fvca/host-storage-tpm-auto-support-v1",)
     if args.gpt_slot:

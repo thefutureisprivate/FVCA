@@ -1,17 +1,18 @@
 //! Validate the selected pool's actual kernel allocation profiles before use.
 
-use std::fs::{self, File};
-use std::io;
-use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, PermissionsExt};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use fvca_btrfs_boundary::scrub_scope::{SCOPE_PATH, SUPPORT, Scope};
 
 use crate::{invalid, run, sys_block, verify_superblock};
 
 const MOUNT: &str = "/usr/bin/mount";
 const UMOUNT: &str = "/usr/bin/umount";
 const OPTIONS: &str = "nodev,nosuid,noexec,subvolid=5,datacow,datasum,compress=no,skip_balance";
-pub const SCRUB_SELECTION: &str = "/run/fvca/storage-scrub";
 pub const SCRUB_DIRECTORY: &str = ".fvca-scrub";
 pub const SCRUB_LIMIT: u64 = 64 * 1024 * 1024;
 
@@ -19,9 +20,11 @@ pub fn scrub_limit(fsid: &str, device: u64) -> PathBuf {
     PathBuf::from(format!("/sys/fs/btrfs/{fsid}/devinfo/{device}/scrub_speed_max"))
 }
 
-fn enroll_scrub(sysfs: &Path, uuid: &str, target: &str, count: usize) -> io::Result<()> {
+fn enroll_scrub(sysfs: &Path, scope: &Scope<'_>, selection: &str, count: usize) -> io::Result<()> {
     let unit = "/usr/lib/systemd/system/fvca-storage-scrub.timer";
-    for required in [unit, "/usr/lib/systemd/system/fvca-storage-scrub.service", "/usr/libexec/fvca/storage-scrub"] {
+    for required in [
+        unit, "/usr/lib/systemd/system/fvca-storage-scrub.service", "/usr/libexec/fvca/storage-scrub", SUPPORT,
+    ] {
         if !fs::metadata(format!("/sysroot{required}"))?.is_file() {
             return Err(invalid("the verified core lacks Btrfs scrub support"));
         }
@@ -34,7 +37,7 @@ fn enroll_scrub(sysfs: &Path, uuid: &str, target: &str, count: usize) -> io::Res
         }
         let device = entry.file_name().to_str().and_then(|name| name.parse::<u64>().ok())
             .filter(|id| *id != 0).ok_or_else(|| invalid("invalid Btrfs device ID"))?;
-        let limit = scrub_limit(uuid, device);
+        let limit = scrub_limit(scope.filesystem, device);
         fs::write(&limit, format!("{SCRUB_LIMIT}\n"))?;
         if fs::read_to_string(&limit)?.trim_end().parse::<u64>().ok() != Some(SCRUB_LIMIT) {
             return Err(invalid("kernel did not accept the Btrfs scrub bandwidth limit"));
@@ -44,7 +47,8 @@ fn enroll_scrub(sysfs: &Path, uuid: &str, target: &str, count: usize) -> io::Res
     if members != count {
         return Err(invalid("incomplete Btrfs scrub enrollment"));
     }
-    let directory = Path::new(target).join(SCRUB_DIRECTORY);
+    let target = Path::new(scope.target);
+    let directory = target.join(SCRUB_DIRECTORY);
     match fs::DirBuilder::new().mode(0o700).create(&directory) {
         Ok(()) => File::open(target)?.sync_all()?,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
@@ -57,9 +61,10 @@ fn enroll_scrub(sysfs: &Path, uuid: &str, target: &str, count: usize) -> io::Res
     }
     let wants = Path::new("/run/systemd/system/fvca-base.target.wants");
     fs::create_dir_all(wants)?;
-    fs::write(SCRUB_SELECTION, format!("{target}\n{uuid}\n"))?;
+    OpenOptions::new().write(true).create_new(true).mode(0o644).open(SCOPE_PATH)?
+        .write_all(selection.as_bytes())?;
     if let Err(error) = std::os::unix::fs::symlink(unit, wants.join("fvca-storage-scrub.timer")) {
-        let _ = fs::remove_file(SCRUB_SELECTION);
+        let _ = fs::remove_file(SCOPE_PATH);
         return Err(error);
     }
     Ok(())
@@ -194,7 +199,9 @@ pub fn assess_host_member(source: &Path, uuid: &str, target: &str) -> io::Result
     result
 }
 
-pub fn mount(pool: Pool<'_>, uuid: &str, target: &str) -> io::Result<()> {
+pub fn mount(pool: Pool<'_>, uuid: &str, target: &str, backing: &str) -> io::Result<()> {
+    let scrub_selection = format!("{target}\n{uuid}\n{backing}\n");
+    let scrub_scope = Scope::parse(&scrub_selection)?;
     let (sources, profiles): (&[&Path], _) = match &pool {
         Pool::Guest(device) => (std::slice::from_ref(device), ["single", "dup", "dup"]),
         Pool::Hypervisor(devices) => (devices, HOST_PROFILES),
@@ -225,7 +232,7 @@ pub fn mount(pool: Pool<'_>, uuid: &str, target: &str) -> io::Result<()> {
         }
         verified?;
     }
-    if let Err(error) = enroll_scrub(&sysfs, uuid, target, sources.len()) {
+    if let Err(error) = enroll_scrub(&sysfs, &scrub_scope, &scrub_selection, sources.len()) {
         run(Command::new(UMOUNT).args(["--internal-only", target]))?;
         return Err(error);
     }
