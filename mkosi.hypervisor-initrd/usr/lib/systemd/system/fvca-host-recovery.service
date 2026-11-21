@@ -20,4 +20,5 @@ LimitFSIZE=134217728
 TimeoutStartSec=100s
 PrivateNetwork=yes
 NoNewPrivileges=yes
-StandardOutput=journal+console
+StandardOutput=tty
+TTYPath=/dev/console

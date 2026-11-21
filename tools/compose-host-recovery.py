@@ -31,6 +31,7 @@ COMMAND_LINE = " ".join((
 ))
 REQUIRED = (
     "usr/lib/fvca/host-storage-support-v4",
+    "usr/lib/fvca/host-recovery-write-barrier-v1",
     "usr/lib/fvca/assess-host-recovery",
     "usr/lib/systemd/system/fvca-host-recovery.service",
     "usr/lib/systemd/system/fvca-host-recovery.target",

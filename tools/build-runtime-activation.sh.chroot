@@ -28,6 +28,7 @@ install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/storage-scrub-enrollment-v1"
 if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/kernel-policy-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-storage-support-v4"
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-recovery-write-barrier-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-network-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-workload-network-v2"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-storage-tpm-auto-support-v1"
