@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Authorize a shell-free, read-only assessment of one Host mirror member."""
+"""Authorize shell-free assessment or LUKS2 header restoration for a Host mirror member."""
 
 import argparse
 import json
@@ -12,7 +12,7 @@ import time
 
 from core_image import extract_uki_section, inspect_uki
 from guest_boot_bundle import public_key, sha256
-from host_storage import AUTHENTICATED, selection, unique_fields
+from host_storage import AUTHENTICATED, authenticated_header, selection, unique_fields
 from runtime_boot import DISABLE_AUTOMATIC_EXTENSIONS, SECURE_KERNEL_OPTIONS, build_uki, run, verify_initrd
 
 
@@ -32,6 +32,7 @@ COMMAND_LINE = " ".join((
 REQUIRED = (
     "usr/lib/fvca/host-storage-support-v4",
     "usr/lib/fvca/host-recovery-write-barrier-v1",
+    "usr/lib/fvca/host-recovery-header-media-v1",
     "usr/lib/fvca/assess-host-recovery",
     "usr/lib/systemd/system/fvca-host-recovery.service",
     "usr/lib/systemd/system/fvca-host-recovery.target",
@@ -56,15 +57,27 @@ def authorization(args, work):
         raise ValueError("recovery header has a different LUKS UUID")
     metadata = json.loads(run("cryptsetup", "luksDump", "--dump-json-metadata", backup, capture_output=True).stdout,
                           object_pairs_hook=unique_fields)
+    payload_offset = authenticated_header(metadata)
     slot = str(args.key_slot)
     if (slot not in metadata["keyslots"]
             or any(slot in token["keyslots"] for token in metadata["tokens"].values())):
         raise ValueError("recovery requires an independent LUKS2 keyslot")
+    media = "none"
+    if args.header_media_partuuid is not None:
+        if args.header_media_partuuid in {item.partition for item in storage.members}:
+            raise ValueError("the backup header requires a separate media partition")
+        size = backup.stat().st_size
+        config = metadata["config"]
+        header_extent = 2 * (4096 + int(config["json_size"])) + int(config["keyslots_size"])
+        if size != header_extent or size != payload_offset or size % 4096:
+            raise ValueError("the backup must cover exactly the aligned LUKS2 metadata and keyslot extent")
+        media = f"{args.header_media_partuuid},{size}"
     digest = sha256(backup)
     backup.unlink()
     now = int(time.time())
-    return (f"FVCA-HOST-RECOVERY-1\npartition={member.partition}\nluks={member.volume}\n"
+    return (f"FVCA-HOST-RECOVERY-2\npartition={member.partition}\nluks={member.volume}\n"
             f"filesystem={storage.filesystem}\nheader_sha256={digest}\nkey_slot={slot}\n"
+            f"header_media={media}\nrestore_from={args.restore_from_sha256 or 'none'}\n"
             f"not_before={now}\nexpires={now + args.valid_seconds}\n")
 
 
@@ -109,11 +122,22 @@ def main():
     parser.add_argument("--staged-uki-sha256", required=True)
     parser.add_argument("--member", required=True, choices=("a", "b"))
     parser.add_argument("--key-slot", required=True, type=int, choices=range(32))
+    parser.add_argument("--header-media-partuuid", help="read the backup from this dedicated GPT partition")
+    parser.add_argument("--restore-from-sha256", help="authorize replacing exactly this current on-disk header digest")
     parser.add_argument("--valid-seconds", type=int, default=3600)
     parser.add_argument("--serial-console", action="store_true")
     args = parser.parse_args()
     if re.fullmatch(r"[0-9a-f]{64}", args.staged_uki_sha256) is None:
         parser.error("--staged-uki-sha256 must be a lowercase SHA-256 digest")
+    if args.header_media_partuuid is not None and (
+        re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", args.header_media_partuuid) is None
+        or args.header_media_partuuid == "00000000-0000-0000-0000-000000000000"
+    ):
+        parser.error("--header-media-partuuid must be a nonzero canonical GPT partition UUID")
+    if args.restore_from_sha256 is not None and (
+        args.header_media_partuuid is None or re.fullmatch(r"[0-9a-f]{64}", args.restore_from_sha256) is None
+    ):
+        parser.error("--restore-from-sha256 requires a lowercase SHA-256 digest and --header-media-partuuid")
     if not 1 <= args.valid_seconds <= 86400:
         parser.error("--valid-seconds must be 1–86400")
     if args.output.exists():

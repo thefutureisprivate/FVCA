@@ -65,6 +65,25 @@ def unique_fields(pairs):
     return fields
 
 
+def authenticated_header(metadata):
+    segments = metadata["segments"]
+    segment = segments["0"].copy()
+    offset = segment.pop("offset")
+    expected = {"type": "crypt", "size": "dynamic", "iv_tweak": "0", "encryption": "aes-xts-plain64",
+                "sector_size": 4096, "integrity": {"type": "hmac(sha256)", "journal_encryption": "none",
+                                                    "journal_integrity": "none"}}
+    config = metadata["config"]
+    if (segments.keys() != {"0"} or segment != expected or re.fullmatch(r"[1-9][0-9]{0,19}", offset) is None
+            or int(offset) % 4096 or int(offset) < 16384
+            or config.get("flags") or config.get("requirements")):
+        raise ValueError("Host data member lacks the approved journaled 4 KiB LUKS2 encryption profile")
+    digests = [entry for entry in metadata["digests"].values() if entry["segments"] == ["0"]]
+    if (len(digests) != 1 or not digests[0]["keyslots"]
+            or any(metadata["keyslots"][index]["key_size"] != 96 for index in digests[0]["keyslots"])):
+        raise ValueError("Host data member requires the 512-bit XTS key and 256-bit HMAC key")
+    return int(offset)
+
+
 def prepare_member(storage, disk, sector_size, destination):
     if storage.protection != AUTHENTICATED:
         raise ValueError("an integrated Host data member requires the authenticated storage profile")
@@ -86,21 +105,8 @@ def prepare_member(storage, disk, sector_size, destination):
         raise ValueError("Host data LUKS2 UUID differs from the signed storage selection")
     raw = run("cryptsetup", "luksDump", "--dump-json-metadata", destination, capture_output=True).stdout
     metadata = json.loads(raw, object_pairs_hook=unique_fields)
-    segments = metadata["segments"]
-    segment = segments["0"]
-    offset = segment.pop("offset")
-    expected = {"type": "crypt", "size": "dynamic", "iv_tweak": "0", "encryption": "aes-xts-plain64",
-                "sector_size": 4096, "integrity": {"type": "hmac(sha256)", "journal_encryption": "none",
-                                                    "journal_integrity": "none"}}
-    config = metadata["config"]
-    if (segments.keys() != {"0"} or segment != expected or re.fullmatch(r"[1-9][0-9]{0,19}", offset) is None
-            or int(offset) % 4096 or not 16384 <= int(offset) < size
-            or config.get("flags") or config.get("requirements")):
-        raise ValueError("Host data member lacks the approved journaled 4 KiB LUKS2 encryption profile")
-    digests = [entry for entry in metadata["digests"].values() if entry["segments"] == ["0"]]
-    if (len(digests) != 1 or not digests[0]["keyslots"]
-            or any(metadata["keyslots"][index]["key_size"] != 96 for index in digests[0]["keyslots"])):
-        raise ValueError("Host data member requires the 512-bit XTS key and 256-bit HMAC key")
+    if authenticated_header(metadata) >= size:
+        raise ValueError("Host data partition has no space for the authorized LUKS2 payload")
     if selected.token_index is not None:
         raw = run("cryptsetup", "token", "export", "--token-id", selected.token_index, destination,
                   capture_output=True).stdout

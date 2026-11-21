@@ -2,7 +2,9 @@
 
 use std::alloc::System;
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read, Seek};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::thread;
@@ -20,9 +22,17 @@ const SELECTION: &str = "/usr/lib/fvca/host-recovery";
 const MAPPER: &str = "fvca-recovery";
 const VOLUME: &str = "/dev/mapper/fvca-recovery";
 const HEADER: &str = "/run/fvca-host-recovery/member.header";
+const CURRENT: &str = "/run/fvca-host-recovery/current.header";
 const MOUNT: &str = "/run/fvca-host-recovery/pool";
 const CRYPTSETUP: &str = "/usr/bin/cryptsetup";
 const LOSETUP: &str = "/usr/bin/losetup";
+// Linux x86-64 block-device exclusive open.
+const O_EXCL: i32 = 0o200;
+
+struct HeaderMedia<'a> {
+    partition: &'a str,
+    bytes: u64,
+}
 
 struct Selection<'a> {
     partition: &'a str,
@@ -30,6 +40,8 @@ struct Selection<'a> {
     filesystem: &'a str,
     header_digest: &'a str,
     key_slot: &'a str,
+    media: Option<HeaderMedia<'a>>,
+    restore_from: Option<&'a str>,
     not_before: u64,
     expires: u64,
 }
@@ -40,7 +52,7 @@ impl<'a> Selection<'a> {
             return Err(invalid("invalid signed Host recovery selection"));
         }
         let mut lines = text.lines();
-        if lines.next() != Some("FVCA-HOST-RECOVERY-1") {
+        if lines.next() != Some("FVCA-HOST-RECOVERY-2") {
             return Err(invalid("unknown Host recovery selection format"));
         }
         let mut field = |key| {
@@ -56,6 +68,23 @@ impl<'a> Selection<'a> {
         let filesystem = recovery::uuid(field("filesystem=")?)?;
         let header_digest = runtime::hash(field("header_sha256=")?)?;
         let key_slot = field("key_slot=")?;
+        let media = match field("header_media=")? {
+            "none" => None,
+            value => {
+                let (uuid, bytes) = value.split_once(',')
+                    .ok_or_else(|| invalid("invalid signed recovery media"))?;
+                let bytes = number(bytes)?;
+                if uuid == partition || !bytes.is_multiple_of(4096) || !(16384..=134217728).contains(&bytes) {
+                    return Err(invalid("invalid signed recovery media extent"));
+                }
+                Some(HeaderMedia { partition: recovery::uuid(uuid)?, bytes })
+            }
+        };
+        let restore_from = match field("restore_from=")? {
+            "none" => None,
+            digest if media.is_some() => Some(runtime::hash(digest)?),
+            _ => return Err(invalid("header restoration requires signed backup media")),
+        };
         let not_before = number(field("not_before=")?)?;
         let expires = number(field("expires=")?)?;
         if lines.next().is_some() || number(key_slot)? > 31
@@ -63,7 +92,7 @@ impl<'a> Selection<'a> {
         {
             return Err(invalid("invalid Host recovery keyslot or validity window"));
         }
-        Ok(Self { partition, luks, filesystem, header_digest, key_slot, not_before, expires })
+        Ok(Self { partition, luks, filesystem, header_digest, key_slot, media, restore_from, not_before, expires })
     }
 
     fn verify_time(&self) -> io::Result<()> {
@@ -97,6 +126,7 @@ fn verify_readonly(device: &Path) -> io::Result<()> {
 
 fn with_write_barrier(
     source: &Path,
+    pinned: &Path,
     partition: &Path,
     assess: impl FnOnce(&Path, &Path) -> io::Result<()>,
 ) -> io::Result<()> {
@@ -105,7 +135,7 @@ fn with_write_barrier(
     // journal replay issued below the read-only dm-crypt mapping.
     let output = Command::new(LOSETUP).env_clear()
         .args(["--find", "--show", "--read-only", "--sector-size", "4096"])
-        .arg(source)
+        .arg(pinned)
         .output()?;
     if !output.status.success() {
         return Err(invalid("could not establish the Host recovery write barrier"));
@@ -168,19 +198,38 @@ fn open_member(selection: &Selection<'_>, source: &Path) -> io::Result<()> {
     result
 }
 
-fn assess_member(selection: &Selection<'_>, source: &Path, barrier: &Path) -> io::Result<()> {
-    verify_superblock(source, "crypto_LUKS", selection.luks, Some("2"))?;
-    run(Command::new(CRYPTSETUP)
-        .args(["luksHeaderBackup", "--header-backup-file", HEADER])
-        .arg(source))?;
+fn load_header(selection: &Selection<'_>, source: &Path, partition: &Path) -> io::Result<()> {
+    if let Some(media) = &selection.media {
+        let media_device = fs::canonicalize(locate(media.partition)?)?;
+        let block = sys_block(&media_device)?;
+        let sectors = fs::read_to_string(block.join("size"))?.trim_end()
+            .parse::<u64>().map_err(io::Error::other)?;
+        if !block.join("partition").is_file() || block.parent() == partition.parent()
+            || sectors.checked_mul(512) != Some(media.bytes)
+        {
+            return Err(invalid("backup media must be the authorized extent on a separate disk"));
+        }
+        let mut output = File::options().write(true).create_new(true).open(HEADER)?;
+        if io::copy(&mut File::open(media_device)?.take(media.bytes), &mut output)? != media.bytes {
+            return Err(invalid("incomplete backup header read"));
+        }
+    } else {
+        verify_superblock(source, "crypto_LUKS", selection.luks, Some("2"))?;
+        run(Command::new(CRYPTSETUP)
+            .args(["luksHeaderBackup", "--header-backup-file", HEADER])
+            .arg(source))?;
+    }
     let header = File::open(HEADER)?;
     if !header.metadata()?.is_file() || recovery::sha256(header)? != selection.header_digest {
-        return Err(invalid("live LUKS2 header differs from the signed recovery header"));
+        return Err(invalid("LUKS2 header differs from the signed recovery header"));
     }
+    verify_superblock(Path::new(HEADER), "crypto_LUKS", selection.luks, Some("2"))
+}
+
+fn assess_member(selection: &Selection<'_>, source: &Path, barrier: &Path) -> io::Result<()> {
     selection.verify_time()?;
     open_member(selection, source)?;
     let result = (|| {
-        fs::remove_file(HEADER)?;
         selection.verify_time()?;
         let volume = Path::new(VOLUME);
         let mapped = sys_block(&fs::canonicalize(volume)?)?;
@@ -192,6 +241,46 @@ fn assess_member(selection: &Selection<'_>, source: &Path, barrier: &Path) -> io
     })();
     run(Command::new(CRYPTSETUP).args(["close", MAPPER]))?;
     result
+}
+
+fn prefix_hash(mut source: File, bytes: u64) -> io::Result<String> {
+    let mut copy = File::options().read(true).write(true).create_new(true).open(CURRENT)?;
+    fs::remove_file(CURRENT)?;
+    source.rewind()?;
+    if io::copy(&mut source.take(bytes), &mut copy)? != bytes {
+        return Err(invalid("incomplete on-disk header read"));
+    }
+    copy.rewind()?;
+    recovery::sha256(copy)
+}
+
+fn require_restore_prefix(selection: &Selection<'_>, source: File, bytes: u64, previous: &str) -> io::Result<bool> {
+    let observed = prefix_hash(source, bytes)?;
+    if observed == selection.header_digest {
+        return Ok(true);
+    }
+    if observed != previous {
+        return Err(invalid("on-disk header does not match the authorized restore precondition"));
+    }
+    Ok(false)
+}
+
+fn restore_header(selection: &Selection<'_>, pinned: &Path, bytes: u64, previous: &str) -> io::Result<()> {
+    // Claim the pinned partition only after the read-only mapping is closed.
+    let lease = File::options().read(true).custom_flags(O_EXCL).open(pinned)?;
+    let already_restored = require_restore_prefix(selection, lease.try_clone()?, bytes, previous)?;
+    selection.verify_time()?;
+    if !already_restored {
+        run(Command::new(CRYPTSETUP)
+            .args(["luksHeaderRestore", "--type", "luks2", "--batch-mode", "--header-backup-file", HEADER])
+            .arg(pinned)
+            .stdin(Stdio::null()))?;
+        lease.sync_all()?;
+        if prefix_hash(lease.try_clone()?, bytes)? != selection.header_digest {
+            return Err(invalid("restored LUKS2 header failed exact readback"));
+        }
+    }
+    verify_superblock(pinned, "crypto_LUKS", selection.luks, Some("2"))
 }
 
 fn assess() -> io::Result<()> {
@@ -210,7 +299,23 @@ fn assess() -> io::Result<()> {
     if !partition.join("partition").is_file() {
         return Err(invalid("authorized Host recovery member is not a partition"));
     }
-    with_write_barrier(&source, &partition, |backing, barrier| assess_member(&selection, backing, barrier))?;
+    let disk = File::open(&source)?;
+    let pinned = PathBuf::from(format!("/proc/{}/fd/{}", std::process::id(), disk.as_raw_fd()));
+    let restore = selection.restore_from.zip(selection.media.as_ref().map(|media| media.bytes));
+    if let Some((previous, bytes)) = restore {
+        require_restore_prefix(&selection, disk.try_clone()?, bytes, previous)?;
+    }
+    with_write_barrier(&source, &pinned, &partition, |backing, barrier| {
+        load_header(&selection, backing, &partition)?;
+        assess_member(&selection, backing, barrier)
+    })?;
+    if let Some((previous, bytes)) = restore {
+        restore_header(&selection, &pinned, bytes, previous)?;
+    }
+    fs::remove_file(HEADER)?;
+    if restore.is_some() {
+        println!("FVCA_HOST_HEADER_RESTORED {}", selection.luks);
+    }
     println!("FVCA_HOST_RECOVERY_VERIFIED {} raid1 read-only", selection.filesystem);
     Ok(())
 }
