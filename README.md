@@ -100,6 +100,19 @@ python3 tools/inventory-role.py hypervisor \
 
 Use `service-guest` and the OCI runtime disk for the Guest. The report binds the core, its native UKI initramfs, and the matching additive extension. It records paths, file hashes, permissions and links. Compare its package-manifest digests to the RPM review. Review EROFS ownership and extended attributes separately from the extracted file inventory. Keep the deployed boot tuple and workload evidence with the release. [Linux initramfs format](https://docs.kernel.org/driver-api/early-userspace/buffer-format.html) · [EROFS documentation](https://www.kernel.org/doc/html/latest/filesystems/erofs.html)
 
+### Compare an independent core rebuild
+
+Preserve the reviewed Git revision and package inputs. Verify the OBS image and manifest against their signed checksums. Supply each build's public certificate and keep its uncompressed mkosi manifest next to its image with the same basename. Use `hypervisor` for the corresponding Host core.
+
+```sh
+python3 tools/compare-core-rebuild.py service-guest \
+  --reference obs-core.raw --reference-certificate obs-stage.crt \
+  --rebuilt independent-core.raw --rebuilt-certificate independent-build.crt \
+  --output rebuild-comparison.json
+```
+
+The tool authenticates both boot disks and compares the EROFS and verity bytes, the UKI with its outer signature removed, the kernel with its embedded signatures removed, and the initramfs. It also records the exact signed kernel digest from each UKI, package identities, and file differences. A verified mismatch writes the report and exits with status 2.
+
 ### Inventory an assembled boot release
 
 Use the immutable Hypervisor slot image and the reviewed Secure Boot and Guest release certificates. The inventory verifies the signed GPT selection, core, VM runtime and Guest capsule before reporting their exact digests and files.
