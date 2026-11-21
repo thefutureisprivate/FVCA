@@ -17,8 +17,6 @@ env -u VARIANT CFLAGS=-march=x86-64 CXXFLAGS=-march=x86-64 \
 library="$scratch/out/libhardened_malloc.so"
 install -Dm755 "$library" "$DESTDIR$allocator_library"
 install -Dm644 "$scratch/LICENSE" "$DESTDIR/usr/share/licenses/hardened_malloc/LICENSE"
-printf '%s\n' "$allocator_library" > "$scratch/ld.so.preload"
-install -Dm644 "$scratch/ld.so.preload" "$DESTDIR/etc/ld.so.preload"
 printf 'vm.max_map_count = 1048576\n' > "$scratch/allocator.sysctl"
 install -Dm644 "$scratch/allocator.sysctl" "$DESTDIR/usr/lib/sysctl.d/60-fvca-allocator.conf"
 
