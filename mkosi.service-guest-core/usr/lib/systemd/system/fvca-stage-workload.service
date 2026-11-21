@@ -1,0 +1,26 @@
+[Unit]
+Description=Stage an exact signed Service Guest workload transition
+ConditionPathIsDirectory=/run/fvca/guest-data/workload-updates
+AssertPathIsMountPoint=/run/fvca/guest-data
+AssertPathExists=/run/fvca/workload-image/authorization
+AssertSecurity=|uefi-secureboot
+AssertPathExists=|/run/fvca/direct-boot-ready
+AssertSecurity=selinux
+Requisite=fvca-workload-root.service
+After=fvca-workload-root.service fvca-workload-start.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/fvca/activate-workload stage
+TimeoutStartSec=120s
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ReadWritePaths=/run/fvca/guest-data/workload-updates /run/fvca/workload-lifecycle.lock
+InaccessiblePaths=-/run/systemd/private -/run/dbus
+UMask=0077
+StandardOutput=journal+console
+StandardError=journal+console

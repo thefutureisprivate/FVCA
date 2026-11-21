@@ -5,6 +5,7 @@ AssertSecurity=|uefi-secureboot
 AssertPathExists=|/run/fvca/direct-boot-ready
 AssertSecurity=selinux
 Requires=fvca-workload-root.service
+Wants=fvca-stage-workload.service
 After=fvca-workload-root.service
 Before=fvca-base-ready.service
 OnFailure=emergency.target

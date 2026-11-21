@@ -3,6 +3,8 @@
 
 import argparse
 from contextlib import contextmanager
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -119,6 +121,7 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
     if extra_cmdline:
         command += ["-smbios", "type=11,value=io.systemd.stub.kernel-cmdline-extra=fvca.unapproved-lab-input=1"]
 
+    ready = ready_marker if isinstance(ready_marker, re.Pattern) else re.compile(re.escape(ready_marker))
     output = bytearray()
     prompts = 0
     prompt_start = 0
@@ -157,7 +160,7 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
                         waiting_for_no_echo = False
                         prompt_start = len(output)
                         qemu.stdin.flush()
-                    if (ready_marker in output or ready_marker in rejoin_serial_output(output[-4096:])
+                    if (ready.search(output) or ready.search(rejoin_serial_output(output[-4096:]))
                             or (direct_cmdline is not None and (DIRECT_MISMATCH in output or INIT_EXIT in output))):
                         break
                     if not failed_boot and FAIL in output:
@@ -505,6 +508,44 @@ def check_stalwart_mail_mismatch(args):
     print("workload-wrong-mail-reference passed")
 
 
+def check_guest_workload_stage(args):
+    args.output.mkdir(mode=0o700)
+    grant = args.workload_stage.read_bytes()
+    record = json.loads(grant)
+    expected = " ".join((
+        "sha256:" + hashlib.sha256(grant).hexdigest(),
+        record["from_authorization"], record["to_authorization"],
+    )).encode()
+    with tempfile.TemporaryDirectory(prefix="stage-disk-", dir=args.output) as directory:
+        data = Path(directory) / "guest-data.raw"
+        subprocess.run(
+            ["cp", "--reflink=auto", "--sparse=always", "--", args.lab / "approved.raw", data],
+            check=True,
+        )
+        args.persistent_members = True
+        for phase in ("published", "retained"):
+            marker = b"FVCA_WORKLOAD_STAGED " + phase.encode() + b" " + expected
+            receipt = re.compile(re.escape(marker) + rb" ([0-9]+)[\r\n]")
+            prompts, output = boot(args, phase, None, data, timeout=140, ready_marker=receipt)
+            output = rejoin_serial_output(output)
+            found = receipt.search(output)
+            if (prompts or DIRECT_ACTIVE not in output or FAIL in output or found is None
+                    or not 0 <= output.find(b"FVCA_WORKLOAD_STARTED") < found.start()
+                    or not 0 < int(found[1]) <= record["expires"]):
+                raise ValueError(f"the signed workload stage was not {phase} after starting the active workload")
+            print(f"workload-stage-{phase} passed", flush=True)
+
+    args.persistent_members = False
+    failure = b"workload artifact does not match the signed bytes"
+    prompts, output = boot(args, "tampered-workload-stage", None, args.lab / "tampered.raw",
+                           timeout=140, ready_marker=failure)
+    output = rejoin_serial_output(output)
+    if (prompts or DIRECT_ACTIVE not in output or FAIL in output or b"FVCA_WORKLOAD_STAGED" in output
+            or not 0 <= output.find(b"FVCA_WORKLOAD_STARTED") < output.find(failure)):
+        raise ValueError("the Guest did not reject the changed candidate while keeping the active workload")
+    print("workload-stage-tampered passed", flush=True)
+
+
 def check_stalwart_lifecycle(output):
     if not re.search(
         rb"FVCA_STALWART_STATE [a-z_]+:system_r:container_t:s0:c[0-9]+,c[0-9]+ 2000:2000 128 true none healthy",
@@ -614,7 +655,11 @@ if __name__ == "__main__":
     qualification.add_argument("--nested-guest-restore", action="store_true",
                                help="require cold restore from live and stopped captures")
     parser.add_argument("--wrong-runtime", type=Path, help="unselected runtime for a Guest rejection test")
-    parser.add_argument("--workload", action="store_true", help="qualify workload activation with approved.raw and tampered.raw")
+    workload_qualification = parser.add_mutually_exclusive_group()
+    workload_qualification.add_argument("--workload", action="store_true",
+                                        help="qualify workload activation with approved.raw and tampered.raw")
+    workload_qualification.add_argument("--workload-stage", type=Path,
+                                        help="check durable staging for the exact signed transition JSON")
     stalwart = parser.add_mutually_exclusive_group()
     stalwart.add_argument("--stalwart-lifecycle", action="store_true", help="check the disposable Stalwart lifecycle fixture")
     stalwart.add_argument("--stalwart-mail", action="store_true", help="require the authenticated Stalwart mailbox check")
@@ -641,6 +686,8 @@ if __name__ == "__main__":
         parser.error("--wrong-runtime requires --oci-runtime")
     if args.workload and (args.oci_runtime is None or args.wrong_runtime is not None):
         parser.error("--workload requires --oci-runtime and its own Btrfs fixtures")
+    if args.workload_stage is not None and (args.direct_boot is None or args.wrong_runtime is not None):
+        parser.error("--workload-stage requires --direct-boot and tests a candidate-altered disk")
     if args.stalwart_lifecycle and not args.workload:
         parser.error("--stalwart-lifecycle requires --workload")
     if args.stalwart_mail and not args.workload:
@@ -670,6 +717,8 @@ if __name__ == "__main__":
             check_tpm(args)
         elif args.workload:
             check_guest_workload(args)
+        elif args.workload_stage is not None:
+            check_guest_workload_stage(args)
         elif args.guest:
             check_guest(args)
         elif args.nested_guest is not None:

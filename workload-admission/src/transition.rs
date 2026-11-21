@@ -2,11 +2,12 @@
 
 use std::path::Path;
 
+use openssl::sha::sha256;
 use serde::Deserialize;
 
 use super::{
-    Result, SIGNATURE_LIMIT, Trust, VerifiedWorkload, check_time, current_time, invalid, is_digest,
-    read_bounded, verify_for_source, verify_signature,
+    Result, SIGNATURE_LIMIT, Trust, VerifiedWorkload, check_time, current_time, digest, invalid,
+    is_digest, read_bounded, verify_for_source, verify_signature,
 };
 
 const TRANSITION_LIMIT: u64 = 4096;
@@ -64,7 +65,21 @@ impl Transition {
 pub struct VerifiedTransition {
     pub current: VerifiedWorkload,
     pub candidate: VerifiedWorkload,
+    pub approval_digest: String,
     pub fresh_until: u64,
+    valid_from: u64,
+}
+
+impl VerifiedTransition {
+    /// Recheck authorization after durable preparation and before publication.
+    pub fn require_fresh(&self) -> Result<()> {
+        if !(self.valid_from..self.fresh_until).contains(&current_time()?) {
+            return Err(invalid(
+                "workload transition authorization expired or the clock regressed",
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn compatible(current: &VerifiedWorkload, candidate: &VerifiedWorkload) -> Result<()> {
@@ -166,9 +181,15 @@ pub fn verify_transition(
         .expires
         .min(current.expires())
         .min(candidate.expires());
+    let valid_from = transition
+        .valid_from
+        .max(current.deployment.valid_from)
+        .max(candidate.deployment.valid_from);
     Ok(VerifiedTransition {
         current,
         candidate,
+        approval_digest: digest(&sha256(&body)),
         fresh_until,
+        valid_from,
     })
 }

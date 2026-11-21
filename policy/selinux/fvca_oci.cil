@@ -7,6 +7,18 @@
 
 ; Give the generated fragment the unit type needed for systemd's SELinux service checks.
 (typetransition init_t init_var_run_t file "fvca-workload-payload.service" systemd_unit_file_t)
+
+; Publish an admitted bundle inside the private Guest update store.
+(type fvca_workload_stage_t)
+(typeattributeset file_type (fvca_workload_stage_t))
+(roletype object_r fvca_workload_stage_t)
+(allow fvca_workload_stage_t fs_t (filesystem (associate)))
+(typetransition init_t fvca_guest_data_t dir "workload-updates" fvca_workload_stage_t)
+(filecon "/run/fvca/guest-data/workload-updates(/.*)?" any
+    (system_u object_r fvca_workload_stage_t ((s0) (s0))))
+(allow init_t fvca_workload_stage_t (dir (add_name create mounton remove_name rename write)))
+(allow init_t fvca_workload_stage_t (file (open read)))
+
 (filecon "/run/fvca/workload-image/fvca-workload-payload\.service" file
     (system_u object_r systemd_unit_file_t ((s0) (s0))))
 (filecon "/run/systemd/system/fvca-workload-payload\.service" file

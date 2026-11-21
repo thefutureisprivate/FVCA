@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
 use std::error::Error;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::net::Ipv4Addr;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, chown};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, chown};
 use std::path::Path;
 use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,10 +13,15 @@ use fvca_workload_admission::quadlet::{self, Definition, NAMESPACE, PAYLOAD, ROO
 use fvca_workload_admission::{Scope, Trust, read_bounded, verify};
 use openssl::x509::X509;
 
+#[path = "activate-workload/stage.rs"]
+mod stage;
+
 const GUEST_DATA: &str = "/run/fvca/guest-data";
 const BUNDLE: &str = "/run/fvca/guest-data/workload";
 const TRUST: &str = "/run/fvca/workload-trust";
 const DIRECTORY: &str = "/run/fvca/workload-image";
+const MOUNTED_AUTHORIZATION: &str = "/run/fvca/workload-image/authorization";
+const LIFECYCLE_LOCK: &str = "/run/fvca/workload-lifecycle.lock";
 const SIGNATURE: &str = "/run/fvca/workload-image/root.p7s";
 const MAPPING: &str = "fvca-workload-root";
 const MAPPER: &str = "/dev/mapper/fvca-workload-root";
@@ -44,7 +49,8 @@ fn run(command: &mut Command) -> io::Result<()> {
     Ok(())
 }
 
-fn private_directory(path: &str) -> io::Result<()> {
+fn private_directory(path: impl AsRef<Path>) -> io::Result<fs::Metadata> {
+    let path = path.as_ref();
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_dir()
         || metadata.uid() != 0
@@ -52,17 +58,42 @@ fn private_directory(path: &str) -> io::Result<()> {
         || metadata.mode() & 0o7777 != 0o700
     {
         return Err(io::Error::other(format!(
-            "{path} must be a root-owned 0700 directory"
+            "{} must be a root-owned 0700 directory",
+            path.display()
         )));
     }
-    Ok(())
+    Ok(metadata)
 }
 
 fn make_directory(path: &str) -> io::Result<()> {
     match fs::DirBuilder::new().mode(0o700).create(path) {
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => private_directory(path),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            private_directory(path).map(|_| ())
+        }
         other => other,
     }
+}
+
+fn lock_lifecycle() -> Result<File> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(LIFECYCLE_LOCK)?;
+    let metadata = lock.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o7777 != 0o600
+    {
+        return Err(io::Error::other("invalid Guest workload lifecycle lease").into());
+    }
+    lock.try_lock()?;
+    Ok(lock)
 }
 
 fn provision_volumes(service: &str, definition: &Definition) -> Result<()> {
@@ -258,7 +289,7 @@ fn read_trust() -> Result<Trust> {
     Trust::new(scope, deployment, workload)
 }
 
-fn mount_workload() -> Result<()> {
+fn require_guest_data(options: &str) -> Result<fs::Metadata> {
     run(Command::new("/usr/bin/findmnt")
         .args([
             "--mountpoint",
@@ -266,15 +297,20 @@ fn mount_workload() -> Result<()> {
             "--types",
             "btrfs",
             "--options",
-            "rw,nodev,nosuid,noexec",
+            options,
         ])
         .stdout(std::process::Stdio::null()))?;
-    private_directory(GUEST_DATA)?;
+    Ok(private_directory(GUEST_DATA)?)
+}
+
+fn mount_workload() -> Result<()> {
+    require_guest_data("rw,nodev,nosuid,noexec")?;
     private_directory(BUNDLE)?;
     let verified = verify(Path::new(BUNDLE), &read_trust()?)?;
     let dns = admitted_network(verified.network_profile())?;
     let definition = quadlet::render(&verified, dns)?;
     let hash = verified.verity_root_hash().to_owned();
+    let authorization = verified.authorization_digest().to_owned();
     let service = verified.service().to_owned();
     provision_volumes(&service, &definition)?;
     let (artifact, image) = verified.into_artifact();
@@ -308,6 +344,12 @@ fn mount_workload() -> Result<()> {
         ROOT,
     ]))?;
     publish_unit(&definition)?;
+    let mut identity = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(MOUNTED_AUTHORIZATION)?;
+    writeln!(identity, "{authorization}")?;
     println!("FVCA_WORKLOAD_ROOT_ACTIVE {service} {hash}");
     Ok(())
 }
@@ -322,7 +364,8 @@ fn remove_missing(result: io::Result<()>) -> io::Result<()> {
 fn unmount_workload() -> Result<()> {
     match private_directory(DIRECTORY) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        result => result?,
+        Err(error) => return Err(error.into()),
+        Ok(_) => (),
     }
     if fs::read_to_string("/proc/self/mountinfo")?
         .lines()
@@ -343,6 +386,7 @@ fn unmount_workload() -> Result<()> {
     }
     remove_missing(fs::remove_dir_all(QUADLET_DIR))?;
     remove_missing(fs::remove_file(PUBLISHED_UNIT))?;
+    remove_missing(fs::remove_file(MOUNTED_AUTHORIZATION))?;
     remove_missing(fs::remove_file(SIGNATURE))?;
     remove_missing(fs::remove_dir(ROOT))?;
     fs::remove_dir(DIRECTORY)?;
@@ -358,13 +402,18 @@ fn execute() -> Result<()> {
     }
     let arguments: Vec<_> = std::env::args().skip(1).collect();
     let command: Vec<_> = arguments.iter().map(String::as_str).collect();
-    match command.as_slice() {
-        ["mount"] => mount_workload(),
-        ["unmount"] => unmount_workload(),
-        ["start"] => start_workload(),
-        ["check-start", expires, profile] => check_start(expires, profile),
-        _ => Err(io::Error::other("invalid workload activation operation").into()),
+    if let ["check-start", expires, profile] = command.as_slice() {
+        return check_start(expires, profile);
     }
+    let operation: fn() -> Result<()> = match command.as_slice() {
+        ["mount"] => mount_workload,
+        ["unmount"] => unmount_workload,
+        ["start"] => start_workload,
+        ["stage"] => stage::run,
+        _ => return Err(io::Error::other("invalid workload activation operation").into()),
+    };
+    let _lease = lock_lifecycle()?;
+    operation()
 }
 
 fn main() -> ExitCode {

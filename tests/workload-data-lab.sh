@@ -3,8 +3,14 @@
 set -euo pipefail
 umask 077
 
+stage=
+if [[ ${1:-} == --stage && $# -ge 2 ]]; then
+    stage=$2
+    shift 2
+    test -d "$stage/incoming/candidate"
+fi
 if [[ $# -lt 3 || $# -gt 4 ]]; then
-    echo 'Run tests/workload-data-lab.sh GUEST_DATA_TEMPLATE AUTHORIZED_BUNDLE NEW_OUTPUT_DIRECTORY [STALWART_MAIL_LAB]' >&2
+    echo 'Run tests/workload-data-lab.sh [--stage UPDATE_STORE] GUEST_DATA_TEMPLATE AUTHORIZED_BUNDLE NEW_OUTPUT_DIRECTORY [STALWART_MAIL_LAB]' >&2
     exit 2
 fi
 template=$1
@@ -48,7 +54,7 @@ for name in approved tampered; do
     done
     chmod 700 "$tree"
     builder=(podman unshare)
-    if [[ -n "$mail_lab" && "$name" == approved ]]; then
+    if [[ -n "$mail_lab" && ( "$name" == approved || -n "$stage" ) ]]; then
         payload="$tree/payload/stalwart"
         mkdir -m700 -- "$tree/payload" "$payload"
         podman unshare cp -r --no-preserve=ownership,context -- "$mail_lab/config" "$payload/$config_name"
@@ -60,10 +66,15 @@ for name in approved tampered; do
                   bash -euc 'chown -R "$1" -- "$2" "$3"; shift 3; exec "$@"'
                   bash "$ownership" "$payload/$config_name" "$payload/$data_name")
     fi
+    artifact="$tree/workload/workload.raw"
+    if [[ -n "$stage" ]]; then
+        cp -a --reflink=auto -- "$stage" "$tree/workload-updates"
+        artifact="$tree/workload-updates/incoming/candidate/workload.raw"
+    fi
     chcon -R system_u:object_r:var_lib_t:s0 -- "$tree"
     if [[ "$name" == tampered ]]; then
         # Change exactly one byte inside the first data partition.
-        python3 - "$tree/workload/workload.raw" <<'PY'
+        python3 - "$artifact" <<'PY'
 import sys
 
 with open(sys.argv[1], "r+b") as artifact:
@@ -77,9 +88,14 @@ with open(sys.argv[1], "r+b") as artifact:
 PY
     fi
     image="$temporary/$name-filesystem.raw"
-    truncate -s "$((size * 512))" "$image"
+    partition_bytes=$((size * 512))
+    truncate -s "$partition_bytes" "$image"
     "${builder[@]}" mkfs.btrfs --quiet --force --nodiscard --data single --metadata dup \
         --uuid "$filesystem" --rootdir "$tree" "$image"
+    if (( $(stat -c %s -- "$image") > partition_bytes )); then
+        echo 'The seeded Btrfs filesystem exceeds the template partition. Use a larger Guest template.' >&2
+        exit 1
+    fi
     guest="$temporary/$name.raw"
     cp --reflink=auto --sparse=always -- "$template" "$guest"
     dd if="$image" of="$guest" bs=1M oflag=seek_bytes seek="$((start * 512))" conv=notrunc status=none

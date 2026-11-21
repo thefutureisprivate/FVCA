@@ -59,7 +59,8 @@ def normalize_build_files(root):
     else:
         units.extend(["fvca-base-ready.service", "fvca-base.target"])
         if (root / "usr/lib/fvca/activate-workload").is_file():
-            units.extend(["fvca-workload-root.service", "fvca-workload-start.service", "fvca-qemu-guest-agent.service"])
+            units.extend(["fvca-workload-root.service", "fvca-workload-start.service",
+                          "fvca-stage-workload.service", "fvca-qemu-guest-agent.service"])
             for path in ("usr/lib/fvca/qemu-guest-agent.conf", "usr/lib/udev/rules.d/99-fvca-qemu-guest-agent.rules"):
                 (root / path).chmod(0o644)
     for name in units:

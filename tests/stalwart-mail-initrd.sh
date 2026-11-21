@@ -2,8 +2,13 @@
 # Add the read-only message check to a disposable signed Guest initramfs.
 set -euo pipefail
 umask 077
+stage=false
+if [[ ${1:-} == --workload-stage ]]; then
+    stage=true
+    shift
+fi
 if [[ $# != 3 || -e "$2" ]]; then
-    echo 'Run tests/stalwart-mail-initrd.sh GUEST_INITRAMFS NEW_INITRAMFS STALWART_MAIL_LAB' >&2
+    echo 'Run tests/stalwart-mail-initrd.sh [--workload-stage] GUEST_INITRAMFS NEW_INITRAMFS STALWART_MAIL_LAB' >&2
     exit 2
 fi
 tests=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -24,13 +29,26 @@ ExecStartPost=/usr/bin/cp /usr/lib/fvca/stalwart-mail-fetch.service /usr/lib/fvc
 ExecStartPost=/usr/bin/mkdir -p /run/systemd/system/fvca-base-ready.service.requires
 ExecStartPost=/usr/bin/ln -s ../stalwart-mail-verify.service /run/systemd/system/fvca-base-ready.service.requires/stalwart-mail-verify.service
 UNIT
+files=("$conf" "$conf/90-stalwart-mail.conf" "$fvca/stalwart-lab-imap.curl"
+    "$fvca/stalwart-lab-mail.sha256" "$fvca/stalwart-mail-fetch.service" "$fvca/stalwart-mail-verify.service")
+if "$stage"; then
+    # Apply the Guest policy to the offline fixture under its own SELinux policy.
+    cat >> "$tree/$conf/90-stalwart-mail.conf" <<'UNIT'
+ExecStartPost=/usr/bin/mkdir -p /run/systemd/system/fvca-stage-workload.service.d
+ExecStartPost=/usr/bin/cp /usr/lib/fvca/stalwart-lab-stage-label.conf /run/systemd/system/fvca-stage-workload.service.d/
+UNIT
+    cat > "$tree/$fvca/stalwart-lab-stage-label.conf" <<'UNIT'
+[Service]
+ExecStartPre=/usr/bin/chcon -R system_u:object_r:fvca_workload_stage_t:s0 /run/fvca/guest-data/workload-updates
+UNIT
+    chmod 644 "$tree/$fvca/stalwart-lab-stage-label.conf"
+    files+=("$fvca/stalwart-lab-stage-label.conf")
+fi
 chmod 644 "$tree/$conf/90-stalwart-mail.conf"
 archive="$tree/initrd.cpio"
 zstd -dc "$1" > "$archive"
 (
     cd "$tree"
-    printf '%s\0' "$conf" "$conf/90-stalwart-mail.conf" "$fvca/stalwart-lab-imap.curl" \
-        "$fvca/stalwart-lab-mail.sha256" "$fvca/stalwart-mail-fetch.service" "$fvca/stalwart-mail-verify.service" \
-        | cpio --quiet -o -0 -A -F "$archive" -H newc --owner=0:0
+    printf '%s\0' "${files[@]}" | cpio --quiet -o -0 -A -F "$archive" -H newc --owner=0:0
 )
 zstd --quiet -3 "$archive" -o "$2"
