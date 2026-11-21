@@ -2,6 +2,7 @@
 """Inventory an authenticated, assembled FVCA boot release off-node."""
 
 import argparse
+import base64
 from compression.zstd import ZstdError
 import hashlib
 import json
@@ -24,7 +25,7 @@ import vm_runtime
 POLICY_PREFIX = "/usr/lib/fvca/"
 WORKLOAD_FILES = (
     "authorization.json", "authorization.p7s", "deployment.json", "deployment.p7s",
-    "derivation.json", "launch.json", "publisher-proof.json", "workload.raw",
+    "derivation.json", "launch.json", "source-evidence.json", "workload.raw",
 )
 
 
@@ -171,6 +172,15 @@ def inspect_workload(args, work, policy):
     authorization = json.loads((bundle / "authorization.json").read_bytes())
     derivation = json.loads((bundle / "derivation.json").read_bytes())
     deployment = json.loads((bundle / "deployment.json").read_bytes())
+    permit = None
+    expires = deployment["expires"]
+    if deployment["provenance"] == "UNSIGNED_UPSTREAM_APPROVED":
+        source = json.loads((bundle / "source-evidence.json").read_bytes())
+        record = json.loads(base64.b64decode(source["permit"], validate=True))
+        request = record["acknowledgment"]
+        expires = min(expires, request["expires"])
+        permit = {"id": request["revocation_id"], "expires": request["expires"],
+                  "authority": derivation["source"]["permit_authority"], "digest": derivation["permit"]}
     network = policy[WORKLOAD_NETWORK_POLICY]
     expected_network = {"workload": "sha256:" + hashlib.sha256(network).hexdigest()} if network is not None else "none"
     if deployment["network"] != expected_network:
@@ -183,7 +193,7 @@ def inspect_workload(args, work, policy):
     unpack(root_dir)
     return {
         "guest": deployment["guest"], "service": deployment["service"], "valid_from": deployment["valid_from"],
-        "expires": deployment["expires"], "revocation_id": deployment["revocation_id"],
+        "expires": expires, "revocation_id": deployment["revocation_id"], "unsigned_permit": permit,
         "security_epoch": deployment["security_epoch"], "provenance": deployment["provenance"],
         "source": derivation["source"], "manifest": derivation["manifest"], "launch_sha256": guest.sha256(bundle / "launch.json"),
         "evidence_sha256": {name: guest.sha256(bundle / name) for name in WORKLOAD_FILES},

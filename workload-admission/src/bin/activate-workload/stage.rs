@@ -29,7 +29,7 @@ const BUNDLE_FILES: [&str; 8] = [
     "deployment.p7s",
     "derivation.json",
     "launch.json",
-    "publisher-proof.json",
+    "source-evidence.json",
     "workload.raw",
 ];
 

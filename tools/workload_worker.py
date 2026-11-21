@@ -198,7 +198,12 @@ def stable_bytes(purpose, digest):
 def main(staged, output, scratch):
     os.umask(0o022)
     policy_path = staged / "policy.json"
-    policy = oci.load_policy(policy_path)
+    policy_raw = oci.read_bytes(policy_path)
+    policy = oci.parse_json(policy_raw)
+    if policy["schema"] == "fvca-oci-explicit-exceptions-v1":
+        oci.validate_exception_policy(policy)
+    else:
+        oci.validate_policy(policy)
     layout = staged / "oci"
     selected, config, layers, diffs, raw_launch = oci.inspect_source(
         policy, oci.read_bytes(staged / "publisher-index.json"), layout,
@@ -246,10 +251,10 @@ def main(staged, output, scratch):
     evidence = {
         "schema": "fvca-workload-derivation-v1",
         "service": policy["service"],
-        "source": {key: policy[key] for key in ("repository", "index", "certificate_identity", "certificate_issuer")},
+        "source": oci.source_record(policy),
         "platform": oci.PLATFORM, "manifest": selected, "config": config,
         "layers": [{**layer, "diff_id": diff} for layer, diff in zip(layers, diffs, strict=True)],
-        "source_policy": oci.sha256(oci.read_bytes(policy_path)),
+        "source_policy": oci.sha256(policy_raw),
         "launch": oci.sha256(launch_bytes),
         "converter": {
             "packages": packages, "normalization": "fvca-workload-v1",

@@ -6,9 +6,9 @@ use openssl::sha::sha256;
 use serde::Deserialize;
 
 use super::{
-    ARTIFACT_LIMIT, RECORD_LIMIT, Result, SIGNATURE_LIMIT, Trust, VerifiedMetadata,
-    VerifiedWorkload, check_time, complete_bundle, current_time, digest, invalid, is_digest,
-    read_bounded, verify, verify_for_source, verify_metadata, verify_signature,
+    ARTIFACT_LIMIT, Provenance, RECORD_LIMIT, Result, SIGNATURE_LIMIT, Trust, VerifiedMetadata,
+    VerifiedWorkload, complete_bundle, current_time, digest, invalid, is_digest, read_bounded,
+    verify, verify_for_source, verify_metadata, verify_signature,
 };
 
 const TRANSITION_LIMIT: u64 = 4096;
@@ -23,7 +23,7 @@ pub const TRANSITION_MEMBERS: [(&str, u64); 10] = [
     ("candidate/deployment.p7s", SIGNATURE_LIMIT),
     ("candidate/derivation.json", RECORD_LIMIT),
     ("candidate/launch.json", RECORD_LIMIT),
-    ("candidate/publisher-proof.json", RECORD_LIMIT),
+    ("candidate/source-evidence.json", RECORD_LIMIT),
     ("candidate/workload.raw", ARTIFACT_LIMIT),
 ];
 
@@ -188,8 +188,10 @@ fn compatible(current: &VerifiedMetadata, candidate: &VerifiedMetadata) -> Resul
         ));
     }
     if current.derivation.source.repository != candidate.derivation.source.repository
-        || current.derivation.source.certificate_issuer
-            != candidate.derivation.source.certificate_issuer
+        || (from.provenance == Provenance::PublisherVerified
+            && (to.provenance != Provenance::PublisherVerified
+                || current.derivation.source.certificate_issuer
+                    != candidate.derivation.source.certificate_issuer))
     {
         return Err(invalid(
             "candidate workload changes the publisher repository or issuer",
@@ -228,8 +230,15 @@ fn compatible(current: &VerifiedMetadata, candidate: &VerifiedMetadata) -> Resul
             "workload transition requires a declared health check for each release",
         ));
     }
+    let source_authorization_changed = from.provenance != to.provenance
+        || (from.provenance == Provenance::UnsignedUpstreamApproved
+            && from.source_index == to.source_index
+            && from.manifest == to.manifest
+            && current.derivation.permit != candidate.derivation.permit
+            && current.validity.expires < candidate.validity.expires);
     if current.derivation.root.digest == candidate.derivation.root.digest
         && from.launch == to.launch
+        && !source_authorization_changed
     {
         return Err(invalid(
             "workload transition does not change executable or launch bytes",
@@ -299,16 +308,16 @@ pub fn verify_transition_offer(
     }
     let now = current_time()?;
     transition.check_time(now)?;
-    check_time(&current.metadata.deployment, now)?;
-    check_time(&candidate.deployment, now)?;
+    current.metadata.require_fresh(now)?;
+    candidate.require_fresh(now)?;
     let fresh_until = transition
         .expires
         .min(current.expires())
-        .min(candidate.deployment.expires);
+        .min(candidate.validity.expires);
     let valid_from = transition
         .valid_from
-        .max(current.metadata.deployment.valid_from)
-        .max(candidate.deployment.valid_from);
+        .max(current.valid_from())
+        .max(candidate.validity.valid_from);
     Ok(VerifiedOffer {
         current,
         candidate,

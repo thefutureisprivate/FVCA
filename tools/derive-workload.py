@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify publisher identity and derive a workload root without signing keys."""
+"""Verify source admission and derive a workload root without signing keys."""
 
 import argparse
 from pathlib import Path
@@ -16,9 +16,9 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix=".fvca-workload-", dir=args.output.parent) as temporary:
             staged = Path(temporary) / "candidate"
-            evidence = derive(args, staged)
+            evidence, _, _ = derive(args, staged)
             publish(staged, args.output)
-        print(f"Derived {evidence['service']} workload root {evidence['verity_root_hash']}")
+        print(f"Derived {evidence['service']} workload root {evidence['verity_root_hash']} {evidence['provenance']}")
     except (OSError, ValueError, TypeError, KeyError, IndexError, subprocess.SubprocessError) as error:
         parser.exit(1, f"FVCA workload derivation failed: {error}\n")
 

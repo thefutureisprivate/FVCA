@@ -49,7 +49,7 @@ trap 'podman unshare rm -rf -- "$temporary"' EXIT
 for name in approved tampered; do
     tree="$temporary/$name-tree"
     install -dm700 "$tree/workload"
-    for file in authorization.json authorization.p7s deployment.json deployment.p7s derivation.json launch.json publisher-proof.json workload.raw; do
+    for file in authorization.json authorization.p7s deployment.json deployment.p7s derivation.json launch.json source-evidence.json workload.raw; do
         cp --reflink=auto -- "$bundle/$file" "$tree/workload/$file"
     done
     chmod 700 "$tree"

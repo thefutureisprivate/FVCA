@@ -5,6 +5,7 @@ mod image;
 mod launch;
 pub mod quadlet;
 mod records;
+mod source;
 mod transition;
 
 use std::error::Error;
@@ -22,7 +23,7 @@ use openssl::x509::X509;
 
 pub use image::{Image, Region};
 use records::{Authorization, Blob, Deployment, Derivation, Network};
-pub use records::{IdMap, Launch, Limits, Scope};
+pub use records::{IdMap, Launch, Limits, Provenance, Scope};
 pub use transition::{
     TRANSITION_MEMBERS, VerifiedOffer, VerifiedTransition, verify_committed, verify_transition,
     verify_transition_from, verify_transition_offer,
@@ -48,6 +49,10 @@ impl Trust {
             || !is_digest(&scope.source_policy)
             || !(1..=i64::MAX as u64).contains(&scope.minimum_epoch)
             || !scope.revoked.iter().all(|id| revocation_id(id))
+            || scope
+                .unsigned_permit_authority
+                .as_deref()
+                .is_some_and(|pin| !is_digest(pin))
         {
             return Err(invalid("invalid trusted workload policy"));
         }
@@ -85,6 +90,18 @@ struct VerifiedMetadata {
     derivation: Derivation,
     authorization: Authorization,
     authorization_digest: String,
+    validity: source::Validity,
+}
+
+impl VerifiedMetadata {
+    fn require_fresh(&self, now: u64) -> Result<()> {
+        if !(self.validity.valid_from..self.validity.expires).contains(&now) {
+            return Err(invalid(
+                "workload deployment or unsigned permit is outside its validity period",
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub struct VerifiedWorkload {
@@ -119,7 +136,19 @@ impl VerifiedWorkload {
     }
 
     pub fn expires(&self) -> u64 {
-        self.metadata.deployment.expires
+        self.metadata.validity.expires
+    }
+
+    pub fn valid_from(&self) -> u64 {
+        self.metadata.validity.valid_from
+    }
+
+    pub fn provenance(&self) -> Provenance {
+        self.metadata.deployment.provenance
+    }
+
+    pub fn permit_id(&self) -> Option<&str> {
+        self.metadata.validity.permit_id.as_deref()
     }
 
     pub fn id_map(&self) -> &IdMap {
@@ -312,8 +341,6 @@ fn check_derivation(
         || !is_digest(&value.worker_image)
         || value.source.index != approval.source_index
         || value.source.repository.is_empty()
-        || value.source.certificate_identity.is_empty()
-        || value.source.certificate_issuer.is_empty()
         || value.platform.os != "linux"
         || value.platform.architecture != "amd64"
         || value.manifest.digest != approval.manifest
@@ -401,7 +428,7 @@ fn verify_metadata(
         ));
     }
     let authorization: Authorization = serde_json::from_slice(&authorization_bytes)?;
-    if authorization.schema != "fvca-workload-authorization-v1"
+    if authorization.schema != "fvca-workload-authorization-v2"
         || authorization.deployment != digest(&sha256(&deployment_bytes))
         || authorization.deployment_certificate != digest(&sha256(&trust.deployment.to_der()?))
         || authorization.workload_certificate != digest(&sha256(&trust.workload.to_der()?))
@@ -420,20 +447,28 @@ fn verify_metadata(
         &authorization.derivation,
     )?)?;
     check_derivation(&derivation, &deployment, &authorization, source_policy)?;
-    bound_record(
-        directory,
-        "publisher-proof.json",
-        &authorization.publisher_proof,
-    )?;
     let launch: Launch =
         serde_json::from_slice(&bound_record(directory, "launch.json", &deployment.launch)?)?;
     launch.validate()?;
+    let validity = source::verify(
+        &bound_record(
+            directory,
+            "source-evidence.json",
+            &authorization.source_evidence,
+        )?,
+        &derivation,
+        &deployment,
+        &launch,
+        trust,
+        current_time()?,
+    )?;
     Ok(VerifiedMetadata {
         deployment,
         launch,
         derivation,
         authorization,
         authorization_digest,
+        validity,
     })
 }
 
@@ -452,7 +487,7 @@ fn complete_bundle(
         &metadata.derivation,
         &trust.workload,
     )?;
-    check_time(&metadata.deployment, current_time()?)?;
+    metadata.require_fresh(current_time()?)?;
     Ok(VerifiedWorkload {
         metadata,
         artifact,

@@ -24,6 +24,7 @@ sys.path.insert(0, str(TOOLS))
 from image_verity import verify_cms
 from workload_discovery import discover
 import workload_oci as oci
+from workload_permit import ACKNOWLEDGMENT, OPERATOR_ROLE
 
 spec = importlib.util.spec_from_file_location("issuer", TOOLS / "issue-workload-permit.py")
 issuer = importlib.util.module_from_spec(spec)
@@ -99,7 +100,7 @@ class PermitTests(TestCase):
         self.policy_path.write_bytes(oci.json_bytes(self.policy))
         self.launch = self.work / "launch.json"
         self.launch.write_bytes(oci.json_bytes(oci.launch_metadata(self.policy, self.config)))
-        scope = {"operator": "reviewer", "role": issuer.OPERATOR_ROLE, "guest": "guest-one", "service": "mail",
+        scope = {"operator": "reviewer", "role": OPERATOR_ROLE, "guest": "guest-one", "service": "mail",
                  "repository": self.policy["repository"], "source_policy": oci.sha256(self.policy_path.read_bytes())}
         now = int(time.time())
         self.delegation = {**scope, "schema": "fvca-workload-permit-delegation-v1",
@@ -108,7 +109,7 @@ class PermitTests(TestCase):
                            "registry_token_service": None}
         self.ack = {**scope, "schema": "fvca-workload-permit-request-v1", "source_index": self.policy["index"],
                     "manifest": self.policy["manifest"], "platform": oci.PLATFORM, "launch": oci.sha256(self.launch.read_bytes()),
-                    "acknowledgment": issuer.ACKNOWLEDGMENT, "reason": "Reviewed the exact fixture source",
+                    "acknowledgment": ACKNOWLEDGMENT, "reason": "Reviewed the exact fixture source",
                     "requested_at": now - 1, "expires": now + 120, "revocation_id": str(uuid4()),
                     "revocation_action": "block-new-starts"}
         self.responses = {}
@@ -167,7 +168,7 @@ class PermitTests(TestCase):
 
     def test_bad_scope_signature_or_warning_blocks_discovery(self):
         for changes, extra in (
-            ({"acknowledgment": issuer.ACKNOWLEDGMENT.lower()}, {}), ({"guest": "guest-two"}, {}),
+            ({"acknowledgment": ACKNOWLEDGMENT.lower()}, {}), ({"guest": "guest-two"}, {}),
             ({"manifest": self.policy["index"]}, {}), ({"platform": {"os": "linux", "architecture": "arm64"}}, {}),
             ({"expires": int(time.time()) - 2}, {}), ({}, {"request_signer": "other"}), ({}, {"alter": {"reason": "Modified"}}),
         ):

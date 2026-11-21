@@ -1,21 +1,28 @@
-"""Off-node publisher admission and isolated workload derivation."""
+"""Off-node source admission and isolated workload derivation."""
 
+import base64
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 
 import workload_oci as oci
+import workload_permit as permit
 
 
 TOOL_ROOT = Path(__file__).resolve().parent
 OUTPUTS = ("root.erofs", "verity.hash", "roothash", "launch.json", "derivation.json")
+SOURCE_EVIDENCE = "source-evidence.json"
 
 
 def source_arguments(parser):
-    for name in ("policy", "source-index", "layout", "cosign", "output"):
+    for name in ("policy", "source-index", "layout", "output"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute(), required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--cosign", type=Path)
+    source.add_argument("--unsigned-permit", type=Path, help="directory containing the independently issued permit")
     parser.add_argument("--worker-image", required=True, help="immutable local image ID of the reviewed workload converter")
 
 
@@ -72,8 +79,22 @@ def derive(args, destination):
     destination.mkdir(mode=0o700)
     with tempfile.TemporaryDirectory(prefix=".workload-input-", dir=destination.parent) as directory:
         staged = Path(directory)
-        policy = oci.snapshot_source(args.policy, args.source_index, args.layout, staged)
-        proof = check_publisher(args.cosign, policy)
+        policy_raw = oci.read_bytes(args.policy)
+        policy = oci.parse_json(policy_raw)
+        if args.unsigned_permit is None:
+            oci.validate_policy(policy)
+        else:
+            oci.validate_exception_policy(policy)
+        raw_launch = oci.snapshot_source(policy, policy_raw, args.source_index, args.layout, staged)
+        launch = oci.json_bytes(oci.launch_metadata(policy, raw_launch))
+        request, authority_key = None, None
+        if args.unsigned_permit is None:
+            proof = {"provenance": permit.PUBLISHER, "policy": permit.portable(policy_raw),
+                     "proof": oci.parse_json(check_publisher(args.cosign.absolute(), policy))}
+        else:
+            proof, request, authority_key = permit.verify(args.unsigned_permit, policy, policy_raw, launch, staged)
+            for name in ("permit.json", "permit.p7s", "authority.crt"):
+                (staged / name).unlink()
         for name in ("workload_worker.py", "workload_oci.py"):
             shutil.copyfile(TOOL_ROOT / name, staged / name)
         subprocess.run([
@@ -91,11 +112,19 @@ def derive(args, destination):
             raise ValueError("workload worker produced unexpected outputs")
         evidence_file = destination / "derivation.json"
         evidence = oci.parse_json(oci.read_bytes(evidence_file))
-        expected_source = {key: policy[key] for key in ("repository", "index", "certificate_identity", "certificate_issuer")}
-        if evidence["source"] != expected_source or evidence["manifest"]["digest"] != policy["manifest"]:
+        if (evidence["source"] != oci.source_record(policy) or evidence["manifest"]["digest"] != policy["manifest"]
+                or evidence["source_policy"] != oci.sha256(policy_raw)
+                or oci.read_bytes(destination / "launch.json") != launch or evidence["launch"] != oci.sha256(launch)):
             raise ValueError("workload worker recorded a different source selection")
         evidence["worker_image"] = image
-        evidence["provenance"] = "PUBLISHER_VERIFIED"
+        evidence["provenance"] = proof["provenance"]
+        if request is not None:
+            if int(time.time()) >= request["expires"]:
+                raise ValueError("unsigned workload permit expired during derivation")
+            evidence["permit"] = oci.sha256(base64.b64decode(proof["permit"], validate=True))
         evidence_file.write_bytes(oci.json_bytes(evidence))
-        (destination / "publisher-proof.json").write_bytes(proof)
-    return evidence
+        receipt = oci.json_bytes(proof)
+        if len(receipt) > oci.METADATA_LIMIT:
+            raise ValueError("source evidence exceeds the authorization record size limit")
+        (destination / SOURCE_EVIDENCE).write_bytes(receipt)
+    return evidence, request, authority_key

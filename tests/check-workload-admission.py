@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+from uuid import uuid4
 
 
 BINARY = Path(os.environ.get("FVCA_WORKLOAD_ADMISSION", "workload-admission/target/debug/fvca-workload-admission")).absolute()
@@ -41,6 +42,27 @@ def sign(path, signer, *flags):
             "-out", path.with_suffix(".p7s"), *flags)
 
 
+def portable(content):
+    return base64.b64encode(content).decode("ascii")
+
+
+def source_policy(derivation, launch, schema):
+    return json.dumps({
+        "schema": schema, "service": derivation["service"], **derivation["source"],
+        "manifest": derivation["manifest"]["digest"],
+        **{field: launch[field] for field in ("uid", "gid", "volumes")},
+    }).encode("ascii")
+
+
+def publisher_evidence(derivation, launch):
+    policy = source_policy(derivation, launch, "fvca-oci-source-v1")
+    source = derivation["source"]
+    return {"provenance": "PUBLISHER_VERIFIED", "policy": portable(policy), "proof": [{"critical": {
+        "type": "https://sigstore.dev/cosign/sign/v1", "image": {"docker-manifest-digest": source["index"]},
+        "identity": {"docker-reference": f"{source['repository']}@{source['index']}"},
+    }}]}
+
+
 class Admission(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -49,7 +71,8 @@ class Admission(unittest.TestCase):
         root = Path(tree.name)
         cls.deploy = root / "deployment"
         cls.workload = root / "workload"
-        for signer in (cls.deploy, cls.workload):
+        cls.permit_authority = root / "permit-authority"
+        for signer in (cls.deploy, cls.workload, cls.permit_authority):
             openssl("req", "-new", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
                     "-noenc", "-days", "1", "-subj", f"/CN={signer.name}",
                     "-keyout", signer.with_suffix(".key"), "-out", signer.with_suffix(".crt"))
@@ -57,7 +80,7 @@ class Admission(unittest.TestCase):
         cls.fixture = root / "fixture"
         cls.fixture.mkdir(mode=0o700)
         cls.scope = {
-            "guest": "guest-test", "service": "test", "source_policy": digest(b"policy"),
+            "guest": "guest-test", "service": "test",
             "minimum_epoch": 2, "revoked": [],
         }
         cls.launch = {
@@ -88,11 +111,11 @@ class Admission(unittest.TestCase):
         assemble_image(cls.fixture / "workload.raw", parts, root_hash, seal.encode("ascii"))
         cls.artifact = (cls.fixture / "workload.raw").read_bytes()
         cls.derivation = {
-            "schema": "fvca-workload-derivation-v1", "service": "test", "source_policy": cls.scope["source_policy"],
+            "schema": "fvca-workload-derivation-v1", "service": "test",
             "worker_image": digest(b"worker"),
             "provenance": "PUBLISHER_VERIFIED", "source": {
                 "repository": "registry.example/test", "index": cls.deployment["source_index"],
-                "certificate_identity": "issuer-specific identity", "certificate_issuer": "https://issuer.example",
+                "certificate_identity": "https://registry.example/workflow", "certificate_issuer": "https://issuer.example",
             }, "platform": {"os": "linux", "architecture": "amd64"}, "manifest": {
                 "digest": cls.deployment["manifest"], "size": 1,
                 "mediaType": "application/vnd.oci.image.manifest.v1+json",
@@ -101,11 +124,14 @@ class Admission(unittest.TestCase):
             "verity_tree": {"digest": digest(bytes(4096)), "size": 4096},
             "config": {}, "layers": [], "converter": {}, "transforms": {},
         }
+        source = publisher_evidence(cls.derivation, cls.launch)
+        cls.scope["source_policy"] = digest(base64.b64decode(source["policy"], validate=True))
+        cls.derivation["source_policy"] = cls.scope["source_policy"]
         cls.authorization = {
-            "schema": "fvca-workload-authorization-v1",
+            "schema": "fvca-workload-authorization-v2",
             "deployment": write(cls.fixture / "deployment.json", cls.deployment),
             "derivation": write(cls.fixture / "derivation.json", cls.derivation),
-            "publisher_proof": write(cls.fixture / "publisher-proof.json", []),
+            "source_evidence": write(cls.fixture / "source-evidence.json", source),
             "deployment_certificate": digest(openssl("x509", "-in", cls.deploy.with_suffix(".crt"), "-outform", "DER")),
             "workload_certificate": workload_fingerprint,
             "artifact": {"size": len(cls.artifact), "digest": digest(cls.artifact)}, "verity_root_hash": root_hash,
@@ -132,6 +158,7 @@ class Admission(unittest.TestCase):
         else:
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertIn(expected, result.stderr)
+        return result.stdout
 
     def test_authorized_bytes(self):
         self.run_check()
@@ -183,8 +210,83 @@ class Admission(unittest.TestCase):
         self.run_check("launch.json does not match")
 
     def test_changed_provenance_evidence(self):
-        write(self.bundle / "publisher-proof.json", ["replace"])
-        self.run_check("publisher-proof.json does not match")
+        write(self.bundle / "source-evidence.json", ["replace"])
+        self.run_check("source-evidence.json does not match")
+
+    def unsigned(self, *, bundle=None, issuer=None, signer=None, request=None):
+        bundle = bundle or self.bundle
+        issuer = issuer or self.permit_authority
+        deployment = json.loads((bundle / "deployment.json").read_bytes())
+        derivation = json.loads((bundle / "derivation.json").read_bytes())
+        launch = json.loads((bundle / "launch.json").read_bytes())
+        certificate = openssl("x509", "-in", issuer.with_suffix(".crt"), "-outform", "DER")
+        pin = digest(certificate)
+        classification = "UNSIGNED_UPSTREAM_APPROVED"
+        deployment["provenance"] = classification
+        derivation["provenance"] = classification
+        source = {"repository": derivation["source"]["repository"], "index": deployment["source_index"], "permit_authority": pin}
+        derivation["source"] = source
+        policy = source_policy(derivation, launch, "fvca-oci-explicit-exceptions-v1")
+        now = int(time.time())
+        acceptance = {
+            "schema": "fvca-workload-permit-request-v1", "operator": "reviewer", "role": "workload-unsigned-approver",
+            "guest": deployment["guest"], "service": deployment["service"], "repository": source["repository"],
+            "source_policy": digest(policy), "source_index": source["index"], "manifest": deployment["manifest"],
+            "platform": derivation["platform"], "launch": deployment["launch"],
+            "acknowledgment": "I KNOW THIS MIGHT BE INSECURE", "reason": "Reviewed exact fixture",
+            "requested_at": now - 20, "expires": now + 90, "revocation_id": str(uuid4()),
+            "revocation_action": "block-new-starts",
+        } | (request or {})
+        absent = {"status": 404, "response": digest(b"confirmed absent")}
+        permit = {
+            "schema": "fvca-workload-unsigned-permit-v1", "provenance": classification,
+            "acknowledgment": acceptance, "request_sha256": digest(b"signed request"),
+            "operator_certificate": digest(b"operator cert"), "delegation_sha256": digest(b"signed delegation"),
+            "issued_at": now - 10, "expiry_action": "block-new-starts",
+            "discovery": {"schema": "fvca-signature-discovery-v1", "repository": source["repository"], "subjects": [
+                {"digest": subject, "referrers_api": absent, "referrers_tag": absent, "cosign_signature_tag": absent}
+                for subject in (source["index"], deployment["manifest"])
+            ]},
+        }
+        record = bundle.with_name("permit.json")
+        derivation["permit"] = write(record, permit)
+        sign(record, signer or issuer)
+        evidence = {"provenance": classification, "policy": portable(policy), "permit": portable(record.read_bytes()),
+                    "authority": portable(certificate), "signature": portable(record.with_suffix(".p7s").read_bytes())}
+        auth_hash = self.bind_endpoint(bundle, launch, deployment, derivation, (bundle / "workload.raw").read_bytes(), evidence)
+        scope = dict(self.scope, source_policy=digest(policy), unsigned_permit_authority=pin)
+        if bundle == self.bundle:
+            write(self.policy, scope)
+        return scope, acceptance, auth_hash
+
+    def test_unsigned_requires_explicit_enrollment_and_reports_effective_expiry(self):
+        scope, permit, _ = self.unsigned()
+        output = self.run_check()
+        self.assertIn(f"UNSIGNED_UPSTREAM_APPROVED {permit['revocation_id']} {permit['expires']}", output)
+        del scope["unsigned_permit_authority"]
+        write(self.policy, scope)
+        self.run_check("does not enable unsigned permits")
+
+    def test_revoked_unsigned_permit_blocks_admission(self):
+        scope, permit, _ = self.unsigned()
+        write(self.policy, dict(scope, revoked=[permit["revocation_id"]]))
+        self.run_check("unsigned workload permit is revoked")
+
+    def test_expired_unsigned_permit_blocks_admission(self):
+        self.unsigned(request={"expires": int(time.time()) - 1})
+        self.run_check("unsigned workload permit is outside its validity period")
+
+    def test_unsigned_permit_rejects_other_destination_and_manifest(self):
+        for values in ({"guest": "different-guest"}, {"manifest": digest(b"other manifest")}):
+            with self.subTest(values=values):
+                self.unsigned(request=values)
+                self.run_check("does not bind the exact workload and acknowledgment")
+
+    def test_unsigned_permit_requires_its_own_signature_and_key(self):
+        self.unsigned(signer=self.workload)
+        self.run_check("workload verification failed")
+        self.unsigned(issuer=self.workload)
+        self.run_check("requires a distinct authority key")
 
     def test_revoked(self):
         write(self.policy, dict(self.scope, revoked=[REVOCATION_ID]))
@@ -224,17 +326,21 @@ class Admission(unittest.TestCase):
         path.write_bytes(original)
         self.run_check("workload verification failed")
 
-    def bind_endpoint(self, path, launch, deployment, derivation, artifact):
+    def bind_endpoint(self, path, launch, deployment, derivation, artifact, source=None):
         launch_digest = write(path / "launch.json", launch)
         deploy_path = path / "deployment.json"
         auth_path = path / "authorization.json"
+        if source is None:
+            source = publisher_evidence(derivation, launch)
+        policy_hash = digest(base64.b64decode(source["policy"], validate=True))
         deployment_digest = write(deploy_path, dict(deployment, launch=launch_digest))
-        derivation_digest = write(path / "derivation.json", dict(derivation, launch=launch_digest))
+        derivation_digest = write(path / "derivation.json", dict(derivation, launch=launch_digest, source_policy=policy_hash))
         (path / "workload.raw").write_bytes(artifact)
         output = write(auth_path, dict(
             self.authorization, deployment=deployment_digest, derivation=derivation_digest,
             artifact={"size": len(artifact), "digest": digest(artifact)},
             verity_root_hash=derivation["verity_root_hash"],
+            source_evidence=write(path / "source-evidence.json", source),
         ))
         sign(deploy_path, self.deploy)
         sign(auth_path, self.workload)
@@ -254,13 +360,12 @@ class Admission(unittest.TestCase):
         shutil.copytree(self.bundle, candidate)
         index = digest(b"next index")
         manifest = digest(b"next manifest")
-        policy = digest(b"next source policy")
         target_deployment = dict(active_deployment, source_index=index, manifest=manifest)
         target_deployment.update(deployment or {})
         target_launch = active_launch | (launch or {})
         target_source = dict(self.derivation["source"], index=index) | (source or {})
         derivation = dict(
-            self.derivation, source_policy=policy, source=target_source,
+            self.derivation, source=target_source,
             manifest=dict(self.derivation["manifest"], digest=manifest),
         )
         parts = candidate.with_name("next-parts")
@@ -280,6 +385,7 @@ class Admission(unittest.TestCase):
         artifact = disk.read_bytes()
         derivation.update(verity_root_hash=verity, root={"digest": digest(root), "size": len(root)})
         to_authorization = self.bind_endpoint(candidate, target_launch, target_deployment, derivation, artifact)
+        policy = json.loads((candidate / "derivation.json").read_bytes())["source_policy"]
         now = int(time.time())
         return {
             "schema": "fvca-workload-transition-v1", "guest": self.scope["guest"], "service": self.scope["service"],
@@ -347,6 +453,32 @@ class Admission(unittest.TestCase):
     def test_transition_rejects_a_different_publisher_repository(self):
         grant, candidate = self.prepare_transition(source={"repository": "registry.example/other"})
         self.run_transition(grant, candidate, "publisher repository or issuer")
+
+    def test_transition_rejects_signed_to_unsigned_downgrade_under_same_repository(self):
+        grant, candidate = self.prepare_transition()
+        candidate_scope, _, authorization = self.unsigned(bundle=candidate)
+        write(self.policy, dict(self.scope, unsigned_permit_authority=candidate_scope["unsigned_permit_authority"]))
+        self.run_transition(dict(grant, to_source_policy=candidate_scope["source_policy"], to_authorization=authorization),
+                            candidate, "publisher repository or issuer")
+
+    def test_transition_retains_the_earliest_unsigned_permit_expiry(self):
+        grant, candidate = self.prepare_transition()
+        now = int(time.time())
+        _, _, current = self.unsigned(request={"expires": now + 90})
+        scope, permit, authorization = self.unsigned(bundle=candidate, request={"expires": now + 45})
+        self.run_transition(dict(grant, from_authorization=current, to_source_policy=scope["source_policy"],
+                                 to_authorization=authorization), candidate, fresh_until=permit["expires"])
+
+    def test_transition_can_renew_the_exact_unsigned_source_with_a_new_permit(self):
+        grant, candidate = self.prepare_transition()
+        now = int(time.time())
+        _, current_permit, current = self.unsigned(request={"expires": now + 90})
+        shutil.rmtree(candidate)
+        shutil.copytree(self.bundle, candidate)
+        scope, candidate_permit, authorization = self.unsigned(bundle=candidate, request={"expires": now + 180})
+        self.assertNotEqual(current_permit["revocation_id"], candidate_permit["revocation_id"])
+        self.run_transition(dict(grant, from_authorization=current, to_source_policy=scope["source_policy"],
+                                 to_authorization=authorization), candidate, fresh_until=current_permit["expires"])
 
     def test_transition_requires_a_health_check(self):
         grant, candidate = self.prepare_transition(launch={"healthcheck": None})

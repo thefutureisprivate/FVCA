@@ -29,6 +29,13 @@ fn check() -> Result<(), Box<dyn Error>> {
                 verified.digest(),
                 verified.verity_root_hash()
             );
+            println!(
+                "FVCA_WORKLOAD_SOURCE {} {} {} {}",
+                verified.service(),
+                verified.provenance().label(),
+                verified.permit_id().unwrap_or("none"),
+                verified.expires()
+            );
         }
         [
             operation,

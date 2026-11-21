@@ -1325,12 +1325,12 @@ Review `derivation.json` and `launch.json`, then have the deployment authority s
 | Fields | Approval scope |
 | --- | --- |
 | `schema`, `role`, `guest`, `service` | Schema version, `service-guest`, assigned Guest identity and service |
-| `source_index`, `manifest`, `provenance`, `launch` | Exact index digest, platform digest, `PUBLISHER_VERIFIED`, and launch digest from the reviewed derivation |
+| `source_index`, `manifest`, `provenance`, `launch` | Exact index digest, platform digest, source classification, and launch digest from the reviewed derivation |
 | `valid_from`, `expires`, `security_epoch`, `revocation_id` | Unix timestamps, positive epoch and revocation UUID |
 | `id_map` | Approved subordinate `uid_base` and `gid_base`, each mapping a `size` of 65536 IDs from container ID zero |
 | `network`, `limits` | `none` or `{"workload":"sha256:<profile digest>"}`, plus `memory_bytes`, `cpu_percent` and `pids` |
 
-The workload-root authority uses a separate key. The authorizer verifies the deployment signature and validity period, verifies the publisher again, and reproduces the candidate byte for byte in a fresh worker before signing the output. The result includes `workload.raw`, the signed authorization and deployment, the launch definition, and the derivation and publisher evidence.
+The workload-root authority uses a separate key. The authorizer verifies the deployment signature and validity period, verifies the publisher again, and reproduces the candidate byte for byte in a fresh worker before signing the output. The v2 authorization binds `source-evidence.json`, which contains the exact reviewed source policy bytes and the typed publisher evidence. Reauthorize existing workload bundles before using the v2 verifier.
 
 ```sh
 openssl cms -sign -binary -nocerts -noattr -outform DER -in build/deployment.json \
@@ -1376,7 +1376,11 @@ python3 tools/issue-workload-permit.py issue --policy exception-policy.json \
   --output reviewed-permit
 ```
 
-Retain the private output containing the signed permit, its `UNSIGNED_UPSTREAM_APPROVED` provenance, registry observation, and signed operator request and delegation. Permit consumption in the derivation and Guest paths, expiry reporting, and revocation enforcement remain open. Run `python3 -B -W error tests/check-workload-permit.py` to check the issuer and its rejection paths.
+Retain the private output containing the signed permit, its `UNSIGNED_UPSTREAM_APPROVED` provenance, registry observation, and signed operator request and delegation. Run `python3 -B -W error tests/check-workload-permit.py` to check the issuer and its rejection paths.
+
+Use `--unsigned-permit reviewed-permit` in the derivation and independent authorization commands for the approved exception policy. Sign the deployment with `UNSIGNED_UPSTREAM_APPROVED`. Both commands verify the authority signature and the exact source and normalized launch. The authorizer also checks the permit's Guest and separates the permit, deployment, and workload-root keys. The resulting `source-evidence.json` carries the policy, permit, signature, and public issuer certificate. The signed derivation records the permit digest.
+
+To enable permits for a Guest, add `unsigned_permit_authority` to its signed workload scope. Set it to the reviewed permit issuer's DER certificate digest, matching `permit_authority` in the exception source policy. Give the Guest composer that issuer's PEM certificate with `--permit-authority-certificate`. The composer checks its fingerprint and separates it from the boot, runtime, release, deployment, and workload authorities. The Guest checks the permit signature, exact deployment binding, and enrolled revocation list. Its verification and startup logs report the source classification, permit UUID, and effective expiry. The earlier of the deployment and permit expiries bounds staged updates, boot and service starts. Running-workload expiry alerts and live revocation enforcement still require qualification.
 
 ### Verify an executable-only workload transition
 
@@ -1389,7 +1393,7 @@ fvca-workload-admission --verify-transition CURRENT_POLICY DEPLOYMENT_CERT WORKL
   CURRENT_BUNDLE CANDIDATE_BUNDLE transition.json transition.p7s
 ```
 
-The verifier checks both endpoints, the exact transition signature, and the enrolled Guest scope. The publisher repository and issuer, container and subordinate identities, writable volume destinations, and network profile must match. Each endpoint needs a declared health check. The candidate must preserve the security epoch and fit the active release's resource bounds. The verifier reports the exact authorization digests and the earliest expiry. This step checks admission before the updater's separate lifecycle lease, restart, health assessment, and recovery transaction.
+The verifier checks both endpoints, the exact transition signature, and the enrolled Guest scope. The repository, container and subordinate identities, writable volume destinations, and network profile must match. A publisher-verified workload retains its publisher issuer across transitions and can advance only to another publisher-verified deployment. Each endpoint needs a declared health check. The candidate must preserve the security epoch and fit the active release's resource bounds. The verifier reports the exact authorization digests and the earliest expiry. This step checks admission before the updater's separate lifecycle lease, restart, health assessment, and recovery transaction.
 
 ### Stage the verified transition on the Guest
 
@@ -1419,9 +1423,9 @@ Run `tests/check-workload-channel.py` with the same pinned Python TUF tools used
 
 ## Guest workload verifier
 
-The Rust verifier checks both CMS signatures against separate signer certificates. It binds the exact deployment, derivation, publisher evidence, launch definition and raw image bytes, then checks both GPT tables and the signed dm-verity root hash. It checks the target Guest and service, validity period, minimum security epoch, revocation list and offline launch profile before returning the verified file descriptor and partition offsets.
+The Rust verifier checks both CMS signatures against separate signer certificates. It binds the exact deployment, derivation, reviewed source policy, source evidence, launch definition and raw image bytes, then checks both GPT tables and the signed dm-verity root hash. It checks the target Guest and service, validity period, minimum security epoch, revocation list and offline launch profile before returning the verified file descriptor and partition offsets.
 
-The policy record contains `guest`, `service`, the reviewed `source_policy` SHA-256 digest from the derivation, `minimum_epoch` and `revoked` as a list of revocation UUIDs. The development CLI takes that record, the two public signer certificates and a private staging directory.
+The policy record contains `guest`, `service`, the reviewed `source_policy` SHA-256 digest from the derivation, `minimum_epoch` and `revoked` as a list of deployment or permit UUIDs. An explicit-exceptions deployment also requires the `unsigned_permit_authority` pin. The development CLI takes that record, the two public signer certificates and a private staging directory.
 
 On Fedora 45 with Rust, Cargo and `openssl-devel`, fetch the locked dependencies before the offline build. The development test uses disposable signer keys, OpenSSL and `sfdisk` to exercise rejection paths.
 

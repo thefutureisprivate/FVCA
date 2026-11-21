@@ -150,6 +150,19 @@ def validate_policy(policy):
     return validate_source_scope(policy)
 
 
+def validate_exception_policy(policy):
+    if (not isinstance(policy, dict) or policy.keys() != SOURCE_FIELDS | {"permit_authority"}
+            or policy["schema"] != "fvca-oci-explicit-exceptions-v1"):
+        raise ValueError("source policy does not explicitly permit unsigned exceptions")
+    digest_hex(policy["permit_authority"])
+    return validate_source_scope(policy)
+
+
+def source_record(policy):
+    return {key: policy[key] for key in ("repository", "index", "certificate_identity", "certificate_issuer",
+                                         "permit_authority") if key in policy}
+
+
 def validate_source_scope(policy):
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", policy["service"]):
         raise ValueError("invalid service identity")
@@ -237,11 +250,9 @@ def inspect_source(policy, index_raw, layout):
     return selected, config, layers, diffs, raw_config["config"]
 
 
-def snapshot_source(policy_path, index_path, layout, destination):
-    policy_bytes = read_bytes(policy_path)
-    policy = validate_policy(parse_json(policy_bytes))
+def snapshot_source(policy, policy_bytes, index_path, layout, destination):
     index_raw = read_bytes(index_path)
-    selected, config, layers, _, _ = inspect_source(policy, index_raw, layout)
+    selected, config, layers, _, launch = inspect_source(policy, index_raw, layout)
     staged = destination / "oci"
     (staged / "blobs/sha256").mkdir(parents=True)
     (destination / "policy.json").write_bytes(policy_bytes)
@@ -263,4 +274,4 @@ def snapshot_source(policy_path, index_path, layout, destination):
                 remaining -= len(chunk)
             if remaining or original.read(1) or f"sha256:{hasher.hexdigest()}" != digest:
                 raise ValueError(f"OCI descriptor does not match {digest}")
-    return policy
+    return launch

@@ -60,13 +60,18 @@ FORBIDDEN = tuple(f"usr/lib/fvca/{name}" for name in (
 def workload_trust(args, boot_public, runtime_public):
     files = (args.workload_policy, args.deployment_certificate, args.workload_certificate)
     if files == (None, None, None):
+        if args.permit_authority_certificate is not None:
+            raise ValueError("unsigned permit authority requires an enrolled Guest workload")
         return ()
     if None in files:
         raise ValueError("Guest workload trust requires the policy and both signer certificates")
     policy = workload_oci.read_bytes(args.workload_policy, 1024 * 1024)
     scope = workload_oci.parse_json(policy)
-    if not isinstance(scope, dict) or scope.keys() != {"guest", "service", "source_policy", "minimum_epoch", "revoked"}:
+    fields = {"guest", "service", "source_policy", "minimum_epoch", "revoked"}
+    if not isinstance(scope, dict) or scope.keys() not in (fields, fields | {"unsigned_permit_authority"}):
         raise ValueError("invalid Guest workload policy fields")
+    if ("unsigned_permit_authority" in scope) != (args.permit_authority_certificate is not None):
+        raise ValueError("unsigned permits require the exact authority certificate and an explicit Guest policy pin")
     for field in ("guest", "service"):
         if re.fullmatch(r"[a-z][a-z0-9-]{0,63}", scope[field]) is None:
             raise ValueError(f"invalid Guest workload {field}")
@@ -80,14 +85,22 @@ def workload_trust(args, boot_public, runtime_public):
 
     certs = []
     keys = {boot_public, runtime_public}
-    for path in files[1:]:
+    if args.release_certificate is not None:
+        keys.add(guest_boot_bundle.public_key(args.release_certificate))
+    for path in (*files[1:], args.permit_authority_certificate):
+        if path is None:
+            continue
         pem = workload_oci.read_bytes(path, 16 * 1024)
         der = run("openssl", "x509", "-outform", "DER", input=pem, capture_output=True).stdout
         key = run("openssl", "x509", "-inform", "DER", "-pubkey", "-noout", input=der, capture_output=True).stdout
         if key in keys:
-            raise ValueError("Secure Boot, OCI runtime, deployment, and workload signing keys must be distinct")
+            raise ValueError("Secure Boot, OCI runtime, release, deployment, workload, and permit keys must be distinct")
         keys.add(key)
-        certs.append(der)
+        if path == args.permit_authority_certificate:
+            if workload_oci.sha256(der) != scope["unsigned_permit_authority"]:
+                raise ValueError("unsigned permit issuer certificate differs from the Guest policy pin")
+        else:
+            certs.append(der)
     return tuple(zip(WORKLOAD_TRUST_FILES, (policy, *certs), strict=True))
 
 
@@ -191,7 +204,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("core", "runtime", "initrd", "boot-certificate", "boot-key", "runtime-certificate"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute(), required=True)
-    for name in ("workload-policy", "deployment-certificate", "workload-certificate", "workload-network"):
+    for name in ("workload-policy", "deployment-certificate", "workload-certificate", "permit-authority-certificate",
+                 "workload-network"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute())
     for name in ("workload-channel-policy", "workload-channel-root", "workload-channel-depot", "workload-channel-ca"):
         parser.add_argument(f"--{name}", type=lambda value: Path(value).absolute())

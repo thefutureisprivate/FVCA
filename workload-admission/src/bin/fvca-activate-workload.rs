@@ -293,10 +293,19 @@ fn admitted_network(profile: Option<&str>) -> Result<Option<Ipv4Addr>> {
     }
 }
 
-fn check_start(expires: &str, profile: &str) -> Result<()> {
+fn check_start(valid_from: &str, expires: &str, provenance: &str, profile: &str) -> Result<()> {
+    let valid_from = valid_from.parse::<u64>()?;
     let expires = expires.parse::<u64>()?;
-    if SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() >= expires {
-        return Err(io::Error::other("workload deployment has expired").into());
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    if !matches!(
+        provenance,
+        "PUBLISHER_VERIFIED" | "UNSIGNED_UPSTREAM_APPROVED"
+    ) || !(valid_from..expires).contains(&now)
+    {
+        return Err(io::Error::other(format!(
+            "{provenance} workload is outside its authorized start period"
+        ))
+        .into());
     }
     admitted_network((profile != "none").then_some(profile))?;
     run(Command::new("/usr/bin/findmnt")
@@ -387,6 +396,12 @@ fn mount_verified(verified: &VerifiedWorkload) -> Result<()> {
         .open(MOUNTED_AUTHORIZATION)?;
     writeln!(identity, "{authorization}")?;
     println!("FVCA_WORKLOAD_ROOT_ACTIVE {service} {hash} {authorization}");
+    println!(
+        "FVCA_WORKLOAD_SOURCE {service} {} {} {}",
+        verified.provenance().label(),
+        verified.permit_id().unwrap_or("none"),
+        verified.expires()
+    );
     Ok(())
 }
 
@@ -438,8 +453,8 @@ fn execute() -> Result<()> {
     }
     let arguments: Vec<_> = std::env::args().skip(1).collect();
     let command: Vec<_> = arguments.iter().map(String::as_str).collect();
-    if let ["check-start", expires, profile] = command.as_slice() {
-        return check_start(expires, profile);
+    if let ["check-start", valid_from, expires, provenance, profile] = command.as_slice() {
+        return check_start(valid_from, expires, provenance, profile);
     }
     let operation: fn() -> Result<()> = match command.as_slice() {
         ["mount"] => mount_workload,

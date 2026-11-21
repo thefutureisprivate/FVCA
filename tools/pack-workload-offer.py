@@ -16,7 +16,7 @@ MEMBERS = (
     "transition.json", "transition.p7s",
     "candidate/authorization.json", "candidate/authorization.p7s",
     "candidate/deployment.json", "candidate/deployment.p7s", "candidate/derivation.json",
-    "candidate/launch.json", "candidate/publisher-proof.json", "candidate/workload.raw",
+    "candidate/launch.json", "candidate/source-evidence.json", "candidate/workload.raw",
 )
 
 

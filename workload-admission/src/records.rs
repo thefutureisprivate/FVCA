@@ -9,6 +9,7 @@ pub struct Scope {
     pub source_policy: String,
     pub minimum_epoch: u64,
     pub revoked: Vec<String>,
+    pub unsigned_permit_authority: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -17,10 +18,20 @@ pub enum Role {
     ServiceGuest,
 }
 
-#[derive(Deserialize, PartialEq)]
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Provenance {
     PublisherVerified,
+    UnsignedUpstreamApproved,
+}
+
+impl Provenance {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PublisherVerified => "PUBLISHER_VERIFIED",
+            Self::UnsignedUpstreamApproved => "UNSIGNED_UPSTREAM_APPROVED",
+        }
+    }
 }
 
 #[derive(Deserialize, Eq, PartialEq)]
@@ -82,7 +93,7 @@ pub struct Authorization {
     pub deployment_certificate: String,
     pub workload_certificate: String,
     pub derivation: String,
-    pub publisher_proof: String,
+    pub source_evidence: String,
     pub artifact: Blob,
     pub verity_root_hash: String,
 }
@@ -119,7 +130,7 @@ pub struct Launch {
     pub volumes: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Platform {
     pub os: String,
@@ -131,8 +142,9 @@ pub struct Platform {
 pub struct Source {
     pub index: String,
     pub repository: String,
-    pub certificate_identity: String,
-    pub certificate_issuer: String,
+    pub certificate_identity: Option<String>,
+    pub certificate_issuer: Option<String>,
+    pub permit_authority: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -151,6 +163,7 @@ pub struct Derivation {
     pub service: String,
     pub source_policy: String,
     pub provenance: Provenance,
+    pub permit: Option<String>,
     pub worker_image: String,
     pub source: Source,
     pub platform: Platform,

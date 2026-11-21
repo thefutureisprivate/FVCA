@@ -4,30 +4,21 @@
 import argparse
 from http.client import HTTPException
 from pathlib import Path
-import re
 import subprocess
 import sys
 import tempfile
 import time
-from uuid import UUID
 
 from image_verity import verify_cms
 from workload_build import publish
 from workload_discovery import discover
 import workload_oci as oci
+from workload_permit import LIMIT, UNSIGNED, certificate, check_request
 
 
-LIMIT = 16 * 1024
-ACKNOWLEDGMENT = "I KNOW THIS MIGHT BE INSECURE"
-OPERATOR_ROLE = "workload-unsigned-approver"
 DELEGATION_FIELDS = {
     "schema", "operator", "operator_certificate", "role", "guest", "service", "repository",
     "source_policy", "valid_from", "expires", "max_permit_seconds", "registry_token_service",
-}
-REQUEST_FIELDS = {
-    "schema", "operator", "role", "guest", "service", "repository", "source_policy", "source_index",
-    "manifest", "platform", "launch", "acknowledgment", "reason", "requested_at", "expires",
-    "revocation_id", "revocation_action",
 }
 
 
@@ -38,8 +29,7 @@ def snapshot(source, destination, limit=LIMIT):
 
 
 def certificate_identity(path):
-    der = subprocess.check_output(["openssl", "x509", "-in", path, "-outform", "DER"], timeout=10)
-    public_key = subprocess.check_output(["openssl", "x509", "-in", path, "-pubkey", "-noout"], timeout=10)
+    der, public_key = certificate(path)
     return oci.sha256(der), public_key
 
 
@@ -54,42 +44,14 @@ def check_time(delegation, request, now):
 
 def check_acknowledgment(delegation, request, policy, policy_digest, launch):
     if (not isinstance(delegation, dict) or delegation.keys() != DELEGATION_FIELDS
-            or delegation["schema"] != "fvca-workload-permit-delegation-v1"
-            or not isinstance(request, dict) or request.keys() != REQUEST_FIELDS
-            or request["schema"] != "fvca-workload-permit-request-v1"):
-        raise ValueError("unexpected delegation or acknowledgment fields")
-    if any(not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", request[field]) for field in ("operator", "guest")):
-        raise ValueError("invalid operator or Guest identity")
-    if (any(request[field] != delegation[field]
-            for field in ("operator", "guest", "service", "repository", "source_policy", "role"))
-            or request["role"] != OPERATOR_ROLE):
+            or delegation["schema"] != "fvca-workload-permit-delegation-v1"):
+        raise ValueError("unexpected permit delegation fields")
+    check_request(request, policy, policy_digest, launch)
+    if any(request[field] != delegation[field]
+           for field in ("operator", "guest", "service", "repository", "source_policy", "role")):
         raise ValueError("acknowledgment is outside the operator delegation")
-
-    expected = {
-        "repository": policy["repository"], "service": policy["service"], "source_policy": policy_digest,
-        "source_index": policy["index"], "manifest": policy["manifest"], "platform": oci.PLATFORM,
-        "launch": oci.sha256(launch), "acknowledgment": ACKNOWLEDGMENT,
-    }
-    if any(request[field] != value for field, value in expected.items()):
-        raise ValueError("acknowledgment does not bind the exact source, platform, launch and warning")
-    reason = request["reason"]
-    if not isinstance(reason, str) or not 1 <= len(reason) <= 512 or not reason.isprintable() or reason.strip() != reason:
-        raise ValueError("provide an auditable reason for this exact deployment")
-    if (not isinstance(request["revocation_id"], str) or str(UUID(request["revocation_id"])) != request["revocation_id"]
-            or request["revocation_action"] not in ("block-new-starts", "stop")):
-        raise ValueError("invalid permit revocation identity or action")
-    if (any(type(delegation[field]) is not int for field in ("valid_from", "expires", "max_permit_seconds"))
-            or any(type(request[field]) is not int for field in ("requested_at", "expires"))):
-        raise ValueError("delegation and permit times must be integer Unix seconds")
-
-
-def exception_policy(raw):
-    policy = oci.parse_json(raw)
-    if (not isinstance(policy, dict) or policy.keys() != oci.SOURCE_FIELDS | {"permit_authority"}
-            or policy["schema"] != "fvca-oci-explicit-exceptions-v1"):
-        raise ValueError("source policy does not explicitly permit unsigned exceptions")
-    oci.digest_hex(policy["permit_authority"])
-    return oci.validate_source_scope(policy)
+    if any(type(delegation[field]) is not int for field in ("valid_from", "expires", "max_permit_seconds")):
+        raise ValueError("delegation times must be integer Unix seconds")
 
 
 def preview_launch(args, policy):
@@ -100,7 +62,7 @@ def preview_launch(args, policy):
 def issue(args, output):
     output.mkdir(mode=0o700)
     policy_raw = snapshot(args.policy, output / "source-policy.json", oci.METADATA_LIMIT)
-    policy = exception_policy(policy_raw)
+    policy = oci.validate_exception_policy(oci.parse_json(policy_raw))
     authority_certificate = output / "authority.crt"
     operator_certificate = output / "operator.crt"
     snapshot(args.authority_certificate, authority_certificate)
@@ -135,7 +97,7 @@ def issue(args, output):
     issued_at = int(time.time())
     check_time(delegation, request, issued_at)
     permit = {
-        "schema": "fvca-workload-unsigned-permit-v1", "provenance": "UNSIGNED_UPSTREAM_APPROVED",
+        "schema": "fvca-workload-unsigned-permit-v1", "provenance": UNSIGNED,
         "acknowledgment": request, "request_sha256": oci.sha256(request_raw),
         "operator_certificate": operator_digest, "delegation_sha256": oci.sha256(delegation_raw),
         "issued_at": issued_at, "discovery": observation, "expiry_action": "block-new-starts",
@@ -167,7 +129,7 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "preview":
-            policy = exception_policy(oci.read_bytes(args.policy))
+            policy = oci.validate_exception_policy(oci.parse_json(oci.read_bytes(args.policy)))
             sys.stdout.buffer.write(preview_launch(args, policy))
             return
         with tempfile.TemporaryDirectory(prefix=".fvca-unsigned-permit-", dir=args.output.parent) as temporary:

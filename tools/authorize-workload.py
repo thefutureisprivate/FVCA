@@ -12,8 +12,9 @@ import time
 from uuid import UUID, uuid5, NAMESPACE_URL
 
 from image_verity import VERITY_PARTITIONS, read_layout, verify_cms, verify_verity
-from workload_build import derive, publish, source_arguments
+from workload_build import SOURCE_EVIDENCE, derive, publish, source_arguments
 import workload_oci as oci
+from workload_permit import PUBLISHER, UNSIGNED
 
 
 ARTIFACT_LIMIT = oci.DECOMPRESSED_LIMIT + 20 * 1024**2
@@ -47,8 +48,8 @@ def deployment(args, output):
         "valid_from", "expires", "security_epoch", "revocation_id", "limits", "network", "id_map",
     } or approved["schema"] != "fvca-workload-deployment-v1":
         raise ValueError("unexpected deployment approval fields")
-    if approved["role"] != "service-guest" or approved["provenance"] != "PUBLISHER_VERIFIED":
-        raise ValueError("deployment must authorize a publisher-verified Service Guest workload")
+    if approved["role"] != "service-guest" or approved["provenance"] not in (PUBLISHER, UNSIGNED):
+        raise ValueError("deployment must bind the Service Guest role and reviewed source provenance")
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", approved["guest"]):
         raise ValueError("invalid deployment Guest identity")
     for key in ("source_index", "manifest", "launch"):
@@ -136,13 +137,19 @@ def authorize(args, work, output):
         raise ValueError("deployment and workload authorization require separate keys")
 
     replay = work / "replay"
-    evidence = derive(args, replay)
+    evidence, permit, permit_key = derive(args, replay)
     check_replay(args.candidate, replay)
     if (
-        approved["service"], approved["source_index"], approved["manifest"], approved["launch"],
-    ) != (evidence["service"], evidence["source"]["index"], evidence["manifest"]["digest"], evidence["launch"]):
-        raise ValueError("deployment approves a different workload source or launch definition")
-    if not approved["valid_from"] <= int(time.time()) < approved["expires"]:
+        approved["service"], approved["source_index"], approved["manifest"], approved["launch"], approved["provenance"],
+    ) != (evidence["service"], evidence["source"]["index"], evidence["manifest"]["digest"], evidence["launch"],
+          evidence["provenance"]):
+        raise ValueError("deployment approves a different source, launch definition or provenance")
+    expires = approved["expires"]
+    if permit is not None:
+        if permit["guest"] != approved["guest"] or permit_key in (deploy_key, root_key):
+            raise ValueError("unsigned permit requires the exact destination and an independent issuer")
+        expires = min(expires, permit["expires"])
+    if not approved["valid_from"] <= int(time.time()) < expires:
         raise ValueError("deployment approval expired during derivation")
 
     root_hash = evidence["verity_root_hash"]
@@ -164,22 +171,24 @@ def authorize(args, work, output):
     ):
         raise ValueError("assembled partition contents differ from the verified derivation")
 
-    for name in ("launch.json", "derivation.json", "publisher-proof.json"):
+    for name in ("launch.json", "derivation.json", SOURCE_EVIDENCE):
         (output / name).write_bytes(oci.read_bytes(replay / name))
     authorization = {
-        "schema": "fvca-workload-authorization-v1",
+        "schema": "fvca-workload-authorization-v2",
         "deployment": deployment_digest, "deployment_certificate": deploy_fingerprint,
         "workload_certificate": root_fingerprint,
         "derivation": oci.sha256(oci.read_bytes(output / "derivation.json")),
-        "publisher_proof": oci.sha256(oci.read_bytes(output / "publisher-proof.json")),
+        "source_evidence": oci.sha256(oci.read_bytes(output / SOURCE_EVIDENCE)),
         "artifact": oci.file_record(image, ARTIFACT_LIMIT),
         "verity_root_hash": root_hash,
     }
     record = output / "authorization.json"
     record.write_bytes(oci.json_bytes(authorization))
-    if int(time.time()) >= approved["expires"]:
-        raise ValueError("deployment approval expired before signing")
+    if int(time.time()) >= expires:
+        raise ValueError("deployment approval or source permit expired before signing")
     sign(record, output / "authorization.p7s", args.workload_key, args.workload_certificate)
+    if int(time.time()) >= expires:
+        raise ValueError("deployment approval or source permit expired during signing")
     return approved, authorization["artifact"]["digest"]
 
 
@@ -198,7 +207,7 @@ def main():
             output = work / "authorized"
             approved, artifact = authorize(args, work, output)
             publish(output, args.output)
-        print(f"Authorized {approved['service']} for {approved['guest']} at {artifact}")
+        print(f"Authorized {approved['service']} for {approved['guest']} at {artifact} {approved['provenance']}")
     except (OSError, ValueError, TypeError, KeyError, IndexError, subprocess.SubprocessError) as error:
         parser.exit(1, f"FVCA workload authorization failed: {error}\n")
 
