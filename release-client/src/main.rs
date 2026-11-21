@@ -224,7 +224,13 @@ fn verify_member(input: File, member: &Member) -> Result<()> {
     Ok(())
 }
 
-async fn stage(repo: &Repository, selection: &Selection, parent: &Path) -> Result<PathBuf> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StageUse {
+    Independent,
+    ScheduledHost,
+}
+
+async fn stage(repo: &Repository, selection: &Selection, parent: &Path, usage: StageUse) -> Result<PathBuf> {
     let target = selection.name(MANIFEST)?;
     let length = check_target(
         repo,
@@ -259,11 +265,19 @@ async fn stage(repo: &Repository, selection: &Selection, parent: &Path) -> Resul
     let destination = parent.join(&selection.manifest_sha256);
     if fs::symlink_metadata(&destination).is_ok() {
         verify_staged(&destination, &manifest, &members)?;
+        if usage == StageUse::Independent && selection.role == Role::Hypervisor {
+            channel::host_cache::preserve(&destination)?;
+        }
     } else {
         let temporary = tempfile::Builder::new()
             .prefix(".stage-")
             .permissions(Permissions::from_mode(0o700))
             .tempdir_in(parent)?;
+        let staging = File::open(temporary.path())?;
+        if usage == StageUse::ScheduledHost {
+            channel::host_cache::mark(&staging, &selection.manifest_sha256)?;
+            File::open(parent)?.sync_all()?;
+        }
         let mut file = output_file(&temporary.path().join(MANIFEST))?;
         file.write_all(&manifest)?;
         file.sync_all()?;
@@ -276,7 +290,7 @@ async fn stage(repo: &Repository, selection: &Selection, parent: &Path) -> Resul
             )
             .await?;
         }
-        File::open(temporary.path())?.sync_all()?;
+        staging.sync_all()?;
         rustix::fs::renameat_with(
             rustix::fs::CWD,
             temporary.path(),
@@ -316,7 +330,7 @@ async fn intake(
         scratch.path(),
     )
     .await?;
-    let location = stage(&repo, &selection, &staging).await?;
+    let location = stage(&repo, &selection, &staging, StageUse::Independent).await?;
     match operation {
         Some(Operation::FileBacked(operation)) => {
             return install::execute(operation, &selection, state_dir);

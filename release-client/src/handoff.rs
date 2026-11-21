@@ -136,7 +136,7 @@ pub(crate) fn open_child(
     Ok(file)
 }
 
-fn private_directory(file: &File) -> io::Result<()> {
+pub(super) fn private_directory(file: &File) -> io::Result<()> {
     let metadata = file.metadata()?;
     if metadata.uid() != 0 || metadata.gid() != 0 || metadata.permissions().mode() & 0o7777 != 0o700
     {
@@ -195,12 +195,16 @@ pub(crate) fn install_lease() -> Result<File> {
 }
 
 pub fn private_file(file: &File) -> io::Result<()> {
+    private_file_with_mode(file, 0o600)
+}
+
+pub(super) fn private_file_with_mode(file: &File, mode: u32) -> io::Result<()> {
     let meta = file.metadata()?;
     if !meta.is_file()
         || meta.uid() != 0
         || meta.gid() != 0
         || meta.nlink() != 1
-        || meta.permissions().mode() & 0o7777 != 0o600
+        || meta.permissions().mode() & 0o7777 != mode
     {
         return Err(invalid("Host handoff requires a private root-owned file"));
     }
@@ -218,6 +222,14 @@ fn inbox(host: &File, id: u64) -> Result<Option<File>> {
         return Err(invalid("trial inbox is outside the mounted Host data pool").into());
     }
     Ok(Some(inbox))
+}
+
+pub(super) fn trial_queued() -> Result<bool> {
+    let (host, id) = host_data()?;
+    match inbox(&host, id)? {
+        Some(inbox) => exists(&inbox, PENDING),
+        None => Ok(false),
+    }
 }
 
 fn open_record(inbox: &File, name: &str) -> Result<Option<File>> {

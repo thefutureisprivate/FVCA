@@ -3,6 +3,7 @@
 #[cfg(not(feature = "appliance"))]
 pub(super) mod author;
 mod guest;
+pub(super) mod host_cache;
 mod observation;
 
 pub(super) use observation::{ObservedRelease, UpdateObservation, observed_host_release};
@@ -27,8 +28,9 @@ use tough::{IntoVec, Repository, TargetName};
 
 use crate::depot::{CONFIG_BYTES, Depot, EnrolledDepot, METADATA_BYTES};
 use crate::{
-    MANIFEST_BYTES, Member, Result, Role, Selection, check_target, gpt, guest_configuration,
-    handoff, install::Slot, invalid, load_repository, management, stage, state, valid_digest,
+    MANIFEST_BYTES, Member, Result, Role, Selection, StageUse, check_target, gpt,
+    guest_configuration, handoff, install::Slot, invalid, load_repository, management, stage, state,
+    valid_digest,
 };
 
 pub enum Operation {
@@ -428,18 +430,23 @@ fn reconcile_promotion(directory: &Path, active: Active) -> Result<Active> {
         epoch: promotion.trial.candidate_epoch,
         manifest_sha256: promotion.candidate_manifest.into(),
     };
+    let prior = Active {
+        role: Role::Hypervisor,
+        slot: Some(stable),
+        guest_bundle: None,
+        sequence: promotion.stable_sequence,
+        epoch: promotion.trial.stable_epoch,
+        manifest_sha256: promotion.stable_manifest.into(),
+    };
+    if active != promoted && active != prior {
+        return Err(invalid(
+            "standing promotion does not advance the recorded active composition",
+        )
+        .into());
+    }
+    // Commit the recovery pin before replacing the active release record.
+    host_cache::record_recovery(directory, &prior)?;
     if active != promoted {
-        if active.role != Role::Hypervisor
-            || active.slot != Some(stable)
-            || active.sequence != promotion.stable_sequence
-            || active.epoch != promotion.trial.stable_epoch
-            || active.manifest_sha256 != promotion.stable_manifest
-        {
-            return Err(invalid(
-                "standing promotion does not advance the recorded active composition",
-            )
-            .into());
-        }
         save(directory, ACTIVE_RELEASE, &promoted)?;
         println!(
             "FVCA_PROMOTED_RELEASE_COMMITTED {}",
@@ -753,12 +760,22 @@ pub async fn discover(
             ))
         }
     };
-    if matches!(operation, Operation::DeliverTrial(Delivery::Scheduled { .. })) {
+    let scheduled_host = matches!(operation, Operation::DeliverTrial(Delivery::Scheduled { .. }));
+    if scheduled_host {
+        let authorize = || Ok(require_fresh(Timestamp::now())?);
         withdraw_pending(
             &head,
             &active,
             trial_key.as_deref().expect("validated Host trial authority"),
-            &|| Ok(require_fresh(Timestamp::now())?),
+            &authorize,
+        )?;
+        host_cache::retire(
+            directory,
+            &active,
+            head.release
+                .as_ref()
+                .map(|release| release.manifest_sha256.as_str()),
+            &authorize,
         )?;
     }
     if matches!(operation, Operation::ScheduleGuest(_)) {
@@ -799,7 +816,12 @@ pub async fn discover(
                 manifest_sha256: candidate.manifest_sha256.clone(),
                 max_release_bytes: budget,
             };
-            let staged = stage(&repo, &selection, &staging).await?;
+            let usage = if scheduled_host {
+                StageUse::ScheduledHost
+            } else {
+                StageUse::Independent
+            };
+            let staged = stage(&repo, &selection, &staging, usage).await?;
             status.staged = Some(candidate.manifest_sha256.clone());
             let now = Timestamp::now();
             require_fresh(now)?;
