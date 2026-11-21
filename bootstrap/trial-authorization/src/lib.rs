@@ -7,6 +7,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 
 pub mod backup_job;
+pub mod capture;
 pub mod efi;
 pub mod firmware;
 pub mod guest;

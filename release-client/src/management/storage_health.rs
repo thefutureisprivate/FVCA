@@ -113,8 +113,8 @@ fn report() -> Result<Value> {
     }))
 }
 
-async fn observe<T: Send + 'static>(
-    report: fn() -> Result<T>,
+pub(super) async fn observe<T: Send + 'static>(
+    report: impl FnOnce() -> Result<T> + Send + 'static,
     refusal: Refusal,
 ) -> std::result::Result<T, Refusal> {
     let permit = ACTIVE.try_acquire().map_err(|_| refusal)?;

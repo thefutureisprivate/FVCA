@@ -995,6 +995,10 @@ If an interrupted attempt ended before creating any snapshot and the Guest opera
 
 Start `fvca-capture-list.service` to log the local capture catalog or `fvca-capture-inspect@CAPTURE_UUID.service` to inspect one capture. Finalized entries report capture time, disk SHA-256, Btrfs snapshot UUID and pending backup status. Expired entries retain their manifest and backup receipt for reference.
 
+Use the enrolled management read key with `{"type":"host-local-captures"}` to list up to eight entries. Pass the previous result's `next` value as `after` for the following page. A `null` cursor marks the end. The cursor is scoped to the catalog directory in the current Btrfs pool. Pages follow filesystem enumeration order and can reflect changes made between calls. Send `{"type":"host-local-capture","capture_id":"CAPTURE_UUID"}` to inspect a single entry.
+
+Both operations return `pending`, `complete`, `expiry-pending`, or `expired`. A complete entry reports the original capture time, its age in seconds, the achieved consistency class, snapshot identity, and disk digest from finalization. The broker checks the manifest, its sidecars, and the identity of the read-only Btrfs snapshot without reading the Guest disk. Entries marked for expiry have no local recovery-point age. The API reports the scheduled S3 recovery point through `host-backup-status`.
+
 To enable expiry, add `--retention-policy FILE` when composing the signed Hypervisor UKI. Use the repository ID already authorized in its backup policy. The optional `protect=` field accepts one capture UUID per line.
 
 ```text

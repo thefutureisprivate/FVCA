@@ -11,7 +11,7 @@ use fvca_libvirt_boundary::{Connection, RUNNING};
 use fvca_initrd_bootstrap::recovery;
 
 use super::{Consistency, GUEST_UNIT, Store, attached_disk, backup, btrfs, complete_record, directory,
-            disk_digest, guest_boot, invalid, lease, live, only_data_member, parse_plan_fields, private_directory,
+            disk_digest, guest_boot, invalid, lease, live, only_data_member, private_directory,
             publish, raw_disk, read_record, remove_stale_stage, run, runtime, uuid, verify_boot_files, wait_for_lease};
 use crate::{ALIAS, CAPTURE_LOCK, OPERATION_LOCK, PID, UUID, VM_DIRECTORY, VM_PARENT, verified_definition};
 
@@ -272,25 +272,11 @@ fn seal_download(path: &Path) -> io::Result<File> {
 }
 
 fn received_plan<'a>(manifest: &'a str, request: &recovery::Request<'_>) -> io::Result<super::Plan<'a>> {
-    let mut lines = manifest.splitn(5, '\n');
-    if lines.next() != Some("CAPTURE_COMPLETE") {
-        return Err(invalid("the downloaded recovery set is incomplete"));
+    let capture = super::Manifest::parse(manifest, request.capture, None)?;
+    if capture.digest != request.disk || capture.plan.bytes != request.disk_bytes {
+        return Err(invalid("recovered capture digest or size does not match the authorization"));
     }
-    let snapshot = uuid(lines.next().and_then(|line| line.strip_prefix("snapshot_uuid="))
-        .ok_or_else(|| invalid("missing recovered snapshot UUID"))?)?;
-    let root_id = lines.next().and_then(|line| line.strip_prefix("snapshot_id="))
-        .and_then(|value| value.parse::<u64>().ok()).filter(|id| *id >= 256)
-        .ok_or_else(|| invalid("invalid recovered snapshot ID"))?;
-    if lines.next().and_then(|line| line.strip_prefix("disk_sha256=")) != Some(request.disk) {
-        return Err(invalid("recovered manifest has a mismatched disk digest"));
-    }
-    let plan = lines.next().ok_or_else(|| invalid("missing recovered capture plan"))?;
-    let consistency = if plan.starts_with(Consistency::Filesystem.header()) { Consistency::Filesystem } else { Consistency::CleanStopped };
-    let parsed = parse_plan_fields(plan, request.capture, consistency, None)?;
-    if parsed.source == snapshot || parsed.source_id == root_id || parsed.bytes != request.disk_bytes {
-        return Err(invalid("recovered snapshot topology or size does not match the capture"));
-    }
-    Ok(parsed)
+    Ok(capture.plan)
 }
 
 fn discard_download(unit: &str, staged: &Path) -> io::Result<()> {

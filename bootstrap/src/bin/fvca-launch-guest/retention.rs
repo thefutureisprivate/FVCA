@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fvca_initrd_bootstrap::retention_policy::{self, Policy};
+use fvca_trial_authorization::capture::expiry_record;
 
 use super::{Consistency, backup, btrfs, invalid, lease, live, optional_record, private_directory,
             publish, recorded_capture, restore, snapshot_at, uuid};
@@ -34,8 +35,7 @@ struct Complete {
 
 impl Complete {
     fn expiry_record(&self, id: &str) -> String {
-        format!("FVCA-LOCAL-CAPTURE-EXPIRED-1\ncapture={id}\nsnapshot_uuid={}\nsnapshot_id={}\ndisk_sha256={}\n",
-                self.volume, self.sequence, self.digest)
+        expiry_record(id, &self.volume, self.sequence, &self.digest)
     }
 
     fn load(path: &Path, id: &str, fsid: &str) -> io::Result<Option<Self>> {

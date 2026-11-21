@@ -8,6 +8,7 @@ use fvca_trial_authorization::{MANAGEMENT_UID, private_management_address};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use super::local_captures::Cursor;
 use crate::{Result, channel, invalid, valid_digest, valid_uuid};
 
 pub(super) const REQUEST_BYTES: usize = 2048;
@@ -84,6 +85,12 @@ pub(super) enum Operation {
     Status {},
     HostStorageHealth {},
     HostBackupStatus {},
+    HostLocalCaptures {
+        after: Option<Cursor>,
+    },
+    HostLocalCapture {
+        capture_id: String,
+    },
     BootQuote {
         #[serde(deserialize_with = "boot_challenge")]
         challenge: [u8; 32],
@@ -171,6 +178,8 @@ pub(super) fn authorize(enrollment: &Enrollment, packet: &[u8], now: u64) -> Res
         Operation::Status {}
         | Operation::HostStorageHealth {}
         | Operation::HostBackupStatus {}
+        | Operation::HostLocalCaptures { .. }
+        | Operation::HostLocalCapture { .. }
         | Operation::Preflight { .. }
         | Operation::InspectConfiguration { .. } => &enrollment.operator_public_key,
     };
@@ -239,6 +248,9 @@ pub(super) enum Refusal {
     BootQuoteUnavailable,
     HostStorageHealthUnavailable,
     HostBackupStatusUnavailable,
+    HostCaptureCatalogUnavailable,
+    UnknownHostCapture,
+    InvalidHostCaptureCursor,
 }
 
 #[derive(Serialize)]
@@ -456,6 +468,8 @@ mod tests {
         let read = json!({"type": "configuration-operation", "operation_id": "d".repeat(64)});
         let health = json!({"type": "host-storage-health"});
         let backup = json!({"type": "host-backup-status"});
+        let catalog = json!({"type": "host-local-captures"});
+        let capture = json!({"type": "host-local-capture", "capture_id": host});
         let quote = json!({"type": "boot-quote", "challenge": "a4".repeat(32)});
         assert!(authorize(&enrollment, &request(mutation.clone(), &reader)?, 20).is_err());
         assert!(authorize(&enrollment, &request(mutation.clone(), &verifier)?, 20).is_err());
@@ -469,6 +483,8 @@ mod tests {
         for other in [&submitter, &verifier] {
             assert!(authorize(&enrollment, &request(health.clone(), other)?, 20).is_err());
             assert!(authorize(&enrollment, &request(backup.clone(), other)?, 20).is_err());
+            assert!(authorize(&enrollment, &request(catalog.clone(), other)?, 20).is_err());
+            assert!(authorize(&enrollment, &request(capture.clone(), other)?, 20).is_err());
         }
         assert!(matches!(
             authorize(&enrollment, &request(health, &reader)?, 20)?.operation,
@@ -478,12 +494,22 @@ mod tests {
             authorize(&enrollment, &request(backup, &reader)?, 20)?.operation,
             Operation::HostBackupStatus {}
         ));
+        assert!(matches!(
+            authorize(&enrollment, &request(catalog, &reader)?, 20)?.operation,
+            Operation::HostLocalCaptures { after: None }
+        ));
+        assert!(matches!(
+            authorize(&enrollment, &request(capture, &reader)?, 20)?.operation,
+            Operation::HostLocalCapture { capture_id } if capture_id == host
+        ));
         for invalid in [
             json!({"type": "status", "path": "/etc/shadow"}),
             json!({"type": "host-storage-health", "reset": true}),
             json!({"type": "host-storage-health", "pool": "/run/fvca/guest-data"}),
             json!({"type": "host-backup-status", "start": true}),
             json!({"type": "host-backup-status", "repository": "arbitrary"}),
+            json!({"type": "host-local-captures", "expire": true}),
+            json!({"type": "host-local-capture", "capture_id": host, "path": "/etc/shadow"}),
         ] {
             assert!(authorize(&enrollment, &request(invalid, &reader)?, 20).is_err());
         }

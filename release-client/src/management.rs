@@ -3,6 +3,7 @@
 pub(crate) mod boot_quote;
 mod intent;
 mod listener;
+mod local_captures;
 mod protocol;
 #[cfg(not(feature = "appliance"))]
 pub(crate) mod quote_client;
@@ -239,6 +240,13 @@ enum Outcome {
     HostBackupStatus {
         scheduled: Option<storage_health::ScheduledBackup>,
     },
+    HostLocalCaptures {
+        captures: Vec<local_captures::Capture>,
+        next: Option<local_captures::Cursor>,
+    },
+    HostLocalCapture {
+        capture: local_captures::Capture,
+    },
     Refused {
         code: Refusal,
     },
@@ -273,6 +281,14 @@ async fn dispatch(
         Operation::HostBackupStatus {} => {
             let scheduled = storage_health::backup().await?;
             Ok(Outcome::HostBackupStatus { scheduled })
+        }
+        Operation::HostLocalCaptures { after } => {
+            let (captures, next) = local_captures::list(after.clone()).await?;
+            Ok(Outcome::HostLocalCaptures { captures, next })
+        }
+        Operation::HostLocalCapture { capture_id } => {
+            let capture = local_captures::inspect(capture_id.clone()).await?;
+            Ok(Outcome::HostLocalCapture { capture })
         }
         Operation::ApplyConfiguration { plan } => {
             let receipt = intent::submit(enrollment, plan, packet)?;

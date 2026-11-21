@@ -22,10 +22,10 @@ const DIRECTORY: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 
-fn mount_id(file: &File) -> Result<u64> {
+pub(crate) fn mount_id(file: &File) -> io::Result<u64> {
     let stat = fs::statx(file, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID)?;
     if stat.stx_mask & StatxFlags::MNT_ID.bits() == 0 {
-        return Err(invalid("could not identify the Host data mount").into());
+        return Err(invalid("could not identify the Host data mount"));
     }
     Ok(stat.stx_mnt_id)
 }

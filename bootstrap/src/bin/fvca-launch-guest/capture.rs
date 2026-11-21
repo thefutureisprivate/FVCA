@@ -10,11 +10,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fvca_btrfs_boundary::{self as btrfs, Subvolume};
 use fvca_initrd_bootstrap::{guest_boot, identity, invalid, run, runtime};
 use fvca_libvirt_boundary::Connection;
+use fvca_trial_authorization::capture::{Consistency, Manifest, Plan, RECORD_BYTES, parse_plan_fields};
 
 use super::{ALIAS, CAPTURE_LOCK, DISK, OPERATION_LOCK, PID, POOL, RECEIPT, UUID, private_directory, raw_disk,
             raw_disk_metadata, verified_definition, verify_boot_files, verify_data, verify_pool, verify_storage_directory};
 
-const CAPTURE_HEADER: &str = "FVCA-STOPPED-CAPTURE-1";
 const UUID_GROUPS: &[usize] = &[8, 4, 4, 4, 12];
 const GUEST_UNIT: &str = "fvca-service-guest.service";
 const O_NOFOLLOW: i32 = 0o400000;
@@ -30,28 +30,6 @@ pub(super) mod backup;
 pub(super) mod backup_job;
 #[path = "retention.rs"]
 pub(super) mod retention;
-
-#[derive(Clone, Copy)]
-enum Consistency {
-    CleanStopped,
-    Filesystem,
-}
-
-impl Consistency {
-    fn header(self) -> &'static str {
-        match self {
-            Self::CleanStopped => CAPTURE_HEADER,
-            Self::Filesystem => "FVCA-LIVE-CAPTURE-1",
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::CleanStopped => "clean-stopped",
-            Self::Filesystem => "filesystem-consistent",
-        }
-    }
-}
 
 struct Store {
     pool: File,
@@ -186,8 +164,8 @@ fn read_record(path: &Path) -> io::Result<String> {
         return Err(invalid("unexpected capture record file"));
     }
     let mut text = String::new();
-    File::open(path)?.take(8193).read_to_string(&mut text)?;
-    if text.len() > 8192 {
+    File::open(path)?.take(RECORD_BYTES + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > RECORD_BYTES {
         return Err(invalid("capture record exceeds its size bound"));
     }
     Ok(text)
@@ -291,53 +269,8 @@ fn verify_escrow(dir: &Path, payload: &str, selection: &guest_boot::Selection<'_
     verify_boot_files(dir, selection)
 }
 
-struct Plan<'a> {
-    source: &'a str,
-    source_id: u64,
-    bytes: u64,
-    captured: u64,
-    launch: &'a str,
-}
-
 fn parse_plan<'a>(text: &'a str, id: &str, store: &Store) -> io::Result<Plan<'a>> {
     parse_plan_fields(text, id, store.consistency, Some(&store.fsid))
-}
-
-fn parse_plan_fields<'a>(text: &'a str, id: &str, consistency: Consistency, filesystem: Option<&str>) -> io::Result<Plan<'a>> {
-    let launch_header = "FVCA-GUEST-LAUNCH-1\n";
-    let start = text.find(launch_header).ok_or_else(|| invalid("capture record lacks its authorized launch selection"))?;
-    let (prefix, launch) = text.split_at(start);
-    guest_boot::parse(launch)?;
-    let mut lines = prefix.lines();
-    let name = consistency.name();
-    for expected in [consistency.header().to_owned(), format!("capture_id={id}"), format!("vm_uuid={}", UUID.to_str().unwrap()),
-        format!("requested_consistency={name}"), format!("achieved_consistency={name}")] {
-        if lines.next() != Some(expected.as_str()) {
-            return Err(invalid("unexpected capture fields"));
-        }
-    }
-    let fsid = uuid(lines.next().and_then(|line| line.strip_prefix("filesystem_uuid="))
-        .ok_or_else(|| invalid("missing capture filesystem UUID"))?)?;
-    if filesystem.is_some_and(|expected| expected != fsid) {
-        return Err(invalid("capture belongs to a different Btrfs filesystem"));
-    }
-    for expected in ["identity_policy=single-instance", "persistent_firmware=none", "persistent_vtpm=none",
-        "external_storage=none", "workload_state=contained-in-data.raw", "member=data.raw,raw,vdc"] {
-        if lines.next() != Some(expected) {
-            return Err(invalid("unsupported Guest recovery profile"));
-        }
-    }
-    let mut take = |key| lines.next().and_then(|line| line.strip_prefix(key))
-        .ok_or_else(|| invalid("incomplete capture metadata"));
-    let source = uuid(take("source_uuid=")?)?;
-    let number = |value: &str| value.parse::<u64>().map_err(io::Error::other);
-    let root_id = number(take("source_id=")?)?;
-    let time = number(take("capture_unix_seconds=")?)?;
-    let bytes = number(take("disk_bytes=")?)?;
-    if root_id < 256 || time == 0 || bytes == 0 || !bytes.is_multiple_of(512) || lines.next().is_some() {
-        return Err(invalid("invalid capture metadata"));
-    }
-    Ok(Plan { source, source_id: root_id, bytes, captured: time, launch })
 }
 
 fn plan_text(store: &Store, id: &str, source: &Subvolume, bytes: u64, launch: &str) -> io::Result<String> {
@@ -404,36 +337,10 @@ fn snapshot_record(snapshot: &Subvolume) -> String {
     format!("snapshot_uuid={}\nsnapshot_id={}\n", snapshot.uuid, snapshot.id)
 }
 
-struct RecordedCapture<'a> {
-    consistency: Consistency,
-    plan: Plan<'a>,
-    volume: &'a str,
-    sequence: u64,
-    digest: &'a str,
-}
-
-fn recorded_capture<'a>(path: &Path, id: &str, fsid: &str, manifest: &'a str) -> io::Result<RecordedCapture<'a>> {
-    let mut lines = manifest.splitn(5, '\n');
-    if lines.next() != Some("CAPTURE_COMPLETE") {
-        return Err(invalid("unexpected finalized capture manifest"));
-    }
-    let mut take = |field| lines.next().and_then(|line| line.strip_prefix(field))
-        .ok_or_else(|| invalid("incomplete finalized capture manifest"));
-    let volume = uuid(take("snapshot_uuid=")?)?;
-    let sequence = take("snapshot_id=")?.parse::<u64>().map_err(io::Error::other)?;
-    let digest = runtime::hash(take("disk_sha256=")?)?;
-    let text = lines.next().ok_or_else(|| invalid("the capture has no embedded plan"))?;
-    let consistency = if text.starts_with(Consistency::Filesystem.header()) { Consistency::Filesystem }
-                      else { Consistency::CleanStopped };
-    let plan = parse_plan_fields(text, id, consistency, Some(fsid))?;
-    let sealed = format!("CAPTURE_SEALED_PENDING_VALIDATION\nsnapshot_uuid={volume}\nsnapshot_id={sequence}\n{text}");
-    if sequence < 256 || sequence == plan.source_id || volume == plan.source
-        || read_record(&path.join("plan"))? != text || read_record(&path.join("sealed"))? != sealed
-        || (matches!(consistency, Consistency::Filesystem) && read_record(&path.join("live-seal-verified"))? != "1\n")
-    {
-        return Err(invalid("the capture inventory disagrees with its sealed record"));
-    }
-    Ok(RecordedCapture { consistency, plan, volume, sequence, digest })
+fn recorded_capture<'a>(path: &Path, id: &str, fsid: &str, manifest: &'a str) -> io::Result<Manifest<'a>> {
+    let capture = Manifest::parse(manifest, id, Some(fsid))?;
+    capture.verify_sidecars(|name| read_record(&path.join(name)))?;
+    Ok(capture)
 }
 
 fn seal(store: &Store, id: &str, text: &str) -> io::Result<()> {
