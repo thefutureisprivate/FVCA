@@ -56,3 +56,5 @@ tofu -chdir=opentofu/examples/plan apply guest.tfplan
 The broker validates the saved expected revision and returns a stable operation ID. A lost response or interrupted apply can be reconciled by reading that ID. The operation stays `pending-activation` until the Host receives the matching signed composition, trial and promotion approvals. A later refresh distinguishes `in-trial`, `active` and `superseded` and reports the boot-selected configuration separately. Independent OS release updates refresh observed release fields without replacing the resource or driving a settings submission.
 
 Keep the registered Guest and its Host identity in configuration. The provider refuses resource destroy and identity replacement. Boot-image signing, commissioning a new Guest, and retirement use their own authorities.
+
+Use the [off-node configuration handoff](../README.md#change-cpu-and-memory-through-a-standing-host-trial) to turn the pending operation into typed composer settings and a separately signed approval for the exact Host trial.

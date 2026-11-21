@@ -15,6 +15,7 @@ from uuid import UUID
 
 import backup_destination
 import guest_boot_bundle
+from guest_configuration import settings_record
 import host_storage
 import host_workload
 import hypervisor_gpt
@@ -293,22 +294,8 @@ def guest_vm_settings(path):
     if path is None:
         return (), ()
     settings = parse_json(read_bytes(path, 1024))
-    if (
-        not isinstance(settings, dict)
-        or settings.keys() != {"schema", "guest", "configuration_revision", "vcpus", "memory_mib"}
-        or settings["schema"] != "fvca-service-guest-vm-v2"
-        or settings["guest"] != guest_boot_bundle.SERVICE_GUEST_ID
-    ):
-        raise ValueError("invalid Service Guest resource settings or Guest identity")
-    revision, vcpus, memory = (settings[key] for key in ("configuration_revision", "vcpus", "memory_mib"))
-    if type(revision) is not int or not 1 <= revision < 2**64:
-        raise ValueError("invalid Service Guest configuration revision")
-    if (type(vcpus) is not int or not 1 <= vcpus <= 4
-            or type(memory) is not int or not 1024 <= memory <= 4096 or memory % 256):
-        raise ValueError("Service Guest resources exceed the approved machine profile")
-    record = (f"FVCA-SERVICE-GUEST-VM-2\nguest={settings['guest']}\nrevision={revision}\n"
-              f"vcpus={vcpus}\nmemory_mib={memory}\n").encode("ascii")
-    identity = f"{GUEST_CONFIG_ARGUMENT}={revision},{hashlib.sha256(record).hexdigest()}"
+    record = settings_record(settings)
+    identity = f"{GUEST_CONFIG_ARGUMENT}={settings['configuration_revision']},{hashlib.sha256(record).hexdigest()}"
     return ((GUEST_VM_SETTINGS, record),), (identity,)
 
 

@@ -11,9 +11,7 @@ import subprocess
 import tempfile
 from uuid import UUID
 
-import hypervisor_gpt
-from host_storage import DATA_PARTITION
-from image_verity import read_layout
+from hypervisor_trial import TRIAL_FIELDS, candidate_layout, fields, standing_fields
 
 
 def sha256(value):
@@ -26,46 +24,6 @@ def record(path, version, names):
     with path.open("rb") as stream:
         raw = stream.read(1025)
     return raw, fields(raw, version, names)
-
-
-def fields(raw, version, names):
-    lines = raw.decode("ascii").split("\n")
-    if len(raw) > 1024 or lines[0] != version or lines[-1] or len(lines) != len(names) + 2:
-        raise ValueError(f"invalid {version} record")
-    entries = {}
-    for field, line in zip(names, lines[1:-1], strict=True):
-        key, _, value = line.partition("=")
-        if key != field or not value:
-            raise ValueError(f"invalid {version} field {field}")
-        entries[key] = value
-    return entries
-
-
-TRIAL_FIELDS = ("transaction", "stable", "candidate", "candidate_esp_sha256", "candidate_esp_bytes",
-                "candidate_core", "candidate_runtime", "guest_bundle")
-
-
-def layout(args, trial):
-    sector, parts = read_layout(args.candidate, hypervisor_gpt.PARTITIONS, sector_size=args.sector_size,
-                                optional_types=DATA_PARTITION)
-    ids = {name: str(UUID(part["uuid"])) for name, part in parts.items()}
-    size = parts["esp"]["size"] * sector
-    if (len(set(ids.values())) != len(parts) or ids["esp"] != trial["candidate"].partition(",")[2]
-            or str(size) != trial["candidate_esp_bytes"]):
-        raise ValueError("candidate disk layout differs from the trial")
-    digest = hashlib.sha256()
-    with args.candidate.open("rb") as stream:
-        stream.seek(parts["esp"]["start"] * sector)
-        remaining = size
-        while remaining:
-            block = stream.read(min(remaining, 1024 * 1024))
-            if not block:
-                raise ValueError("candidate ESP is incomplete")
-            digest.update(block)
-            remaining -= len(block)
-    devices = "".join(f"candidate_{name}_devices={ids[name]},{ids[f'{name}_verity']}\n"
-                      for name in ("core", "runtime", "guest"))
-    return digest.hexdigest(), devices, parts["esp"]["start"] * sector
 
 
 def prepare(args):
@@ -81,11 +39,11 @@ def prepare(args):
     if tuple(value for key, value in health.items() if key != "boot_id") != expected:
         raise ValueError("the health receipt differs from the authorized trial")
 
-    esp, devices, _ = layout(args, trial)
+    esp, devices, _ = candidate_layout(args.candidate, args.sector_size, trial)
     header = ("FVCA-HYPERVISOR-PROMOTION-1\n"
               f"candidate_esp_after_trial={esp}\n"
               f"stable_core={sha256(args.stable_core)}\nstable_runtime={sha256(args.stable_runtime)}\n"
-              f"{devices}")
+              + "".join(f"{key}={value}\n" for key, value in devices.items()))
     return header.encode("ascii") + trial_raw + health_raw
 
 
@@ -103,15 +61,7 @@ def prepare_standing(args):
                                  "-in", message, "-sigfile", signature], stdout=subprocess.DEVNULL)
         if result.returncode != 0:
             raise ValueError("the trial signature did not verify under the supplied public key")
-    tag = b"FVCA-HYPERVISOR-TRIAL-2\n"
-    scope, separator, trial_body = body.partition(tag)
-    trial = fields(separator + trial_body, "FVCA-HYPERVISOR-TRIAL-2", TRIAL_FIELDS)
-    selected = fields(scope, "FVCA-HYPERVISOR-STANDING-TRIAL-2", (
-        "not_before", "expires", "stable_epoch", "candidate_epoch", "epoch_policy_sha256",
-        "stable_core", "stable_runtime", "stable_guest_bundle",
-        "candidate_uki_sha256", "candidate_uki_bytes", "candidate_core_devices",
-        "candidate_runtime_devices", "candidate_guest_devices",
-    ))
+    selected, trial = standing_fields(body)
     with args.standing_active.open("rb") as stream:
         record = stream.read(65537)
     with args.candidate_manifest.open("rb") as stream:
@@ -132,7 +82,7 @@ def prepare_standing(args):
         boot = {"bytes": args.candidate.stat().st_size, "sha256": hashlib.file_digest(stream, "sha256").hexdigest()}
     if candidate["composition"]["boot"] != boot:
         raise ValueError("candidate disk differs from the authorized release manifest")
-    esp, devices, offset = layout(args, trial)
+    esp, devices, offset = candidate_layout(args.candidate, args.sector_size, trial)
     candidate_digest = hashlib.sha256(manifest).hexdigest()
     stable_digest = sha256(active["manifest_sha256"])
     if esp != sha256(trial["candidate_esp_sha256"]) or candidate_digest == stable_digest:
@@ -147,7 +97,7 @@ def prepare_standing(args):
         with loader.open("rb") as stream:
             uki = hashlib.file_digest(stream, "sha256").hexdigest()
     if (sha256(selected["candidate_uki_sha256"]) != uki or selected["candidate_uki_bytes"] != str(size)
-            or any(selected[key] != value for key, value in (line.split("=", 1) for line in devices.splitlines()))):
+            or any(selected[key] != value for key, value in devices.items())):
         raise ValueError("candidate loader or verity partitions differ from the signed trial")
     header = (
         "FVCA-HYPERVISOR-STANDING-PROMOTION-2\n"

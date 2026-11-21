@@ -983,24 +983,32 @@ On the Hypervisor, `/usr/libexec/fvca/release-client --guest-configuration-statu
 
 During provisioning, compose both slots with the same `--guest-configuration-public-key configuration.public.pem`, their respective `--os-update-peer-slot`, and the standing OS update, trial and promotion authorities. Keep the Ed25519 configuration signing key off the Host and separate from the boot, release, policy, trial and promotion keys.
 
-Compose an exact candidate with the new `--guest-vm-settings` and a revision one higher than the current revision. Use revision 1 when starting from the default profile. Generate the signed standing trial for the installed pair and the independent standing promotion approval. The configuration signer reviews the installed settings and candidate UKI binding, then signs this ASCII record with a final newline.
-
-```text
-FVCA-GUEST-CONFIGURATION-CHANGE-1
-guest=e629aa43-af11-47c6-aedc-a2dc47f1cc3a
-trial_sha256=SIGNED_TRIAL_SHA256
-previous=PREVIOUS_REVISION,PREVIOUS_SETTINGS_SHA256
-next=NEXT_REVISION,NEXT_SETTINGS_SHA256
-```
-
-Use the SHA-256 of the complete signed trial file, including its signature. Use the settings digests from the verified UKIs' `fvca.guest_config` bindings. Write `previous=default` when the installed Host selects the default profile.
+After the authenticated OpenTofu apply reports a pending operation, export the three configuration outputs from the managed state. Give the tool the independently retained `management.json` enrollment associated with the reviewed Host slots. It recomputes the canonical settings digests and operation ID before preparing the next revision for the composer.
 
 ```sh
-openssl pkeyutl -sign -rawin -inkey configuration.key -in change.txt -out change.sig
-cat change.sig change.txt > guest-configuration-change.bin
+umask 077
+tofu -chdir=opentofu/examples/plan output -json | jq -e '{
+  active_configuration: .active_configuration.value,
+  planned_configuration: .planned_configuration.value,
+  configuration_operation: .configuration_operation.value
+}' > pending-configuration.json
+python3 -B -W error tools/authorize-guest-configuration.py prepare \
+  --outputs pending-configuration.json --enrollment management.json --output candidate-settings.json
 ```
 
-Publish the approval as `hypervisor-EPOCH-MANIFEST_SHA256-guest-configuration-change.bin`. The independently qualified TUF channel release lists its exact `bytes` and `sha256` under `guest_configuration_change`, alongside `trial_approval` and `promotion_approval`. The scheduled updater checks the expected revision and exact signed UKIs before writing the peer slot. `accepted_guest_configuration_revision` reports acceptance into the trial inbox. The Host records the revision as committed only after the authorized trial passes local Guest health and the promoted boot verifies the same approval. A superseded slot cannot start the Guest with its old settings after commitment.
+Compose the exact candidate with `--guest-vm-settings candidate-settings.json`. Generate the separately signed standing trial and promotion approval for the reviewed pair. On the configuration signing workstation, use the reviewed slot images, the independently pinned Secure Boot certificate, and the distinct configuration key. The tool verifies the UKI signatures, enrolled management and configuration authorities, selected settings, and the standing trial's fresh signature and exact candidate ESP and loader before publishing the approval file.
+
+```sh
+python3 -B -W error tools/authorize-guest-configuration.py authorize \
+  --outputs pending-configuration.json --enrollment management.json \
+  --stable stable.raw --candidate candidate.raw --boot-certificate secure-boot.pem \
+  --trial approvals/boot-trial.bin --configuration-key configuration.key \
+  --output approvals/guest-configuration-change.bin
+```
+
+The exported outputs are review inputs. The scheduled updater independently checks the durable broker-admitted operation, expected revision and exact signed UKIs before writing the peer slot. The independently qualified TUF release uses `guest_configuration_change` alongside the trial and promotion approvals. `accepted_guest_configuration_revision` reports acceptance into the trial inbox. The Host commits the revision after the authorized trial passes local Guest health and the promoted boot verifies the approval. A superseded slot cannot start the Guest with its old settings after commitment.
+
+Run `python3 -B -W error tests/check-guest-configuration-handoff.py -v` on the Fedora review workstation to exercise signing and refusal cases using disposable Secure Boot keys and 4 KiB GPT slots. The fixture verifies authorization without booting the images.
 
 #### Host management service
 
