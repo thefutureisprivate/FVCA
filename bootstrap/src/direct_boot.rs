@@ -90,6 +90,7 @@ pub fn activate(workload: bool) -> io::Result<()> {
         "loop",
         "nf_tables",
         "nft_ct",
+        "nft_limit",
     ])?;
     kernel_policy::seal()?;
     OpenOptions::new()

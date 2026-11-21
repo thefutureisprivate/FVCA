@@ -9,6 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 from workload_oci import parse_json
+from workload_network import parse as parse_uplink
 from workload_worker import check_member
 
 
@@ -54,6 +55,17 @@ class WorkloadInputTests(unittest.TestCase):
         member.pax_headers = {"SCHILY.xattr.trusted.overlay.opaque": "y"}
         with self.assertRaisesRegex(ValueError, "extended metadata"):
             check_member(member)
+
+    def test_workload_uplink_requires_two_bounded_canonical_rates(self):
+        profile = ("FVCA-GUEST-WORKLOAD-NETWORK-2\npci=0000:00:06.0\nmac=52:54:00:10:20:30\n"
+                   "address=192.168.44.15/24\ngateway=none\nmtu=1400\ndns=none\n"
+                   "receive_bytes_per_second=65536\nsend_bytes_per_second=125000000\n")
+        parse_uplink(profile)
+        for changed in (profile.replace("65536", "65535"), profile.replace("125000000", "125000001"),
+                        profile.replace("65536", "065536"), profile.replace("send_bytes_per_second=125000000\n", ""),
+                        profile + "receive_bytes_per_second=65536\n", profile.replace("NETWORK-2", "NETWORK-1")):
+            with self.subTest(profile=changed), self.assertRaises(ValueError):
+                parse_uplink(changed)
 
 
 if __name__ == "__main__":

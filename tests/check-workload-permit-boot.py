@@ -70,8 +70,10 @@ def prepare(args):
           "depot_config_sha256": depot_hash, "max_artifact_bytes": 16 * 1024**2})
     (args.output / "notice").write_text(notice + "\n", encoding="ascii")
     (args.output / "uplink").write_text(
-        "FVCA-GUEST-WORKLOAD-NETWORK-1\npci=0000:00:06.0\nmac=52:54:00:7d:ce:01\n"
-        f"address=10.0.2.15/24\ngateway=none\nmtu=1500\ndns=none\negress=tcp,{DEPOT_IP},443\n",
+        "FVCA-GUEST-WORKLOAD-NETWORK-2\npci=0000:00:06.0\nmac=52:54:00:7d:ce:01\n"
+        "address=10.0.2.15/24\ngateway=none\nmtu=1500\ndns=none\n"
+        "receive_bytes_per_second=1048576\nsend_bytes_per_second=1048576\n"
+        f"egress=tcp,{DEPOT_IP},443\n",
         encoding="ascii",
     )
 
@@ -115,7 +117,8 @@ def check(args):
         with https["serve"](args.enrollment / "depot", tls, (DEPOT_IP, 443)) as server:
             live = boot("live-revocation", data, expires - 25, CHECKED, 190, persistent=True)
             requested = tuple(server.requests)
-        if storage["READY"] not in live or storage["FAIL"] in live or b"FVCA_WORKLOAD_STARTED" not in live:
+        if (storage["READY"] not in live or storage["FAIL"] in live or b"FVCA_WORKLOAD_STARTED" not in live
+                or b"FVCA_WORKLOAD_NETWORK_BUDGET 1048576 1048576" not in live):
             raise ValueError("the enrolled unsigned workload did not complete its ordinary start")
         events = (
             rb'"condition":"current"', rb'"condition":"permit-expired"', b"FVCA_PERMIT_LAB_ACTIVE_AFTER_EXPIRY",

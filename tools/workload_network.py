@@ -19,11 +19,15 @@ def ipv4(raw):
 
 def parse(data):
     base = re.match(
-        r"FVCA-GUEST-WORKLOAD-NETWORK-1\npci=([0-9a-f]{4}:[0-9a-f]{2}:[01][0-9a-f]\.[0-7])\n"
+        r"FVCA-GUEST-WORKLOAD-NETWORK-2\npci=([0-9a-f]{4}:[0-9a-f]{2}:[01][0-9a-f]\.[0-7])\n"
         r"mac=((?:[0-9a-f]{2}:){5}[0-9a-f]{2})\naddress=([0-9./]+)\n"
-        r"gateway=([0-9.]+|none)\nmtu=([1-9][0-9]{3})\ndns=([0-9.]+|none)\n", data)
+        r"gateway=([0-9.]+|none)\nmtu=([1-9][0-9]{3})\ndns=([0-9.]+|none)\n"
+        r"receive_bytes_per_second=(?P<receive>[1-9][0-9]{4,8})\n"
+        r"send_bytes_per_second=(?P<send>[1-9][0-9]{4,8})\n", data)
     if not base or int(base[2][:2], 16) & 1 or base[2] == "00:00:00:00:00:00":
         raise ValueError("invalid canonical workload uplink")
+    if not all(65_536 <= int(base[direction]) <= 125_000_000 for direction in ("receive", "send")):
+        raise ValueError("workload uplink rate must be 65536–125000000 bytes per second")
     local = ipaddress.IPv4Interface(base[3])
     if str(local) != base[3] or not local.network.prefixlen or not any(local.ip in subnet for subnet in PRIVATE):
         raise ValueError("the workload uplink requires a canonical private IPv4 subnet")

@@ -29,7 +29,7 @@ if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/kernel-policy-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-storage-support-v4"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-network-v1"
-    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-workload-network-v1"
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-workload-network-v2"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/host-storage-tpm-auto-support-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-slot-support-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-trial-support-v3"
@@ -47,7 +47,7 @@ if [[ "${binaries[0]}" == fvca-activate-runtime ]]; then
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/hypervisor-standing-promotion-v1"
 fi
 if [[ "${FVCA_GUEST_OCI:-}" == yes ]]; then
-    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/workload-network-v1"
+    install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/workload-network-v2"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/workload-channel-enrollment-v1"
     install -Dm644 /dev/null "$DESTDIR/usr/lib/fvca/kernel-policy-v1"
 fi

@@ -35,6 +35,7 @@ fn activate() -> io::Result<()> {
             "virtio_net",
             "nf_tables",
             "nft_ct",
+            "nft_limit",
         ])?;
     }
     let runtime_hash = runtime::activate(Runtime::Oci, None)?.extension;

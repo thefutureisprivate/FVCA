@@ -1543,18 +1543,22 @@ The Guest keeps each declared persistent volume on Btrfs under `/run/fvca/guest-
 The Guest installs a default-deny IPv4 and IPv6 policy in its own network namespace. A scoped workload deployment can get a dedicated virtio NIC in a separate namespace. Pass `--workload-network FILE` to `compose-service-guest.py` with the signed workload trust inputs. The deployment authority sets `network` to `{"workload":"sha256:<profile digest>"}` using the SHA-256 of the exact record. The measured Guest boot and each workload start must agree on that digest.
 
 ```text
-FVCA-GUEST-WORKLOAD-NETWORK-1
+FVCA-GUEST-WORKLOAD-NETWORK-2
 pci=0000:00:06.0
 mac=52:54:00:10:20:30
 address=192.168.44.15/24
 gateway=192.168.44.1
 mtu=1400
 dns=192.168.44.53
+receive_bytes_per_second=1048576
+send_bytes_per_second=524288
 ingress=tcp,192.168.44.20,443
 egress=tcp,192.168.44.70,443
 ```
 
 Use `gateway=none` for an on-link profile and `dns=none` to omit a configured resolver. Each `ingress` or `egress` rule approves an exact IPv4 peer and TCP or UDP destination port. An enrolled resolver allows TCP and UDP on port 53 to that address. The workload receives the original client address and terminates its own application protocols. The `none` deployment uses Podman's isolated offline network mode. A connected lab supplies the enrolled virtio NIC on an isolated segment. Enroll a [Host workload uplink](#host-workload-uplink) for a Hypervisor-managed Guest. [Podman networking](https://docs.podman.io/en/latest/markdown/podman-run.1.html) · [nftables reference](https://netfilter.org/projects/nftables/manpage.html)
+
+Both rate fields require canonical integers between 65,536 and 125,000,000 bytes per second. Each direction shares one kernel token bucket across its allowed IPv4 traffic, including established flows, DNS and workload updates. The bucket permits an initial burst of one second's worth of traffic and drops packets over budget. A connected Guest requires a new signed profile and matching deployment authorization. Hypervisor-managed Guests also require a matching signed Host enrollment. [nftables token-bucket limits](https://netfilter.org/projects/nftables/manpage.html#LIMIT_STATEMENT)
 
 For Stalwart lifecycle qualification, run `tests/stalwart-lifecycle-initrd.sh` with the development OCI initramfs and a new output file. Use that initramfs when composing the disposable Guest, then add `--stalwart-lifecycle` to the `tests/check-storage.py --workload` invocation. The fixture checks the health endpoint, UID/GID, SELinux label, resource settings, Btrfs file persistence across restart, and clean stop. Stalwart runs in its offline bootstrap mode. Controller-backed freshness and protected updates remain pending. [Stalwart bootstrap mode](https://stalw.art/docs/configuration/bootstrap-mode/)
 

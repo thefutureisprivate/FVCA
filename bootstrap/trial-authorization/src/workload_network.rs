@@ -38,6 +38,8 @@ pub struct Profile<'a> {
     pub uplink: Uplink<'a>,
     pub mtu: u16,
     pub dns: Option<Ipv4Addr>,
+    pub receive_bytes_per_second: u32,
+    pub send_bytes_per_second: u32,
     pub ingress: BTreeSet<Endpoint>,
     pub egress: BTreeSet<Endpoint>,
 }
@@ -76,6 +78,17 @@ fn endpoint(uplink: Uplink<'_>, raw: &str) -> io::Result<Endpoint> {
     Ok((protocol, peer(uplink, ipv4(address)?)?, number))
 }
 
+fn bandwidth(line: &str, prefix: &str) -> io::Result<u32> {
+    let value = field(line, prefix)?;
+    let rate: u32 = value.parse().map_err(io::Error::other)?;
+    if !(65_536..=125_000_000).contains(&rate) || rate.to_string() != value {
+        return Err(invalid(
+            "workload uplink rate must be 65536–125000000 bytes per second",
+        ));
+    }
+    Ok(rate)
+}
+
 impl<'a> Profile<'a> {
     pub fn parse(raw: &'a str) -> io::Result<Self> {
         if raw.len() > LIMIT || !raw.ends_with('\n') || raw.contains('\r') {
@@ -85,13 +98,15 @@ impl<'a> Profile<'a> {
         }
         let mut lines = raw.lines();
         let [
-            Some("FVCA-GUEST-WORKLOAD-NETWORK-1"),
+            Some("FVCA-GUEST-WORKLOAD-NETWORK-2"),
             Some(pci),
             Some(mac),
             Some(cidr),
             Some(gateway),
             Some(mtu),
             Some(dns),
+            Some(receive),
+            Some(send),
         ] = std::array::from_fn(|_| lines.next())
         else {
             return Err(invalid("expected the canonical workload network record"));
@@ -105,6 +120,8 @@ impl<'a> Profile<'a> {
         let dns = optional_address(field(dns, "dns=")?)?
             .map(|address| peer(uplink, address))
             .transpose()?;
+        let receive_bytes_per_second = bandwidth(receive, "receive_bytes_per_second=")?;
+        let send_bytes_per_second = bandwidth(send, "send_bytes_per_second=")?;
         let mut ingress = BTreeSet::new();
         let mut egress = BTreeSet::new();
         for line in lines {
@@ -125,6 +142,8 @@ impl<'a> Profile<'a> {
             uplink,
             mtu,
             dns,
+            receive_bytes_per_second,
+            send_bytes_per_second,
             ingress,
             egress,
         })
@@ -135,7 +154,7 @@ impl<'a> Profile<'a> {
 mod tests {
     use super::*;
 
-    const RECORD: &str = "FVCA-GUEST-WORKLOAD-NETWORK-1\npci=0000:00:06.0\nmac=52:54:00:10:20:30\naddress=192.168.44.15/24\ngateway=none\nmtu=1400\ndns=192.168.44.53\ningress=tcp,192.168.44.20,443\negress=udp,192.168.44.70,123\n";
+    const RECORD: &str = "FVCA-GUEST-WORKLOAD-NETWORK-2\npci=0000:00:06.0\nmac=52:54:00:10:20:30\naddress=192.168.44.15/24\ngateway=none\nmtu=1400\ndns=192.168.44.53\nreceive_bytes_per_second=65536\nsend_bytes_per_second=125000000\ningress=tcp,192.168.44.20,443\negress=udp,192.168.44.70,123\n";
 
     #[test]
     fn permits_only_canonical_routes_and_exact_peer_ports() -> io::Result<()> {
@@ -143,6 +162,8 @@ mod tests {
         let dns = Ipv4Addr::new(192, 168, 44, 53);
         assert_eq!(profile.mtu, 1400);
         assert_eq!(profile.dns, Some(dns));
+        assert_eq!(profile.receive_bytes_per_second, 65_536);
+        assert_eq!(profile.send_bytes_per_second, 125_000_000);
         assert!(profile.egress.contains(&(Transport::Tcp, dns, 53)));
         assert!(profile.egress.contains(&(Transport::Udp, dns, 53)));
         for invalid in [
@@ -151,6 +172,20 @@ mod tests {
             RECORD.replace("192.168.44.20,443", "192.168.44.15,443"),
             RECORD.replace("192.168.44.20,443", "192.168.44.20,0443"),
             RECORD.replace("mtu=1400", "mtu=1501"),
+            RECORD.replace("receive_bytes_per_second=65536\n", ""),
+            RECORD.replace(
+                "receive_bytes_per_second=65536",
+                "receive_bytes_per_second=065536",
+            ),
+            RECORD.replace(
+                "receive_bytes_per_second=65536",
+                "receive_bytes_per_second=65535",
+            ),
+            RECORD.replace(
+                "send_bytes_per_second=125000000",
+                "send_bytes_per_second=125000001",
+            ),
+            format!("{RECORD}send_bytes_per_second=65536\n"),
             format!("{RECORD}ingress=tcp,192.168.44.20,443\n"),
         ] {
             assert!(Profile::parse(&invalid).is_err(), "{invalid}");

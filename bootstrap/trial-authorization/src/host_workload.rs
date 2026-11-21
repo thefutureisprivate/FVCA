@@ -9,7 +9,7 @@ use crate::{digest, invalid, signed_argument};
 pub const ARGUMENT: &str = "fvca.host_workload";
 pub const RECORD: &str = "host-workload";
 pub const GUEST_RECORD: &str = "host-workload-guest";
-pub const SUPPORT: &str = "host-workload-network-v1";
+pub const SUPPORT: &str = "host-workload-network-v2";
 pub const GUEST_PCI: &str = "0000:00:06.0";
 pub const LIMIT: usize = 256;
 

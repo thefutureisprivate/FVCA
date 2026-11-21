@@ -47,10 +47,10 @@ HOST_NETWORK_SUPPORT = Path("usr/lib/fvca/host-network-v1")
 HOST_WORKLOAD_ARGUMENT = "fvca.host_workload"
 HOST_WORKLOAD_POLICY = "host-workload"
 HOST_WORKLOAD_GUEST = "host-workload-guest"
-HOST_WORKLOAD_SUPPORT = Path("usr/lib/fvca/host-workload-network-v1")
+HOST_WORKLOAD_SUPPORT = Path("usr/lib/fvca/host-workload-network-v2")
 WORKLOAD_NETWORK_ARGUMENT = "fvca.workload_network"
 WORKLOAD_NETWORK_POLICY = "workload-network"
-WORKLOAD_NETWORK_SUPPORT = Path("usr/lib/fvca/workload-network-v1")
+WORKLOAD_NETWORK_SUPPORT = Path("usr/lib/fvca/workload-network-v2")
 SECURE_KERNEL_OPTIONS = ("module.sig_enforce=1", "lockdown=integrity", "debugfs=off")
 KERNEL_POLICY_SUPPORT = "usr/lib/fvca/kernel-policy-v1"
 KERNEL_SERVICE_POLICY = (
