@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Qualify signed unsigned-source issuance and failed discovery decisions."""
 
+import base64
 from contextlib import redirect_stderr, redirect_stdout
 from email.message import Message
 from http.client import HTTPSConnection
@@ -195,6 +196,37 @@ class PermitTests(TestCase):
             self.cli()
         request.assert_not_called()
         self.assertFalse((self.work / "approved").exists())
+
+    def test_authority_can_sign_stop_for_an_expired_permit(self):
+        now = int(time.time())
+        self.delegation.update(valid_from=now - 1700, expires=now - 700)
+        self.ack.update(requested_at=now - 1500, expires=now - 900)
+        with mock.patch("workload_discovery.request", side_effect=self.respond), mock.patch(
+            "time.time", return_value=now - 1400,
+        ):
+            self.cli()
+        approved = self.work / "approved"
+        permit_digest = oci.sha256((approved / "permit.json").read_bytes())
+        args = [sys.executable, "-B", "-W", "error", TOOLS / "revoke-workload-permit.py", "--permit", approved,
+                "--action", "stop", "--reason", "Discontinue this exact deployment"]
+        rejected = subprocess.run([*args, "--authority-key", self.signers / "other.key", "--output", self.work / "invalid"],
+                                  capture_output=True, check=False)
+        self.assertEqual(rejected.returncode, 1)
+        self.assertFalse((self.work / "invalid").exists())
+        subprocess.run([*args, "--authority-key", self.signers / "authority.key", "--output", self.work / "delivery"],
+                       capture_output=True, check=True)
+        envelope = self.work / "delivery" / f"{oci.digest_hex(permit_digest)}.stop.json"
+        self.assertEqual(envelope.stat().st_mode & 0o777, 0o400)
+        payload = oci.parse_json(envelope.read_bytes())
+        record, proof = self.work / "revocation.json", self.work / "revocation.p7s"
+        record.write_bytes(base64.b64decode(payload["record"], validate=True))
+        proof.write_bytes(base64.b64decode(payload["signature"], validate=True))
+        verify_cms(record, proof, self.signers / "authority.crt")
+        statement = oci.parse_json(record.read_bytes())
+        self.assertEqual(statement["permit"], permit_digest)
+        self.assertEqual(statement["permit_id"], self.ack["revocation_id"])
+        self.assertEqual(statement["action"], "stop")
+        self.assertGreaterEqual(statement["revoked_at"], now)
 
     def test_discovery_refuses_present_ambiguous_and_failed_evidence(self):
         base = "/v2/demo/mail"

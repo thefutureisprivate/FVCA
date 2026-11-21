@@ -73,7 +73,7 @@ def check_discovery(observation, policy):
             oci.digest_hex(result["response"])
 
 
-def verify(source, policy, policy_raw, launch, staged):
+def read_signed_permit(source, policy, policy_raw, launch, staged):
     paths = {name: staged / name for name in ("permit.json", "permit.p7s", "authority.crt")}
     for name, destination in paths.items():
         destination.write_bytes(oci.read_bytes(source / name, LIMIT))
@@ -93,11 +93,19 @@ def verify(source, policy, policy_raw, launch, staged):
     request = permit["acknowledgment"]
     check_request(request, policy, oci.sha256(policy_raw), launch)
     issued = permit["issued_at"]
-    if type(issued) is not int or not 0 < request["requested_at"] <= issued <= int(time.time()) < request["expires"] < 2**63:
-        raise ValueError("unsigned workload permit is outside its validity period")
+    if type(issued) is not int or not 0 < request["requested_at"] <= issued < request["expires"] < 2**63:
+        raise ValueError("unsigned workload permit has an invalid issuance or expiry time")
     check_discovery(permit["discovery"], policy)
     proof = {
         "provenance": UNSIGNED, "policy": portable(policy_raw), "permit": portable(raw),
         "signature": portable(oci.read_bytes(paths["permit.p7s"], LIMIT)), "authority": portable(der),
     }
+    return proof, permit, key
+
+
+def verify(source, policy, policy_raw, launch, staged):
+    proof, permit, key = read_signed_permit(source, policy, policy_raw, launch, staged)
+    request = permit["acknowledgment"]
+    if not permit["issued_at"] <= int(time.time()) < request["expires"]:
+        raise ValueError("unsigned workload permit is outside its validity period")
     return proof, request, key

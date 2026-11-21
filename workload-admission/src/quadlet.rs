@@ -61,6 +61,7 @@ pub fn render(workload: &VerifiedWorkload, dns: Option<Ipv4Addr>) -> Result<Defi
     let expires = workload.expires();
     let valid_from = workload.valid_from();
     let provenance = workload.provenance().label();
+    let authorization = workload.authorization_digest();
     let profile = workload.network_profile().unwrap_or("none");
     let network = if workload.network_profile().is_some() {
         let dns = dns.map_or_else(
@@ -143,7 +144,7 @@ pub fn render(workload: &VerifiedWorkload, dns: Option<Ipv4Addr>) -> Result<Defi
     }
     writeln!(
         source,
-        "\n[Service]\nExecCondition=/usr/lib/fvca/activate-workload check-start {valid_from} {expires} {provenance} {profile}\n\
+        "\n[Service]\nExecCondition=/usr/lib/fvca/activate-workload check-start {valid_from} {expires} {provenance} {authorization} {profile}\n\
          NoNewPrivileges=yes\nMemoryDenyWriteExecute=yes\nSystemCallArchitectures=native\n\
          MemoryMax={}\nMemorySwapMax=0\nCPUQuota={}%\nTasksMax={}\n\
          LogRateLimitIntervalSec=30s\nLogRateLimitBurst=500\n\

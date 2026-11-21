@@ -136,6 +136,11 @@ impl VerifiedTransition {
     pub fn valid_from(&self) -> u64 {
         self.valid_from
     }
+
+    pub fn require_unrevoked(&self, trust: &Trust) -> Result<()> {
+        self.current.require_unrevoked(trust)?;
+        self.candidate.require_unrevoked(trust)
+    }
 }
 
 fn require_fresh(valid_from: u64, fresh_until: u64) -> Result<()> {
@@ -169,6 +174,7 @@ impl VerifiedOffer {
     pub fn finish(self, directory: &Path, trust: &Trust) -> Result<VerifiedTransition> {
         let candidate = complete_bundle(directory, self.candidate, trust)?;
         require_fresh(self.valid_from, self.fresh_until)?;
+        self.current.require_unrevoked(trust)?;
         Ok(VerifiedTransition {
             current: self.current,
             candidate,
@@ -309,6 +315,7 @@ pub fn verify_transition_offer(
     let now = current_time()?;
     transition.check_time(now)?;
     current.metadata.require_fresh(now)?;
+    current.require_unrevoked(trust)?;
     candidate.require_fresh(now)?;
     let fresh_until = transition
         .expires

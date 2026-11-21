@@ -5,6 +5,7 @@ mod image;
 mod launch;
 pub mod quadlet;
 mod records;
+pub mod revocation;
 mod source;
 mod transition;
 
@@ -39,6 +40,7 @@ pub struct Trust {
     scope: Scope,
     deployment: X509,
     workload: X509,
+    revocations: Option<revocation::Ledger>,
 }
 
 impl Trust {
@@ -66,6 +68,7 @@ impl Trust {
             scope,
             deployment,
             workload,
+            revocations: None,
         })
     }
 
@@ -99,6 +102,15 @@ impl VerifiedMetadata {
             return Err(invalid(
                 "workload deployment or unsigned permit is outside its validity period",
             ));
+        }
+        Ok(())
+    }
+
+    fn require_unrevoked(&self, trust: &Trust) -> Result<()> {
+        if let Some(permit) = &self.validity.permit
+            && trust.permit_revocation(permit)?.is_some()
+        {
+            return Err(invalid("unsigned workload permit is revoked"));
         }
         Ok(())
     }
@@ -148,7 +160,15 @@ impl VerifiedWorkload {
     }
 
     pub fn permit_id(&self) -> Option<&str> {
-        self.metadata.validity.permit_id.as_deref()
+        self.permit().map(revocation::PermitIdentity::id)
+    }
+
+    pub fn permit(&self) -> Option<&revocation::PermitIdentity> {
+        self.metadata.validity.permit.as_ref()
+    }
+
+    pub fn require_unrevoked(&self, trust: &Trust) -> Result<()> {
+        self.metadata.require_unrevoked(trust)
     }
 
     pub fn id_map(&self) -> &IdMap {
@@ -462,14 +482,16 @@ fn verify_metadata(
         trust,
         current_time()?,
     )?;
-    Ok(VerifiedMetadata {
+    let metadata = VerifiedMetadata {
         deployment,
         launch,
         derivation,
         authorization,
         authorization_digest,
         validity,
-    })
+    };
+    metadata.require_unrevoked(trust)?;
+    Ok(metadata)
 }
 
 fn complete_bundle(
@@ -488,6 +510,7 @@ fn complete_bundle(
         &trust.workload,
     )?;
     metadata.require_fresh(current_time()?)?;
+    metadata.require_unrevoked(trust)?;
     Ok(VerifiedWorkload {
         metadata,
         artifact,

@@ -6,6 +6,7 @@ use openssl::x509::X509;
 use serde::Deserialize;
 
 use crate::records::{Deployment, Derivation, Platform, Provenance};
+use crate::revocation::PermitIdentity;
 use crate::{
     Launch, RECORD_LIMIT, Result, SIGNATURE_LIMIT, Trust, digest, invalid, is_digest, name,
     revocation_id, verify_signature,
@@ -142,7 +143,7 @@ struct Probe {
 pub(crate) struct Validity {
     pub valid_from: u64,
     pub expires: u64,
-    pub permit_id: Option<String>,
+    pub permit: Option<PermitIdentity>,
 }
 
 fn decode(text: &str, limit: u64) -> Result<Vec<u8>> {
@@ -180,13 +181,7 @@ fn exact_policy(encoded: &str, derivation: &Derivation, launch: &Launch) -> Resu
 }
 
 impl Permit {
-    fn check(
-        &self,
-        derivation: &Derivation,
-        deployment: &Deployment,
-        trust: &Trust,
-        now: u64,
-    ) -> Result<()> {
+    fn check(&self, derivation: &Derivation, deployment: &Deployment, now: u64) -> Result<()> {
         let request = &self.acknowledgment;
         if self.schema != "fvca-workload-unsigned-permit-v1"
             || self.provenance != Provenance::UnsignedUpstreamApproved
@@ -219,9 +214,6 @@ impl Permit {
             return Err(invalid(
                 "unsigned permit does not bind the exact workload and acknowledgment",
             ));
-        }
-        if trust.scope.revoked.contains(&request.revocation_id) {
-            return Err(invalid("unsigned workload permit is revoked"));
         }
         if request.requested_at == 0
             || request.requested_at > self.issued_at
@@ -272,7 +264,7 @@ pub(crate) fn verify(
     let mut validity = Validity {
         valid_from: deployment.valid_from,
         expires: deployment.expires,
-        permit_id: None,
+        permit: None,
     };
     match serde_json::from_slice(raw)? {
         Evidence::PublisherVerified { policy, proof } => {
@@ -338,10 +330,18 @@ pub(crate) fn verify(
             }
             verify_signature(&body, &decode(&signature, SIGNATURE_LIMIT)?, &signer)?;
             let permit: Permit = serde_json::from_slice(&body)?;
-            permit.check(derivation, deployment, trust, now)?;
+            permit.check(derivation, deployment, now)?;
             validity.valid_from = validity.valid_from.max(permit.issued_at);
             validity.expires = validity.expires.min(permit.acknowledgment.expires);
-            validity.permit_id = Some(permit.acknowledgment.revocation_id);
+            validity.permit = Some(PermitIdentity {
+                guest: permit.acknowledgment.guest,
+                service: permit.acknowledgment.service,
+                id: permit.acknowledgment.revocation_id,
+                permit: digest(&sha256(&body)),
+                authority,
+                issued_at: permit.issued_at,
+                expires: permit.acknowledgment.expires,
+            });
         }
     }
     Ok(validity)

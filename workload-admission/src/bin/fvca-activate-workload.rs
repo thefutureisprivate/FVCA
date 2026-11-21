@@ -12,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fvca_workload_admission::quadlet::{self, Definition, NAMESPACE, PAYLOAD, ROOT, SERVICE};
 use fvca_workload_admission::{Trust, VerifiedWorkload, channel, read_bounded};
 
+#[path = "activate-workload/permit.rs"]
+mod permit;
 #[path = "activate-workload/stage.rs"]
 mod stage;
 #[path = "activate-workload/trial.rs"]
@@ -75,7 +77,7 @@ fn make_directory(path: &str) -> io::Result<()> {
     }
 }
 
-fn lock_lifecycle() -> Result<File> {
+fn lifecycle_file() -> Result<File> {
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -93,7 +95,6 @@ fn lock_lifecycle() -> Result<File> {
     {
         return Err(io::Error::other("invalid Guest workload lifecycle lease").into());
     }
-    lock.try_lock()?;
     Ok(lock)
 }
 
@@ -293,7 +294,13 @@ fn admitted_network(profile: Option<&str>) -> Result<Option<Ipv4Addr>> {
     }
 }
 
-fn check_start(valid_from: &str, expires: &str, provenance: &str, profile: &str) -> Result<()> {
+fn check_start(
+    valid_from: &str,
+    expires: &str,
+    provenance: &str,
+    authorization: &str,
+    profile: &str,
+) -> Result<()> {
     let valid_from = valid_from.parse::<u64>()?;
     let expires = expires.parse::<u64>()?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -306,6 +313,15 @@ fn check_start(valid_from: &str, expires: &str, provenance: &str, profile: &str)
             "{provenance} workload is outside its authorized start period"
         ))
         .into());
+    }
+    if stage::mounted_authorization()?.as_deref() != Some(authorization) {
+        return Err(io::Error::other(
+            "loaded workload service differs from the mounted authorization",
+        )
+        .into());
+    }
+    if provenance == "UNSIGNED_UPSTREAM_APPROVED" {
+        permit::check_start(authorization, valid_from, expires)?;
     }
     admitted_network((profile != "none").then_some(profile))?;
     run(Command::new("/usr/bin/findmnt")
@@ -323,9 +339,9 @@ fn check_start(valid_from: &str, expires: &str, provenance: &str, profile: &str)
     Ok(())
 }
 
-fn read_trust() -> Result<Trust> {
+fn read_trust(device: u64) -> Result<Trust> {
     private_directory(TRUST)?;
-    Trust::from_directory(Path::new(TRUST))
+    Trust::from_directory(Path::new(TRUST))?.with_permit_revocations(Path::new(GUEST_DATA), device)
 }
 
 fn require_guest_data(options: &str) -> Result<fs::Metadata> {
@@ -346,7 +362,7 @@ fn mount_workload() -> Result<()> {
     let data = require_guest_data("rw,nodev,nosuid,noexec")?;
     mount_verified(&stage::verify_selection(
         Path::new(stage::STORE),
-        &read_trust()?,
+        &read_trust(data.dev())?,
         data.dev(),
     )?)
 }
@@ -388,13 +404,14 @@ fn mount_verified(verified: &VerifiedWorkload) -> Result<()> {
         MAPPER,
         ROOT,
     ]))?;
-    publish_unit(&definition)?;
     let mut identity = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(MOUNTED_AUTHORIZATION)?;
     writeln!(identity, "{authorization}")?;
+    permit::record(verified)?;
+    publish_unit(&definition)?;
     println!("FVCA_WORKLOAD_ROOT_ACTIVE {service} {hash} {authorization}");
     println!(
         "FVCA_WORKLOAD_SOURCE {service} {} {} {}",
@@ -438,6 +455,7 @@ fn unmount_workload() -> Result<()> {
     remove_missing(fs::remove_dir_all(QUADLET_DIR))?;
     remove_missing(fs::remove_file(PUBLISHED_UNIT))?;
     remove_missing(fs::remove_file(MOUNTED_AUTHORIZATION))?;
+    permit::clear()?;
     remove_missing(fs::remove_file(SIGNATURE))?;
     remove_missing(fs::remove_dir(ROOT))?;
     fs::remove_dir(DIRECTORY)?;
@@ -453,8 +471,19 @@ fn execute() -> Result<()> {
     }
     let arguments: Vec<_> = std::env::args().skip(1).collect();
     let command: Vec<_> = arguments.iter().map(String::as_str).collect();
-    if let ["check-start", valid_from, expires, provenance, profile] = command.as_slice() {
-        return check_start(valid_from, expires, provenance, profile);
+    if let [
+        "check-start",
+        valid_from,
+        expires,
+        provenance,
+        authorization,
+        profile,
+    ] = command.as_slice()
+    {
+        return check_start(valid_from, expires, provenance, authorization, profile);
+    }
+    if command == ["monitor-permit"] {
+        return permit::monitor();
     }
     let operation: fn() -> Result<()> = match command.as_slice() {
         ["mount"] => mount_workload,
@@ -465,7 +494,8 @@ fn execute() -> Result<()> {
         ["recover"] => trial::recover,
         _ => return Err(io::Error::other("invalid workload activation operation").into()),
     };
-    let _lease = lock_lifecycle()?;
+    let lease = lifecycle_file()?;
+    lease.try_lock()?;
     operation()
 }
 

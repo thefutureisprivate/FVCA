@@ -20,7 +20,7 @@ pub(super) fn recover() -> Result<()> {
     }
     let data = require_guest_data("rw,nodev,nosuid,noexec")?;
     stage::pool_directory(store, data.dev())?;
-    let trust = read_trust()?;
+    let trust = read_trust(data.dev())?;
     let selected = stage::selected_bundle(store)?;
     let mounted = stage::mounted_authorization()?.unwrap_or_default();
     let identity = authorization_identity(&selected, &trust);
@@ -58,7 +58,8 @@ pub(super) fn run() -> Result<()> {
         .ok_or_else(|| io::Error::other("the committed workload is not mounted"))?;
     check_workload_unit()?;
     checked_run(Command::new(SYSTEMCTL).args(["is-active", "--quiet", SERVICE]))?;
-    let transition = stage::verify_staged(store, &staged, &mounted, &read_trust()?, data.dev())?;
+    let trust = read_trust(data.dev())?;
+    let transition = stage::verify_staged(store, &staged, &mounted, &trust, data.dev())?;
     let channel_permit = if Path::new(TRUST).join(channel::POLICY).try_exists()? {
         let ready: channel::Permit =
             serde_json::from_slice(&read_bounded(Path::new(channel::READY), 4096)?)?;
@@ -81,6 +82,7 @@ pub(super) fn run() -> Result<()> {
     }
     stage::record_attempt(store, &directory, &transition.approval_digest)?;
     transition.require_fresh()?;
+    transition.require_unrevoked(&trust)?;
     if let Some(permit) = &channel_permit {
         permit.require_fresh()?;
     }
@@ -96,6 +98,7 @@ pub(super) fn run() -> Result<()> {
     println!("FVCA_WORKLOAD_TRIAL_MOUNTED {}", transition.approval_digest);
     start_workload(true)?;
     transition.require_fresh()?;
+    transition.require_unrevoked(&trust)?;
     if let Some(permit) = &channel_permit {
         permit.require_fresh()?;
     }

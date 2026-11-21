@@ -63,6 +63,7 @@ def normalize_build_files(root):
                 "fvca-workload-root.service", "fvca-workload-start.service",
                 "fvca-stage-workload.service", "fvca-trial-workload.service",
                 "fvca-discover-workload.service", "fvca-workload-update.timer",
+                "fvca-workload-permit.service", "fvca-workload-permit.timer",
                 "fvca-qemu-guest-agent.service",
             ])
             for path in ("usr/lib/fvca/qemu-guest-agent.conf", "usr/lib/udev/rules.d/99-fvca-qemu-guest-agent.rules"):

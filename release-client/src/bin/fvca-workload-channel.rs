@@ -216,8 +216,9 @@ async fn guest() -> Result<()> {
     }
     let trust_directory = Path::new(TRUST);
     state::directory(trust_directory)?;
-    let trust = admission(Trust::from_directory(trust_directory))?;
     let device = pool()?;
+    let trust = admission(Trust::from_directory(trust_directory))?;
+    let trust = admission(trust.with_permit_revocations(Path::new(DATA), device))?;
     let store = Path::new(STORE);
     on_pool(store, device)?;
     let channel_state = store.join(".channel-state");

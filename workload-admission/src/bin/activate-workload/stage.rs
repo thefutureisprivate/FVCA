@@ -33,7 +33,7 @@ const BUNDLE_FILES: [&str; 8] = [
     "workload.raw",
 ];
 
-fn private_file(path: &Path) -> io::Result<File> {
+pub(super) fn private_file(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
@@ -180,6 +180,7 @@ pub(super) fn verify_staged(
     bundle.candidate.sync_all()?;
     bundle.directory.sync_all()?;
     transition.require_fresh()?;
+    transition.require_unrevoked(trust)?;
     Ok(transition)
 }
 
@@ -293,9 +294,12 @@ pub(super) fn run() -> Result<()> {
     let digest = mounted_authorization()?
         .ok_or_else(|| io::Error::other("missing mounted workload authorization receipt"))?;
 
-    if let Some((stage, published)) =
-        prepare(Path::new(STORE), &digest, &read_trust()?, data.dev())?
-    {
+    if let Some((stage, published)) = prepare(
+        Path::new(STORE),
+        &digest,
+        &read_trust(data.dev())?,
+        data.dev(),
+    )? {
         println!(
             "FVCA_WORKLOAD_STAGED {} {} {} {} {}",
             if published { "published" } else { "retained" },

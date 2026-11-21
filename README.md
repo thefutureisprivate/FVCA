@@ -1380,7 +1380,23 @@ Retain the private output containing the signed permit, its `UNSIGNED_UPSTREAM_A
 
 Use `--unsigned-permit reviewed-permit` in the derivation and independent authorization commands for the approved exception policy. Sign the deployment with `UNSIGNED_UPSTREAM_APPROVED`. Both commands verify the authority signature and the exact source and normalized launch. The authorizer also checks the permit's Guest and separates the permit, deployment, and workload-root keys. The resulting `source-evidence.json` carries the policy, permit, signature, and public issuer certificate. The signed derivation records the permit digest.
 
-To enable permits for a Guest, add `unsigned_permit_authority` to its signed workload scope. Set it to the reviewed permit issuer's DER certificate digest, matching `permit_authority` in the exception source policy. Give the Guest composer that issuer's PEM certificate with `--permit-authority-certificate`. The composer checks its fingerprint and separates it from the boot, runtime, release, deployment, and workload authorities. The Guest checks the permit signature, exact deployment binding, and enrolled revocation list. Its verification and startup logs report the source classification, permit UUID, and effective expiry. The earlier of the deployment and permit expiries bounds staged updates, boot and service starts. Running-workload expiry alerts and live revocation enforcement still require qualification.
+To enable permits for a Guest, add `unsigned_permit_authority` to its signed workload scope. Set it to the reviewed permit issuer's DER certificate digest, matching `permit_authority` in the exception source policy. Give the Guest composer that issuer's PEM certificate with `--permit-authority-certificate`. The composer checks its fingerprint and separates it from the boot, runtime, release, deployment, and workload authorities. The Guest checks the permit signature, exact deployment binding, and enrolled revocation list. Its verification and startup logs report the source classification, permit UUID, and effective expiry. The earlier of the deployment and permit expiries bounds staged updates, boot and service starts.
+
+The Guest checks the mounted permit about every 30 seconds while that workload is mounted. It writes the current condition, provenance, permit UUID, permit expiry, and effective start deadline to `/run/fvca/workload-image/permit-status/status.json`. `FVCA_WORKLOAD_PERMIT_STATUS` reports condition changes in the journal. Expiry raises a warning and fences the next start. A running workload continues under its verified root. [systemd timer behavior](https://www.freedesktop.org/software/systemd/man/262/systemd.timer.html)
+
+### Revoke an exact unsigned permit
+
+The enrolled permit authority signs a notice for the exact original permit, including its target Guest, service, UUID, and SHA-256 digest. Choose `block-new-starts` to fence starts and updates, or `stop` to also stop the mounted workload. The issuer can sign an explicit stop after the permit expires. A stop notice takes precedence over an earlier block notice.
+
+```sh
+python3 tools/revoke-workload-permit.py --permit reviewed-permit \
+  --authority-key permit-authority.key --action stop \
+  --reason 'Revoke the reviewed deployment' --output signed-revocation
+```
+
+Use the trusted Guest data intake writer to publish the exact receipt under `/run/fvca/guest-data/workload-updates/permit-revocations/` on the selected Btrfs pool. Use root-owned `0700` directories and a root-owned `0400` receipt. Flush the file, publish it by a same-filesystem rename without replacement, and flush the directory. Keep both receipts when escalating a block to a stop. The Guest rechecks the notice at boot, start, staging, and trial commit. A valid stop notice authorizes the monitor to stop only the generated workload service. A malformed notice fences new starts and produces a warning.
+
+Keep the authority's revocation records independently of Guest captures. Reapply the current records before booting restored data and include revoked permit UUIDs in the current signed Guest enrollment. The workload TUF channel checks local revocations. Delivery of revocation receipts through the channel remains open.
 
 ### Verify an executable-only workload transition
 

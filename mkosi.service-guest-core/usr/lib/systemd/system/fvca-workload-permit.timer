@@ -1,0 +1,13 @@
+[Unit]
+Description=Monitor the mounted unsigned-source permit
+DefaultDependencies=no
+PartOf=fvca-workload-root.service
+After=fvca-workload-root.service
+Before=shutdown.target
+Conflicts=shutdown.target
+ConditionPathExists=/run/fvca/workload-image/permit.json
+
+[Timer]
+OnActiveSec=1s
+OnUnitInactiveSec=30s
+AccuracySec=1s
