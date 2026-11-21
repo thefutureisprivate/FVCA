@@ -62,7 +62,14 @@ Use the same QEMU command with `build/exec-check/fvca-dev-exec-check.raw` as the
 
 ## Open Build Service
 
-[`obs/project.conf`](obs/project.conf) is the starting configuration for a dedicated native mkosi image repository. OBS still needs a verified worker package set, a source service pinned to a reviewed Git revision, and a staging-signing configuration. Keep production signing separate from OBS candidate builds. The local build uses development keys and keeps them outside Git. [OBS mkosi build documentation](https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-package-formats#sec-obs-mkosi)
+Use a dedicated x86-64 image repository with `obs/project.conf` and the Fedora 45 `update` and `standard` paths. Disable publication on the qualification project. The native `fvca-base` package builds the shared core and initramfs from the reviewed Git commit. OBS seeds the worker's offline RPM mirror from `obs/mkosi.conf`. The checked-out mkosi recipe applies its own version pins and checks the allocator archive before compiling it.
+
+```sh
+./tools/fetch-allocator.sh
+python3 obs/prepare-base.py COMMIT build/allocator-upstream/hardened_malloc-14.tar.gz build/obs-base-sources
+```
+
+Commit the generated `_service` and allocator archive to the OBS package. The source service checks out the full immutable Git commit. The worker uses the OBS project's staging certificate for its UKI and verity signatures. Verify the returned disk with `tools/verify-base.py` and the OBS project certificate. Production authorization requires independent evidence and production keys. [OBS mkosi build documentation](https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-package-formats#sec-obs-mkosi)
 
 ## Appraise a Hypervisor boot quote
 
