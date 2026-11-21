@@ -1402,6 +1402,25 @@ The client persists each exact notice on Btrfs before staging an offer. It accep
 
 Use `tests/check-workload-revocation-channel.py` with the development workload channel client and verifier, a rootless Fedora builder image, and an output directory on Btrfs. It exercises the normal Guest entry point with signed TUF metadata and an independently signed notice. The existing workload channel tests also exercise HTTPS transport.
 
+For KVM qualification, start with a disposable, independently authorized unsigned workload that stays running until stopped. Seed its bundle onto a fresh Btrfs fixture using `tests/workload-data-lab.sh`. The deployment must remain valid beyond the permit expiry. Sign an exact `stop` target for channel `stable` using the lab issuer, then prepare the isolated test depot and initramfs.
+
+```sh
+python3 -B -W error tests/check-workload-permit-boot.py prepare \
+  --issued ISSUED_PERMIT --notice SIGNED_STOP_TARGET --output ENROLLMENT
+bash tests/workload-permit-initrd.sh GUEST_INITRAMFS LAB_INITRAMFS
+```
+
+Compose a separately signed direct-boot lab bundle with `LAB_INITRAMFS` and the exact workload scope and certificates, including the permit issuer. Pass `ENROLLMENT/uplink`, `channel.json`, `depot/metadata/1.root.json`, `depot.json` and `permit-lab-ca.pem` to the composer's workload network and channel options. The lab initramfs shortens the wait for the first refresh and adds separate service-state checks. It preserves the generated workload service and the production permit monitor.
+
+```sh
+python3 -B -W error tests/check-workload-permit-boot.py check \
+  --issued ISSUED_PERMIT --enrollment ENROLLMENT --bundle DIRECT_BOOT_BUNDLE \
+  --release-certificate RELEASE_CERTIFICATE --data BTRFS_FIXTURE/approved.raw \
+  --output TEST_REPORTS
+```
+
+The check moves the Guest clock across the permit deadline, observes the running service after expiry, and delivers the signed stop over pinned HTTPS. It checks that systemd stops the service and refuses a restart. Two additional boots check ordinary expiry and revocation retained on Btrfs with the depot offline.
+
 ### Verify an executable-only workload transition
 
 Use the trusted scope of the currently selected workload and the enrolled deployment and workload-root certificates to verify a proposed replacement. Both private bundle directories contain the independently signed deployment and authorization, publisher evidence, and exact workload disk. Re-run source admission and derivation for the candidate under its own pinned source policy.
