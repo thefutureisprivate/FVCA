@@ -82,8 +82,8 @@ def boot(args, name, password, *members, firmware=OVMF_CODE, tpm_socket=None, ex
     media_access = "snapshot=on" if nvme else "readonly=on"
     command = [
         "qemu-system-x86_64", *devices, "-machine", machine, "-accel", "kvm", "-cpu", cpu,
-        "-m", str(getattr(args, "memory_mib", 4096 if nested is not None else 2048)),
-        "-smp", str(getattr(args, "vcpus", 2)), *loader,
+        "-m", str(getattr(args, "memory_mib", 8192 if nested is not None else 2048)),
+        "-smp", str(getattr(args, "vcpus", 4 if nested is not None else 2)), *loader,
         "-drive", f"if=none,id=fvca-boot,format=raw,{media_access},file={image(args.disk)}",
         "-device", f"{boot_device}{geometry}" + ("" if persistent else ",bootindex=1"),
     ]

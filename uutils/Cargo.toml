@@ -1,0 +1,31 @@
+[package]
+name = "fvca-uutils"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+host-labels = ["dep:uu_chcon"]
+host-capture = ["host-labels", "dep:uu_cp"]
+
+[dependencies]
+uucore = { version = "=0.13.0", default-features = false }
+uu_chcon = { version = "=0.13.0", default-features = false, optional = true }
+uu_cp = { version = "=0.13.0", default-features = false, optional = true }
+uu_echo = { version = "=0.13.0", default-features = false }
+uu_sha256sum = { version = "=0.13.0", default-features = false }
+uu_true = { version = "=0.13.0", default-features = false }
+
+[[bin]]
+name = "chcon"
+path = "src/bin/chcon.rs"
+required-features = ["host-labels"]
+
+[[bin]]
+name = "cp"
+path = "src/bin/cp.rs"
+required-features = ["host-capture"]
+
+[profile.release]
+debug = false
+strip = true

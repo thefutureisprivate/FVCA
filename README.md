@@ -8,11 +8,12 @@ The design draws on AOS's use of signed UKIs and integrity-protected disk images
 
 ## Build and verify
 
-Use a Fedora 45 x86-64 build machine or disposable VM. Install `mkosi`, `mkosi-system-deps`, `systemd-ukify`, `sbsigntools`, `mtools`, `openssl`, `util-linux-core`, `erofs-utils`, and `veritysetup` on the builder. The development recipe uses the Fedora release and updates repositories with RPM signature verification. The build overlays pin the Rust, Cargo and GCC packages and build the local Rust crates with `cargo --frozen` and networking disabled. The two package manifests record the resolved OS packages. Release builds will need pinned package inputs throughout.
+Use a Fedora 45 x86-64 build machine or disposable VM. Install `cargo`, `mkosi`, `mkosi-system-deps`, `systemd-ukify`, `sbsigntools`, `mtools`, `openssl`, `util-linux-core`, `erofs-utils`, and `veritysetup` on the builder. The development recipe uses the Fedora release and updates repositories with RPM signature verification. The build overlays pin the Rust, Cargo and GCC packages and build the local Rust crates with `cargo --frozen` and networking disabled. The two package manifests record the resolved OS packages. Release builds will need pinned package inputs throughout.
 
 ```sh
 umask 077
 ./tools/fetch-allocator.sh
+cargo vendor --locked --versioned-dirs --manifest-path uutils/Cargo.toml build/uutils-vendor/sources
 mkosi genkey  # First build only. Keep mkosi.key private.
 mkosi build
 (cd build && sha256sum -c fvca-dev-base.SHA256SUMS)
@@ -22,6 +23,20 @@ python3 tools/verify-base.py build/fvca-dev-base.raw mkosi.crt
 The QEMU procedure uses one enrolled development certificate for both signing purposes. Production signer separation remains pending. The off-node verifier accepts a separate root-signing certificate with `--verity-certificate`. It reads the policy in the signed UKI and verifies the detached signature and dm-verity data from the actual disk image. The disk, split UKI, root hash and package manifests are in `build/`.
 
 The package manifests record what the builder installed before file pruning. `python3 tools/audit-os-tree.py PATH` runs the content audit without changing an extracted tree. Preserve file modes and extended attributes when extracting the EROFS root for this check.
+
+The build stages individual uutils 0.13.0 binaries, adds a mandatory hardened_malloc dependency, then removes the GNU coreutils commands after package scriptlets finish. The signed tree records the selected applets, Cargo lock digest, builds and license notices under `/usr/share`. [uutils 0.13.0](https://github.com/uutils/coreutils/releases/tag/0.13.0)
+
+| Utility | Callers and inputs |
+| --- | --- |
+| `echo` | Readiness, failure and OCI probe units pass fixed status markers. |
+| `sha256sum` | Privileged boot, release and recovery helpers hash pinned files or open file descriptors. Guest launch checks the authenticated checksum list with `--strict --check --status -`. |
+| `true` | The execution-policy qualification copies the exact binary from the signed root and tests the volatile copy. |
+| `chcon` | Hypervisor initramfs, lifecycle helpers and socket units set fixed SELinux contexts on their private paths. They pass `--no-dereference` for entries where link handling matters. |
+| `cp` | Hypervisor capture copies the signed Guest release members into private staging with `--sparse=always --reflink=never --no-target-directory --`. The capture helper independently verifies content, sets mode `0400` and flushes each file before publication. |
+
+Run `python3 tests/check-uutils.py BIN_DIRECTORY` on the built executables and add `--hypervisor` for the full Host set. Use the boot, update and capture checks to qualify the exact SELinux domains and storage behavior in each image.
+
+For the disposable nested lifecycle and Stalwart diagnostic initramfs fixtures, add `qualification-utils` to the comma-separated mkosi profile list when building the test core and initramfs. That profile keeps the fixed GNU commands those fixtures invoke. The OBS role recipes select the release utility set.
 
 Use a separate scratch directory for each build or qualification run. Keep the qualification logs, manifests, and digests, along with the inputs still needed for later tests or recovery. Remove disposable images, extracted trees, test data, and temporary keys as soon as the last step that uses them finishes.
 
@@ -69,11 +84,13 @@ Use a dedicated x86-64 image repository with `obs/project.conf` and the Fedora 4
 ```sh
 ./tools/fetch-allocator.sh
 ./tools/fetch-fwupd.sh
-python3 obs/prepare-build.py COMMIT build/allocator-upstream/hardened_malloc-14.tar.gz build/obs-base-sources
+cargo vendor --locked --versioned-dirs --manifest-path uutils/Cargo.toml build/uutils-vendor/sources
+python3 obs/prepare-build.py COMMIT build/allocator-upstream/hardened_malloc-14.tar.gz build/obs-base-sources \
+  --uutils-vendor build/uutils-vendor/sources
 python3 obs/prepare-build.py COMMIT build/allocator-upstream/hardened_malloc-14.tar.gz build/obs-hypervisor-sources \
-  --role hypervisor --fwupd build/fwupd-source/fwupd-2.1.10.tar.xz
+  --uutils-vendor build/uutils-vendor/sources --role hypervisor --fwupd build/fwupd-source/fwupd-2.1.10.tar.xz
 python3 obs/prepare-build.py COMMIT build/allocator-upstream/hardened_malloc-14.tar.gz build/obs-service-guest-sources \
-  --role service-guest --vendor build/release-client-vendor/sources
+  --uutils-vendor build/uutils-vendor/sources --role service-guest --vendor build/release-client-vendor/sources
 ```
 
 Prepare the Guest vendor directory with the locked `cargo vendor --versioned-dirs` command in the release-client section below. The source preparer checks the Cargo lockfiles from the selected commit and packages the exact crate set for both Guest binaries. Commit every generated file to its corresponding OBS package. The worker uses the OBS project's staging certificate for its UKI and verity signatures. Decompress the disk and its package manifest so they share a basename with `.raw` and `.manifest` extensions. Run `tools/verify-base.py` with the staging certificate, `--extract-root` for the runtime build input, and `--extract-initrd` for the embedded initramfs. Production authorization requires independent evidence and production keys. [OBS mkosi build documentation](https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-package-formats#sec-obs-mkosi)

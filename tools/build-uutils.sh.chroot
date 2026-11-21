@@ -1,0 +1,91 @@
+#!/usr/bin/bash
+set -euo pipefail
+source "$SRCDIR/tools/allocator-source.env"
+
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+export CARGO_HOME="$work/cargo"
+export CARGO_TARGET_DIR="$work/target"
+mkdir "$CARGO_HOME"
+
+vendor="$SRCDIR/build/uutils-vendor/sources"
+if [[ -d "$SRCDIR/build/obs-uutils" ]]; then
+    vendor="$work/vendor"
+    mkdir "$vendor"
+    (
+        cd "$SRCDIR/build/obs-uutils"
+        sha256sum --check --strict fvca-uutils-vendor.sha256
+        tar --zstd -xf fvca-uutils-vendor.tar.zst -C "$vendor"
+    )
+fi
+if [[ ! -d "$vendor" ]]; then
+    printf 'Prepare the locked uutils sources at %s before building\n' "$vendor" >&2
+    exit 1
+fi
+cat > "$CARGO_HOME/config.toml" <<EOF
+[source.crates-io]
+replace-with = "fvca-uutils-vendor"
+
+[source.fvca-uutils-vendor]
+directory = "$vendor"
+EOF
+
+applets=(echo sha256sum true)
+features=(--no-default-features)
+case "${FVCA_HOST_UUTILS:-}" in
+    core)
+        applets+=(chcon cp)
+        features+=(--features host-capture)
+        ;;
+    initrd)
+        applets+=(chcon)
+        features+=(--features host-labels)
+        ;;
+esac
+target=x86_64-unknown-linux-gnu
+manifest="$SRCDIR/uutils/Cargo.toml"
+export CARGO_ENCODED_RUSTFLAGS="-Dwarnings"$'\x1f'"--remap-path-prefix=$vendor=/usr/src/fvca/uutils-vendor"
+cargo build --frozen --release --manifest-path "$manifest" --target "$target" "${features[@]}"
+
+staging="$DESTDIR/usr/lib/fvca/uutils"
+install -d "$staging"
+for applet in "${applets[@]}"; do
+    install -m755 "$CARGO_TARGET_DIR/$target/release/$applet" "$staging/$applet"
+    patchelf --add-needed "$allocator_library" "$staging/$applet"
+    dependencies=$(patchelf --print-needed "$staging/$applet")
+    test "${dependencies%%$'\n'*}" = "$allocator_library"
+done
+
+# Keep GNU utilities available until all package scriptlets have run.
+rpm -ql coreutils coreutils-common | grep -E '^/usr/(s?bin|libexec/coreutils)/[^/]+$' | sort -u > "$staging/gnu-paths"
+for applet in "${applets[@]}"; do
+    grep -Fxq "/usr/bin/$applet" "$staging/gnu-paths"
+done
+if [[ "${FVCA_QUALIFICATION_UTILS:-}" == yes ]]; then
+    # Extra utilities for the deliberately modified lifecycle test images.
+    sed -i -E '\@^/usr/bin/(cat|cp|ln|mkdir|mv|rm|stat|sync|test)$@d' "$staging/gnu-paths"
+fi
+
+cargo tree --frozen --manifest-path "$manifest" --target "$target" "${features[@]}" \
+    --edges normal --prefix none --format '{p}' > "$work/dependencies"
+sort -u "$work/dependencies" | while read -r name version rest; do
+    [[ "$name" == fvca-uutils ]] && continue
+    crate="$name-${version#v}"
+    test -d "$vendor/$crate"
+    for notice in "$vendor/$crate"/{LICENSE*,COPYING*,NOTICE*}; do
+        if [[ -f "$notice" ]]; then
+            install -Dm644 "$notice" "$DESTDIR/usr/share/licenses/fvca-uutils/$crate/${notice##*/}"
+        fi
+    done
+done
+{
+    printf 'version=0.13.0\ntarget=%s\napplets=%s\nfeatures=%s\n' "$target" "${applets[*]}" "${features[*]}"
+    printf 'cargo_lock_sha256=%s\n' "$(sha256sum "$SRCDIR/uutils/Cargo.lock" | cut -d ' ' -f1)"
+    if [[ "${FVCA_QUALIFICATION_UTILS:-}" == yes ]]; then
+        printf 'qualification_utilities=cat cp ln mkdir mv rm stat sync test\n'
+    fi
+    rustc --version
+    rpm -q coreutils coreutils-common
+    (cd "$staging" && sha256sum -- "${applets[@]}")
+} > "$work/provenance"
+install -Dm644 "$work/provenance" "$DESTDIR/usr/share/fvca/uutils-build.txt"
