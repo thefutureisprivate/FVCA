@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import runpy
-import shutil
 import struct
 import subprocess
 import tempfile
@@ -80,6 +79,25 @@ fi
 echo FVCA_SECURITY_DRAIN_READBACK_OK
 """
 
+WITHDRAWN_REPLAY = b"""
+. /replay-expected
+cp /envelope "/mnt/boot-trials/$transaction.withdrawn"
+chmod 0600 "/mnt/boot-trials/$transaction.withdrawn"
+"""
+
+WITHDRAWN_READBACK = b"""
+. /replay-expected
+shopt -s nullglob
+attempts=(/mnt/boot-trials/"$transaction".attempt-*)
+[[ ! -e /mnt/boot-trials/"$transaction" && ! -e /mnt/boot-trials/"$transaction".healthy ]]
+[[ ${#attempts[@]} == 0 ]]
+cmp /envelope /mnt/boot-trials/pending-trial
+cmp /envelope /mnt/boot-trials/"$transaction".withdrawn
+echo FVCA_WITHDRAWN_TRIAL_READBACK_OK
+"""
+
+WITHDRAWN = b"the signed Hypervisor trial has been withdrawn"
+
 
 def install(args, output, members, envelope, seed=None, *, live=False):
     online = args.online_handoff and seed is not None
@@ -133,6 +151,7 @@ def require_sequence(log, markers, output):
         assert offset >= 0, (output, marker)
         position = offset + len(marker)
 
+
 def candidate_fields(image):
     table = json.loads(subprocess.check_output(["sfdisk", "--json", "--sector-size", "4096", image]))
     parts = {part["name"]: part for part in table["partitiontable"]["partitions"]}
@@ -184,6 +203,10 @@ def qualify(args):
     if args.security_deadline:
         cases = tuple((label, args.sign_key, ts + 1800, args.core, None)
                       for label in ("deadline-due", "deadline-early", "clean-only"))
+    if args.withdrawn_replay:
+        cases = tuple((label, args.sign_key, ts + 1800, args.core, None)
+                      for label in ("withdrawn-replay", "approved"))
+    replayed_digest = None
     for label, key, expiry, stable_core, refusal in cases:
         output = args.output / label
         output.mkdir(mode=0o700)
@@ -207,11 +230,22 @@ def qualify(args):
             signature = subprocess.check_output(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", key, "-in", body])
             envelope = (args.delivered_envelope.read_bytes() if refusal is None and args.delivered_envelope is not None
                         else signature + body.read_bytes())
+            if args.withdrawn_replay:
+                envelope_digest = hashlib.sha256(envelope).hexdigest()
+                (output / "approval-sha256").write_text(envelope_digest + "\n", encoding="ascii")
+                if label == "withdrawn-replay":
+                    replayed_digest = envelope_digest
+                else:
+                    assert envelope_digest == replayed_digest
             members = [work / f"member-{side}.raw" for side in ("a", "b")]
             for member in members:
                 subprocess.run(["cp", "--reflink=auto", "--sparse=always", args.members / member.name, member], check=True)
-            install(args, output / "install.log", members, envelope,
-                    args.seed if refusal is None else None, live=args.security_deadline)
+            if label == "withdrawn-replay":
+                replay = {"envelope": envelope, "replay-expected": f"transaction={tx}\n".encode("ascii")}
+                maintenance(args, output / "install.log", members, INSTALL + WITHDRAWN_REPLAY, replay, args.seed)
+            else:
+                install(args, output / "install.log", members, envelope,
+                        args.seed if refusal is None else None, live=args.security_deadline)
             options = SimpleNamespace(disk=stable, runtime=candidate, guest=False, output=output, variables=variables,
                                       nvme_boot=True, persistent_boot=True, boot_sector_size=4096,
                                       no_default_devices=True, memory_mib=8192, vcpus=4, trial_watchdog=True)
@@ -220,7 +254,7 @@ def qualify(args):
                 entry = trial["Edk2VarStore"](variables).get_varlist().get("BootNext")
                 return entry.data if entry is not None else None
 
-            def boot(phase, marker, *, allow_reboot=False):
+            def boot(phase, marker, *, allow_reboot=False, expect_failure=False):
                 before = override()
                 for retry in range(1, 4):
                     with storage["software_tpm"](args.tpm_state) as socket:
@@ -233,7 +267,7 @@ def qualify(args):
                     if b"Kernel command line:" in log or override() != before:
                         break
                 log = storage["rejoin_serial_output"](log)
-                assert prompts == 0 and marker in log and storage["FAIL"] not in log, (output, phase)
+                assert prompts == 0 and marker in log and (storage["FAIL"] in log) == expect_failure, (output, phase)
                 assert b"secureboot: Secure boot enabled" in log and b"FVCA_SELINUX_ENFORCING" in log
                 assert b"FVCA_HOST_STORAGE_UNLOCK_PROFILE tpm2-auto" in log
                 order = trial["Edk2VarStore"](variables).get_varlist()["BootOrder"].data
@@ -242,7 +276,31 @@ def qualify(args):
 
             armed = f"FVCA_TRIAL_ARMED {tx}".encode()
             reboot_requested = b"FVCA_TRIAL_REBOOT_REQUESTED"
-            if refusal is not None:
+            if label == "withdrawn-replay":
+                online_refused = b"FVCA_QUALIFY_WITHDRAWN_ONLINE_REFUSED"
+                stable_markers = (b"FVCA_TRIAL_REFUSED " + WITHDRAWN, b"FVCA_SERVICE_GUEST_READY",
+                                  b"FVCA Service Guest operation failed: " + WITHDRAWN, online_refused)
+                log = boot("replayed-stable", online_refused)
+                require_sequence(log, stable_markers, output)
+                assert armed not in log and reboot_requested not in log and override() is None
+                assert b"FVCA_HYPERVISOR_TRIAL_DRAINED" not in log
+                assert b"FVCA_SERVICE_GUEST_STOPPED" not in log
+
+                trial["prepare_vars"](args.variables, variables, first, second, next_id=trial["CANDIDATE"])
+                log = boot("replayed-candidate", storage["FAIL"], expect_failure=True)
+                require_sequence(log, (b"FVCA_HYPERVISOR_EPOCH_ACCEPTED 2 1",
+                                       b"FVCA VM runtime activation failed: " + WITHDRAWN, storage["FAIL"]), output)
+                assert b"FVCA_TRIAL_CANDIDATE_STARTED" not in log
+                assert b"FVCA_SERVICE_GUEST_READY" not in log and override() is None
+
+                log = boot("stable-recovery", online_refused)
+                require_sequence(log, stable_markers, output)
+                assert armed not in log and reboot_requested not in log and override() is None
+
+                readback = output / "withdrawal-readback.log"
+                maintenance(args, readback, members, WITHDRAWN_READBACK, replay)
+                assert b"FVCA_WITHDRAWN_TRIAL_READBACK_OK" in readback.read_bytes()
+            elif refusal is not None:
                 log = boot("stable-refusal", b"FVCA_TRIAL_REFUSED " + refusal)
                 assert armed not in log and reboot_requested not in log and override() is None
             elif args.security_deadline and label != "deadline-due":
@@ -313,10 +371,13 @@ if __name__ == "__main__":
                       help="start with a running Guest using a stable UKI with the online-trial lab unit")
     mode.add_argument("--security-deadline", action="store_true",
                       help="qualify the due, future, and clean-only disposition with Guest shutdown RPC blocked")
+    mode.add_argument("--withdrawn-replay", action="store_true",
+                      help="test refusal of a replayed withdrawn approval and boot the same approval on a fresh mirror")
     os.umask(0o077)
     args = parser.parse_args()
-    if args.security_deadline and args.delivered_envelope is not None:
-        parser.error("the security-deadline cases sign a fresh approval individually")
-    if not args.security_deadline and (args.seed is None or args.wrong_key is None):
+    dedicated = args.security_deadline or args.withdrawn_replay
+    if dedicated and args.delivered_envelope is not None:
+        parser.error("dedicated trial cases sign their own fixture approvals")
+    if not dedicated and (args.seed is None or args.wrong_key is None):
         parser.error("the standard standing trial matrix requires --seed and --wrong-key")
     qualify(args)

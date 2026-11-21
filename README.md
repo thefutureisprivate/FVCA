@@ -465,6 +465,8 @@ A scheduled publication records the channel and exact approval on the queued fil
 
 Run `tests/check-host-trial-withdrawal.py` with the TUF fixture environment, a disposable private runtime root, and an empty Btrfs bind mount at `/run/fvca/host-data`. It checks a signed withdrawal, an unqualified withdrawal, a busy lifecycle lease, a reserved trial, and an independent approval through the scheduled update command.
 
+For boot replay qualification, run `tests/nested-guest-shutdown-initrd.sh` in `withdrawn-replay` mode for the stable Hypervisor initramfs and use the ordinary initramfs for the candidate. Run `tests/check-hypervisor-standing-trial.py --withdrawn-replay` with the measured Secure Boot firmware, enrolled software TPM, and disposable authenticated Btrfs mirror. The maintenance initramfs needs `cmp` to compare the queued and withdrawn envelopes. The test restores the exact withdrawn packet to the inbox, requests live activation, and explicitly selects the candidate once in firmware. It then verifies stable Guest recovery and the absence of an attempt reservation before booting the identical signed packet through candidate health on a fresh mirror.
+
 ### Authorize automatic promotion
 
 Compose both slots with the same independent `--boot-promotion-public-key`. The release publisher can authorize promotion before deployment by signing the exact trial, candidate EFI loader, release manifest and next channel sequence. Use the active record from the currently promoted slot and run the signer with `mcopy` available.

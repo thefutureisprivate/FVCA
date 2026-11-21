@@ -1,0 +1,13 @@
+[Unit]
+Description=Exercise live Hypervisor refusal of a withdrawn trial
+After=fvca-base-ready.service
+ConditionPathExists=/run/fvca/host-data/boot-trials/pending-trial
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+ExecStart=-/usr/bin/systemctl start fvca-activate-hypervisor-trial.service
+ExecStart=/usr/bin/systemctl --quiet is-failed fvca-activate-hypervisor-trial.service
+ExecStart=/usr/bin/echo FVCA_QUALIFY_WITHDRAWN_ONLINE_REFUSED
+StandardOutput=journal+console
+StandardError=journal+console

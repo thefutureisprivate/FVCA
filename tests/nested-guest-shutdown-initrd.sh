@@ -3,7 +3,7 @@
 set -euo pipefail
 umask 077
 if [[ $# -lt 2 || $# -gt 3 ]]; then
-    echo 'Run tests/nested-guest-shutdown-initrd.sh INPUT_INITRAMFS NEW_INITRAMFS [shutdown|capture|live|restore|online-trial|guest-trial|guest-trial-activation|security-deadline|guest-shutdown-refusal]' >&2
+    echo 'Run tests/nested-guest-shutdown-initrd.sh INPUT_INITRAMFS NEW_INITRAMFS [shutdown|capture|live|restore|online-trial|guest-trial|guest-trial-activation|security-deadline|guest-shutdown-refusal|withdrawn-replay]' >&2
     exit 2
 fi
 tests=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -23,6 +23,7 @@ case "${3:-shutdown}" in
     guest-trial) unit=fvca-qualify-guest-trial.service ;;
     guest-trial-activation) unit=fvca-qualify-guest-trial-activation.service ;;
     security-deadline) unit=fvca-qualify-security-deadline.service ;;
+    withdrawn-replay) unit=fvca-qualify-withdrawn-trial.service ;;
     guest-shutdown-refusal) unit= ;;
     *) echo 'Unknown nested Guest qualification mode' >&2; exit 2 ;;
 esac
