@@ -40,6 +40,7 @@ ACTIVATION_FILES = (
     "usr/bin/ip",
     "usr/bin/nft",
     "usr/bin/nsenter",
+    "usr/bin/veritysetup",
     str(WORKLOAD_NETWORK_SUPPORT),
     "usr/lib/fvca/activate-guest-data",
     "usr/lib/fvca/activate-oci-runtime",

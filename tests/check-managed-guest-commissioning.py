@@ -68,12 +68,18 @@ def wait_for(process, log, marker, seconds):
         if STORAGE["FAIL"] in output or process.poll() is not None:
             break
         if marker in output:
-            return output
+            return
         time.sleep(0.25)
     raise ValueError(f"the signed Host did not reach {marker.decode()} in {log.name}")
 
 
-def require_readiness(output, slot, initial):
+def require_readiness(log, slot, initial):
+    serial = log.read_bytes()
+    for denial in re.findall(rb"avc:\s+denied[^\r\n]+", serial):
+        if ((b'comm="systemd-veritys"' in denial and b'/run/systemd/io.systemd.PCRExtend' in denial)
+                or (b'fvca_management_broker_t:' in denial and b'dev="cgroup2"' in denial)):
+            raise ValueError(f"an unexpected measurement or cgroup access was denied in {log.name}")
+    output = STORAGE["rejoin_serial_output"](serial)
     required = (b"secureboot: Secure boot enabled", b"FVCA_SELINUX_ENFORCING",
                 b"FVCA_HYPERVISOR_EPOCH_ACCEPTED ", b"FVCA_HOST_STORAGE_TPM_UNLOCKED",
                 STORAGE["HOST_AUTHENTICATED"], STORAGE["HOST_PROFILES"], slot, STORAGE["KERNEL_SEALED"],
@@ -164,7 +170,8 @@ def qualify(args):
             admission = json.loads(tofu("output", "-json", "provisioning_operation"))
             if admission["state"] not in ("pending", "ready") or re.fullmatch("[0-9a-f]{64}", admission["id"]) is None:
                 raise ValueError("apply did not return a durable commissioning identity")
-            require_readiness(wait_for(process, first, GUEST_READY, 120), slot, initial=True)
+            wait_for(process, first, GUEST_READY, 120)
+            require_readiness(first, slot, initial=True)
             tofu("apply", "-refresh-only", "-auto-approve", "-input=false")
             ready = {"id": admission["id"], "state": "ready"}
             if json.loads(tofu("output", "-json", "provisioning_operation")) != ready:
@@ -173,8 +180,9 @@ def qualify(args):
 
         cold = args.output / "cold.log"
         with boot(args, members, port, cold) as process:
-            require_readiness(wait_for(process, cold, GUEST_READY, 145), slot, initial=False)
+            wait_for(process, cold, GUEST_READY, 145)
             wait_for(process, cold, STORAGE["READY"], 15)
+            require_readiness(cold, slot, initial=False)
             tofu("apply", "-refresh-only", "-auto-approve", "-input=false")
             if json.loads(tofu("output", "-json", "provisioning_operation")) != ready:
                 raise ValueError("a cold boot lost the original commissioning receipt")

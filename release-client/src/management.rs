@@ -7,6 +7,7 @@ mod intent;
 mod listener;
 mod local_captures;
 mod protocol;
+mod provisioning;
 #[cfg(not(feature = "appliance"))]
 pub(crate) mod quote_client;
 mod storage_health;
@@ -18,10 +19,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fvca_trial_authorization::{
-    MANAGEMENT_POLICY, MANAGEMENT_POLICY_BYTES, guest::SERVICE_GUEST_UUID, guest_config::Change,
-    guest_config::Resources, management_binding,
+    MANAGEMENT_POLICY, MANAGEMENT_POLICY_BYTES, guest::SERVICE_GUEST_UUID,
+    guest_config::{Change, Resources, host_memory_kib},
+    management_binding,
 };
 use rustix::process::{getegid, geteuid};
+use rustix::thread::sched_getaffinity;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use rustls::{ServerConfig, version::TLS13};
 use serde::Serialize;
@@ -32,7 +35,6 @@ use tokio::time::{Instant, timeout_at};
 use tokio_rustls::TlsAcceptor;
 
 use crate::{Result, attestation, channel, guest_configuration, invalid, state};
-mod provisioning;
 use protocol::{Activation, Enrollment, Operation, Refusal, Request, Settings};
 
 const SOCKET: &str = "/run/fvca-management-broker/broker.sock";
@@ -40,6 +42,21 @@ const CREDENTIAL_BYTES: u64 = 16 * 1024;
 const CONNECTIONS: usize = 8;
 const DEADLINE: Duration = Duration::from_secs(3);
 const QUOTE_DEADLINE: Duration = Duration::from_secs(8);
+
+fn require_guest_capacity(resources: Resources) -> std::result::Result<(), Refusal> {
+    let meminfo = state::read(Path::new("/proc/meminfo"), 64 * 1024)
+        .map_err(|_| Refusal::HostStateUnavailable)?;
+    let total = std::str::from_utf8(&meminfo)
+        .ok()
+        .and_then(|value| host_memory_kib(value, "MemTotal:").ok())
+        .ok_or(Refusal::HostStateUnavailable)?;
+    // Count the processors the kernel permits for this service. The launcher
+    // independently rechecks its own CPU and available memory at Guest start.
+    let cpus = sched_getaffinity(None).map_err(|_| Refusal::HostStateUnavailable)?;
+    resources
+        .require_capacity(cpus.count() as usize, total)
+        .map_err(|_| Refusal::OutsideHostCapacity)
+}
 
 fn operation_deadline(started: Instant, operation: &Operation) -> Instant {
     started

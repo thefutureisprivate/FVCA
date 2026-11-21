@@ -49,6 +49,7 @@ HOST_KERNEL_OPTIONS = (
 )
 ACTIVATION_FILES = (
     KERNEL_POLICY_SUPPORT,
+    "usr/bin/veritysetup",
     "etc/systemd/system/systemd-confext-initrd.service",
     "etc/systemd/system/systemd-confext-sysroot.service",
     "etc/systemd/system/systemd-sysext-initrd.service",

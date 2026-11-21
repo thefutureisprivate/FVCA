@@ -194,6 +194,8 @@ fvca-release-client --appraise-boot-quote trusted-reference.json verifier-state/
 
 The verdict identifies the approved measured boot and its enrolled Host. Guest identity, application authorization and runtime health are separate checks. Physical TPM enrollment qualification remains open. The disposable TPM test uses a client built with `--features swtpm-test` and runs `python3 tests/check-boot-attestation.py CLIENT` on the off-node test machine.
 
+The measured Hypervisor UKI binds the exact VM runtime and Guest capsule roots through its embedded composition. The runtime activator submits each selected root and its signature to the kernel using `veritysetup`. This attachment path has no NvPCR dependency. Appraisal of the approved UKI establishes the selected composition. Live attachment and Guest agent readiness have their own evidence.
+
 ## Verify and stage a signed role release
 
 `fvca-release-client` accepts an exact role release from a configured HTTPS or local TUF depot on the release or recovery workstation. Use an out-of-band trusted root and a separately authorized local selection record. Keep the TUF root and approved targets signing keys offline. Assign distinct Ed25519 keys to all four top-level TUF roles, and use consistent snapshots with SHA-256 and lengths at both metadata links. The client accepts timestamp metadata with up to 24 hours of remaining validity and snapshot metadata with up to seven days. Use a trusted clock and preserve the private metadata state across imports. [TUF specification](https://theupdateframework.github.io/specification/latest/) · [Amutable Quarry distribution](https://amutable.com/blog/distributing-images-quarry)
@@ -1158,7 +1160,7 @@ python3 -B tests/check-managed-guest-commissioning.py \
   --output NEW_EVIDENCE_DIRECTORY
 ```
 
-The check refuses a plan for a different seed and an apply without the dedicated key. It requires the Host to stay reachable while the Guest slot is vacant, and verifies Guest agent readiness, the original operation after a cold boot and refusal of destroy. It discards the writable mirror copies, local provider installation, plans and state when the checks finish.
+The check refuses a plan for a different seed and an apply without the dedicated key. It requires the Host to stay reachable while the Guest slot is vacant, and verifies Guest agent readiness, the original operation after a cold boot and refusal of destroy. It also checks the enforcing audit log for unexpected access to the PCR measurement socket or the broker's cgroup filesystem. It discards the writable mirror copies, local provider installation, plans and state when the checks finish.
 
 ### Stopped Service Guest captures
 

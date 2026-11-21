@@ -7,7 +7,7 @@ use std::path::Path;
 use fvca_trial_authorization::{
     commissioning::{self, Offer},
     guest,
-    guest_config::{Configuration, host_memory_kib},
+    guest_config::Configuration,
 };
 use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
@@ -217,17 +217,7 @@ pub(super) fn submit(
         .ok_or(Refusal::StaleGuestProvisioning)?;
     let offer = Offer::parse(&body).map_err(|_| Refusal::HostStateUnavailable)?;
     require_boot_offer(enrollment, &offer).map_err(|_| Refusal::StaleGuestProvisioning)?;
-    let meminfo = state::read(Path::new("/proc/meminfo"), 64 * 1024)
-        .map_err(|_| Refusal::HostStateUnavailable)?;
-    let total = std::str::from_utf8(&meminfo)
-        .ok()
-        .and_then(|value| host_memory_kib(value, "MemTotal:").ok())
-        .ok_or(Refusal::HostStateUnavailable)?;
-    let cpus = std::thread::available_parallelism().map_err(|_| Refusal::HostStateUnavailable)?;
-    offer
-        .resources
-        .require_capacity(cpus.get(), total)
-        .map_err(|_| Refusal::OutsideHostCapacity)?;
+    super::require_guest_capacity(offer.resources)?;
     require_storage(&offer).map_err(|_| Refusal::GuestProvisioningStorageUnavailable)?;
     let queue = handoff::require_pool_directory(Path::new(commissioning::QUEUE))
         .map_err(|_| Refusal::HostStateUnavailable)?;

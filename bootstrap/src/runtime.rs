@@ -100,12 +100,16 @@ pub fn mount_verified(
     };
     fs::create_dir_all(target)?;
     let mapping = format!("fvca-{name}");
-    run(Command::new("/usr/lib/systemd/systemd-veritysetup")
-        .args(["attach", &mapping])
+    // The measured UKI binds this root. Use a single kernel-verified signed
+    // activation without systemd's separate NvPCR notification.
+    run(Command::new("/usr/bin/veritysetup")
+        .args(["--panic-on-corruption", "--root-hash-signature"])
+        .arg(signature)
+        .arg("open")
         .arg(data)
+        .arg(&mapping)
         .arg(tree)
-        .arg(root)
-        .arg(format!("panic-on-corruption,root-hash-signature={}", signature.display())))?;
+        .arg(root))?;
     run(Command::new("/usr/bin/mount")
         .args(["-t", "erofs", "-o", options, &format!("/dev/mapper/{mapping}")])
         .arg(target))

@@ -7,13 +7,13 @@ use std::path::Path;
 use fvca_trial_authorization::{
     MANAGEMENT_INTENTS,
     guest::SERVICE_GUEST_UUID,
-    guest_config::{Binding, Change, Configuration, Resources, host_memory_kib},
+    guest_config::{Binding, Change, Configuration, Resources},
 };
 use rustix::fs::{Mode, OFlags, openat};
 use rustix::io::Errno;
 use serde::Serialize;
 
-use crate::{Result, channel, guest_configuration, handoff, invalid, state, valid_digest};
+use crate::{Result, channel, guest_configuration, handoff, invalid, valid_digest};
 
 use super::protocol::{self, Enrollment, Operation, Plan, Refusal, Settings};
 
@@ -222,17 +222,7 @@ pub(super) fn submit(
     if current == intent.resources {
         return Err(Refusal::InvalidConfigurationPlan);
     }
-    let meminfo = state::read(Path::new("/proc/meminfo"), 64 * 1024)
-        .map_err(|_| Refusal::HostStateUnavailable)?;
-    let total = std::str::from_utf8(&meminfo)
-        .ok()
-        .and_then(|value| host_memory_kib(value, "MemTotal:").ok())
-        .ok_or(Refusal::HostStateUnavailable)?;
-    let cpus = std::thread::available_parallelism().map_err(|_| Refusal::HostStateUnavailable)?;
-    intent
-        .resources
-        .require_capacity(cpus.get(), total)
-        .map_err(|_| Refusal::OutsideHostCapacity)?;
+    super::require_guest_capacity(intent.resources)?;
     let mut contents = RECORD_SCHEMA.to_vec();
     contents.extend_from_slice(&now.to_be_bytes());
     contents.extend_from_slice(packet);
