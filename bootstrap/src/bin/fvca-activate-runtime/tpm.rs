@@ -1,10 +1,10 @@
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use super::{invalid, run};
+use super::{Token, invalid, run};
 
 const CRYPTSETUP: &str = "/usr/bin/cryptsetup";
 const HEADER: &str = "/run/cryptsetup/fvca-host-header";
@@ -38,13 +38,16 @@ pub(super) fn sha256(input: &[u8]) -> io::Result<String> {
     super::hash(digest).map(str::to_owned)
 }
 
-fn verify_header(uuid: &str, token: &str, expected: &str) -> io::Result<()> {
+fn verify_header(uuid: &str, token: &Token<'_>) -> io::Result<()> {
+    if fvca_initrd_bootstrap::recovery::sha256(File::open(HEADER)?)? != token.header {
+        return Err(invalid("LUKS2 header differs from the signed Host storage selection"));
+    }
     let identity = output(Command::new(CRYPTSETUP).args(["luksUUID", HEADER]))?;
     if identity.strip_suffix(b"\n") != Some(uuid.as_bytes()) {
         return Err(invalid("copied LUKS2 header UUID does not match the signed selection"));
     }
-    let json = output(Command::new(CRYPTSETUP).args(["token", "export", "--token-id", token, HEADER]))?;
-    if sha256(&json)? != expected {
+    let json = output(Command::new(CRYPTSETUP).args(["token", "export", "--token-id", token.index, HEADER]))?;
+    if sha256(&json)? != token.digest {
         return Err(invalid("LUKS2 TPM token does not match the signed selection"));
     }
     Ok(())
@@ -79,7 +82,7 @@ fn activate(source: &Path, mapper: &str, token: &str, mode: Mode) -> io::Result<
     }
 }
 
-pub(super) fn unlock(source: &Path, mapper: &str, uuid: &str, token: &str, expected: &str, mode: Mode) -> io::Result<()> {
+pub(super) fn unlock(source: &Path, mapper: &str, uuid: &str, token: &Token<'_>, mode: Mode) -> io::Result<()> {
     if !fs::metadata("/dev/tpmrm0").is_ok_and(|dev| dev.file_type().is_char_device()) {
         return Err(invalid("TPM resource manager device is required"));
     }
@@ -94,8 +97,8 @@ pub(super) fn unlock(source: &Path, mapper: &str, uuid: &str, token: &str, expec
     // the block device cannot substitute a different token during unlock.
     let result = run(Command::new(CRYPTSETUP)
         .arg("luksHeaderBackup").arg(source).args(["--header-backup-file", HEADER]))
-        .and_then(|()| verify_header(uuid, token, expected))
-        .and_then(|()| activate(source, mapper, token, mode));
+        .and_then(|()| verify_header(uuid, token))
+        .and_then(|()| activate(source, mapper, token.index, mode));
     let cleanup = fs::remove_file(HEADER);
     result?;
     if let Err(error) = cleanup {

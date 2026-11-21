@@ -27,6 +27,7 @@ struct Member<'a> {
 struct Token<'a> {
     index: &'a str,
     digest: &'a str,
+    header: &'a str,
 }
 
 struct TpmUnlock<'a> {
@@ -52,18 +53,20 @@ fn member<'a>(field: &'a str, prefix: &str) -> io::Result<Member<'a>> {
 }
 
 fn token<'a>(field: &'a str, prefix: &str) -> io::Result<Token<'a>> {
-    let (index, digest) = field.strip_prefix(prefix).and_then(|value| value.split_once(','))
+    let (index, digests) = field.strip_prefix(prefix).and_then(|value| value.split_once(','))
         .ok_or_else(|| invalid("missing TPM token authorization"))?;
+    let (digest, header) = digests.split_once(',')
+        .ok_or_else(|| invalid("missing reviewed LUKS2 header authorization"))?;
     let number = index.parse::<u8>().map_err(|_| invalid("invalid TPM token index"))?;
     if number > 31 || number.to_string() != index {
         return Err(invalid("invalid TPM token index"));
     }
-    Ok(Token { index, digest: hash(digest)? })
+    Ok(Token { index, digest: hash(digest)?, header: hash(header)? })
 }
 
 fn selection(text: &str) -> io::Result<Selection<'_>> {
     let fields: Vec<_> = text.split('\n').collect();
-    let ["FVCA-HOST-STORAGE-4", unlock, protection, a, b, "filesystem=btrfs", filesystem, rest @ ..] =
+    let ["FVCA-HOST-STORAGE-5", unlock, protection, a, b, "filesystem=btrfs", filesystem, rest @ ..] =
         fields.as_slice()
     else {
         return Err(invalid("malformed Hypervisor storage selection"));
@@ -83,8 +86,8 @@ fn selection(text: &str) -> io::Result<Selection<'_>> {
         (profile @ ("unlock=tpm2-auto" | "unlock=tpm2-pin"), [a, b, ""]) => {
             let a = token(a, "token_a=")?;
             let b = token(b, "token_b=")?;
-            if a.digest == b.digest {
-                return Err(invalid("storage members require separate TPM tokens"));
+            if !authenticated || a.digest == b.digest || a.header == b.header {
+                return Err(invalid("TPM storage requires authenticated members with separate token and header authorization"));
             }
             let mode = if profile == "unlock=tpm2-auto" { tpm::Mode::Auto } else { tpm::Mode::Pin };
             Some(TpmUnlock { mode, tokens: [a, b] })
@@ -147,7 +150,7 @@ fn open_data(selection: &Selection<'_>, sources: &[PathBuf; 2]) -> io::Result<()
             let mapper = MAPPERS[index];
             if let Some(tpm) = &selection.tpm {
                 let token = &tpm.tokens[index];
-                tpm::unlock(source, mapper, selection.members[index].luks, token.index, token.digest, tpm.mode)?;
+                tpm::unlock(source, mapper, selection.members[index].luks, token, tpm.mode)?;
             } else {
                 unlock_development(source, mapper)?;
             }

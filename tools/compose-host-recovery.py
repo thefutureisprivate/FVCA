@@ -2,7 +2,6 @@
 """Authorize shell-free assessment, header restoration, or mirror replacement."""
 
 import argparse
-import json
 from pathlib import Path
 import re
 import shutil
@@ -12,7 +11,7 @@ import time
 
 from core_image import extract_uki_section, inspect_uki
 from guest_boot_bundle import public_key, sha256
-from host_storage import AUTHENTICATED, authenticated_header, selection, unique_fields
+from host_storage import AUTHENTICATED, SUPPORT, copy_header, independent_recovery_slot, selection, tpm_enrollment
 from runtime_boot import DISABLE_AUTOMATIC_EXTENSIONS, SECURE_KERNEL_OPTIONS, build_uki, run, verify_initrd
 
 
@@ -31,7 +30,7 @@ COMMAND_LINE = " ".join((
     "module_blacklist=igb,igc,virtio_net,kvm,kvm_intel,kvm_amd",
 ))
 REQUIRED = (
-    "usr/lib/fvca/host-storage-support-v4",
+    SUPPORT,
     "usr/lib/fvca/host-recovery-write-barrier-v1",
     "usr/lib/fvca/host-recovery-header-media-v1",
     "usr/lib/fvca/host-mirror-replacement-v1",
@@ -46,29 +45,22 @@ FORBIDDEN = (
 )
 
 
-def inspect_header(path, member, slot, work):
+def inspect_header(path, member, unlock, slot, work):
     backup = work / "header"
-    if not path.is_file() or not 0 < path.stat().st_size <= 128 * 1024**2:
-        raise ValueError("expected a bounded LUKS2 header backup")
-    shutil.copyfile(path, backup)
-    if run("cryptsetup", "luksUUID", backup, capture_output=True).stdout != (member.volume + "\n").encode("ascii"):
-        raise ValueError("recovery header has a different LUKS UUID")
-    metadata = json.loads(run("cryptsetup", "luksDump", "--dump-json-metadata", backup, capture_output=True).stdout,
-                          object_pairs_hook=unique_fields)
-    payload_offset = authenticated_header(metadata)
     slot = str(slot)
-    if (slot not in metadata["keyslots"]
-            or any(slot in token["keyslots"] for token in metadata["tokens"].values())):
+    header = copy_header(path, backup, member)
+    public = None
+    if member.token_index is not None:
+        public, enrolled_slot = tpm_enrollment(header, member, unlock)
+        if enrolled_slot != slot:
+            raise ValueError("selected recovery slot differs from the independent enrollment")
+    elif not independent_recovery_slot(header.metadata, slot):
         raise ValueError("recovery requires an independent LUKS2 keyslot")
-    config = metadata["config"]
-    header_extent = 2 * (4096 + int(config["json_size"])) + int(config["keyslots_size"])
-    size = backup.stat().st_size
-    digest = sha256(backup)
     backup.unlink()
-    return digest, size, header_extent, payload_offset
+    return header, public
 
 
-def replacement_selection(args, storage, index, work):
+def replacement_selection(args, storage, index, survivor_key, work):
     if args.replacement_storage is None:
         return "none"
     planned = selection(args.replacement_storage)
@@ -79,9 +71,11 @@ def replacement_selection(args, storage, index, work):
             or new.partition in {member.partition for member in storage.members}
             or new.volume in {member.volume for member in storage.members}):
         raise ValueError("replacement storage must preserve the survivor and authorize one new authenticated member")
-    digest, _, _, _ = inspect_header(args.replacement_header_backup, new, args.replacement_key_slot, work)
+    header, public = inspect_header(args.replacement_header_backup, new, planned.unlock, args.replacement_key_slot, work)
+    if public != survivor_key:
+        raise ValueError("replacement and survivor must use the same enrolled PCR policy key")
     return ",".join((failed.partition, str(args.missing_devid), args.missing_member_uuid,
-                     new.partition, new.volume, digest, str(args.replacement_key_slot)))
+                     new.partition, new.volume, header.digest, str(args.replacement_key_slot)))
 
 
 def authorization(args, work):
@@ -90,18 +84,18 @@ def authorization(args, work):
         raise ValueError("recovery requires an authorized authenticated Host mirror")
     index = "ab".index(args.member)
     member = storage.members[index]
-    digest, size, header_extent, payload_offset = inspect_header(args.header_backup, member, args.key_slot, work)
+    header, public = inspect_header(args.header_backup, member, storage.unlock, args.key_slot, work)
     media = "none"
     if args.header_media_partuuid is not None:
         if args.header_media_partuuid in {item.partition for item in storage.members}:
             raise ValueError("the backup header requires a separate media partition")
-        if size != header_extent or size != payload_offset or size % 4096:
+        if header.size != header.payload_offset:
             raise ValueError("the backup must cover exactly the aligned LUKS2 metadata and keyslot extent")
-        media = f"{args.header_media_partuuid},{size}"
-    replacement = replacement_selection(args, storage, index, work)
+        media = f"{args.header_media_partuuid},{header.size}"
+    replacement = replacement_selection(args, storage, index, public, work)
     now = int(time.time())
     return (f"FVCA-HOST-RECOVERY-3\npartition={member.partition}\nluks={member.volume}\n"
-            f"filesystem={storage.filesystem}\nheader_sha256={digest}\nkey_slot={args.key_slot}\n"
+            f"filesystem={storage.filesystem}\nheader_sha256={header.digest}\nkey_slot={args.key_slot}\n"
             f"header_media={media}\nrestore_from={args.restore_from_sha256 or 'none'}\n"
             f"replacement={replacement}\n"
             f"not_before={now}\nexpires={now + args.valid_seconds}\n")

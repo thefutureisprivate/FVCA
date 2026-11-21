@@ -2,7 +2,6 @@
 """Assemble a Secure Boot Hypervisor development disk without rewriting its core."""
 
 import argparse
-import base64
 import hashlib
 import ipaddress
 import json
@@ -39,7 +38,6 @@ import vm_runtime
 from workload_oci import parse_json, read_bytes
 
 
-PCR_POLICY_REFS = {"tpm2-auto": "fvca-host-storage-auto-v1", "tpm2-pin": "fvca-host-storage"}
 MANAGEMENT_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7",
 ))
@@ -59,34 +57,6 @@ ACTIVATION_FILES = (
     "usr/lib/systemd/system/initrd-parse-etc.service.d/20-fvca-runtime.conf",
     "usr/lib/systemd/system/initrd-switch-root.service.d/20-fvca-runtime.conf",
 )
-
-
-def verify_tpm_token(path, expected, pcr_public, unlock):
-    raw = path.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != expected:
-        raise ValueError("exported LUKS2 token does not match the signed storage selection")
-    token = json.loads(raw, object_pairs_hook=host_storage.unique_fields)
-    pin = unlock == "tpm2-pin"
-    if (
-        token["type"] != "systemd-tpm2"
-        or token.get("tpm2-pin", False) is not pin
-        or token["tpm2-pcrs"] != [7, 12, 13]
-        or token["tpm2-pcr-bank"] != "sha256"
-        or token["tpm2_pubkey_pcrs"] != [11]
-        or token["tpm2_pubkey_ref"] != PCR_POLICY_REFS[unlock]
-    ):
-        raise ValueError("LUKS2 token does not match the selected TPM unlock profile and PCR policy")
-    for parameter in ("memcost", "iterations", "lanes"):
-        field = f"tpm2_argon2id_{parameter}"
-        if not pin and field in token:
-            raise ValueError("the PIN-less LUKS2 token must omit PIN hardening parameters")
-        value = token.get(field)
-        if pin and (type(value) is not int or value < 1):
-            raise ValueError("the LUKS2 token must harden the PIN with Argon2id")
-    token_public = base64.b64decode(token["tpm2_pubkey"], validate=True)
-    if run("openssl", "pkey", "-pubin", "-outform", "DER",
-           input=token_public, capture_output=True).stdout != pcr_public:
-        raise ValueError("the enrolled PCR authority does not match the PCR signing key")
 
 
 def guest_selection(args, work):
@@ -464,11 +434,10 @@ def assemble(args, work):
         raise ValueError("standing boot trial authority requires PIN-less TPM storage")
     if args.firmware_update_owner is not None and not auto:
         raise ValueError("scheduled firmware discovery requires PIN-less TPM storage")
-    digests = [member.token_digest for member in storage.members] if storage is not None else (None, None)
-    tpm = digests[0] is not None
-    token_paths = (args.tpm_token_a, args.tpm_token_b)
-    if tpm != (args.pcr_key is not None) or any(tpm != (path is not None) for path in token_paths):
-        raise ValueError("TPM storage requires a separate PCR signing key and both exported LUKS2 tokens")
+    tpm = storage is not None and storage.members[0].token_index is not None
+    header_paths = (args.tpm_header_a, args.tpm_header_b)
+    if tpm != (args.pcr_key is not None) or any(tpm != (path is not None) for path in header_paths):
+        raise ValueError("TPM storage requires a separate PCR signing key and both approved LUKS2 header backups")
     epoch, epoch_arguments = epoch_selection(args.epoch_policy, storage, tpm)
     pcr_options = []
     if tpm:
@@ -478,11 +447,15 @@ def assemble(args, work):
                          capture_output=True).stdout
         if pcr_public == boot_public:
             raise ValueError("PCR policy and Secure Boot must use different signing keys")
-        for path, digest in zip(token_paths, digests, strict=True):
-            verify_tpm_token(path, digest, pcr_public, storage.unlock)
+        with tempfile.TemporaryDirectory(prefix="reviewed-headers-", dir=work) as scratch:
+            for path, member in zip(header_paths, storage.members, strict=True):
+                header = host_storage.copy_header(path, Path(scratch) / member.volume, member)
+                enrolled, _ = host_storage.tpm_enrollment(header, member, storage.unlock)
+                if enrolled != pcr_public:
+                    raise ValueError("the enrolled PCR authority does not match the PCR signing key")
         pcr_options = [
             f"--pcr-private-key={args.pcr_key}",
-            "--pcr-banks=sha256", "--phases=enter-initrd", f"--policyref={PCR_POLICY_REFS[storage.unlock]}",
+            "--pcr-banks=sha256", "--phases=enter-initrd", f"--policyref={host_storage.PCR_POLICY_REFS[storage.unlock]}",
         ]
     data = None
     if args.host_data_disk is not None:
@@ -534,7 +507,7 @@ def assemble(args, work):
         if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
             raise ValueError("the signed VM runtime lacks confined management services")
     if storage is not None:
-        required += ("usr/lib/fvca/host-storage-support-v4", "usr/bin/dmsetup",
+        required += (host_storage.SUPPORT, "usr/bin/dmsetup",
                      "usr/lib/udev/rules.d/12-fvca-host-storage.rules",
                      "usr/lib/fvca/storage-scrub-enrollment-v2")
     if auto:
@@ -744,7 +717,7 @@ def main():
     parser.add_argument("--retention-policy", type=Path, help="authorize local capture expiry against the selected repository")
     parser.add_argument("--pcr-key", type=Path, help="separate RSA private key for the initrd PCR policy")
     for member in ("a", "b"):
-        parser.add_argument(f"--tpm-token-{member}", type=Path, help=f"exported LUKS2 token for member {member}")
+        parser.add_argument(f"--tpm-header-{member}", type=Path, help=f"approved LUKS2 header backup for member {member}")
     args = parser.parse_args()
     if args.managed_guest_commissioning and (args.guest_commissioning_seed is None or args.management_enrollment is None):
         parser.error("managed commissioning requires an authorized seed and management enrollment")

@@ -738,9 +738,9 @@ Run `tests/check-guest-os-update.py` with the TUF fixture environment, a disposa
 
 ## Development Hypervisor storage
 
-The Hypervisor assembler accepts `--storage tests/host-storage.conf` for the disposable storage fixture. The signed `FVCA-HOST-STORAGE-4` record fixes the protection and unlock modes, the GPT and LUKS2 UUID of each member, and the shared Btrfs filesystem UUID. The initramfs checks both partitions and their LUKS2 identities before prompting on the console, then verifies that each decrypted mapping is backed by its authorized partition on a separate disk.
+The Hypervisor assembler accepts `--storage tests/host-storage.conf` for the disposable storage fixture. The signed `FVCA-HOST-STORAGE-5` record fixes the protection and unlock modes, the GPT and LUKS2 UUID of each member, and the shared Btrfs filesystem UUID. The initramfs checks both partitions and their LUKS2 identities before prompting on the console, then verifies that each decrypted mapping is backed by its authorized partition on a separate disk.
 
-Btrfs mirrors data, metadata and system chunks across the two decrypted devices. The gate checks the actual devices and allocation profiles before enabling read-write access at `/run/fvca/host-data`. The mount uses `nodev,nosuid,noexec`, and the filesystem root must be owned by root with mode `0700`. Ordinary boot requires both authorized members. Physical TPM qualification and an authorized writable replacement workflow remain pending.
+Btrfs mirrors data, metadata and system chunks across the two decrypted devices. The gate checks the actual devices and allocation profiles before enabling read-write access at `/run/fvca/host-data`. The mount uses `nodev,nosuid,noexec`, and the filesystem root must be owned by root with mode `0700`. Ordinary boot requires both authorized members. Use the signed recovery image below for writable mirror replacement.
 
 On a Fedora KVM test machine with `cryptsetup`, `btrfs-progs`, `e2fsprogs` and `cpio` installed, the fixture creates fresh file-backed disks. It tests single-member recovery without Btrfs log replay and replaces the missing device with a freshly encrypted mapping. A writable degraded mount can allocate SINGLE chunks. The fixture restores those chunks to RAID1 in the isolated repair guest, then verifies every profile and scrubs the restored pool. Build the Hypervisor as above with the fixture selection added to the assembler command, then run the integration checks against the signed disk and its matching runtime. To qualify boot after replacement, compose a second UKI with the fixture's `replacement-storage.conf` and provide its disk as `--replacement-disk`. [Btrfs recovery mount options](https://btrfs.readthedocs.io/en/latest/ch-mount-options.html)
 
@@ -790,6 +790,8 @@ Keep the same signed backup carrier for retries. A rerun accepts the exact resto
 
 Use the separately trusted Secure Boot recovery machine. Record the original Btrfs device IDs and native member UUIDs during enrollment and retain this inventory with the protected header backups. Detach the failed disk. Prepare a blank replacement with the approved 4 KiB LUKS2 AES-XTS and HMAC-SHA256 integrity profile, its own GPT and LUKS identities, and an independent recovery keyslot. Its authenticated mapping must be at least as large as the missing Btrfs member. Review a new Host storage selection that preserves the survivor and substitutes the replacement. The replacement ceremony uses the survivor and replacement header backups and their independent console credentials.
 
+For a TPM-protected mirror, enroll the spare on the appliance's trusted maintenance boot using the existing PCR policy key and the procedure below. Export the spare's final header after reviewing its sole TPM token and separate recovery slot. The recovery composer checks both header backups against their signed storage selections and requires the same PCR policy key. The independent recovery machine only needs the two recovery credentials at the console.
+
 ```sh
 python3 tools/compose-host-recovery.py \
   --staged-uki fvca-obs-hypervisor.efi --staging-certificate obs-stage.crt \
@@ -808,7 +810,7 @@ The completed recovery converts only temporary SINGLE allocations to RAID1, veri
 
 ### Select the Host TPM unlock profile
 
-Select `unlock=tpm2-auto` for normal unattended operation or `unlock=tpm2-pin` for attended boot. After the Btrfs filesystem identity, add `token_a=INDEX,SHA256` and `token_b=INDEX,SHA256` to the storage selection. Each digest covers the exact `cryptsetup token export` output from that member. Pass the selection with `--storage`, the two exports with `--tpm-token-a` and `--tpm-token-b`, and the RSA PCR signing key with `--pcr-key`. The assembler checks the unlock profile, SHA-256 PCR bank, direct PCRs 7, 12 and 13, signed PCR 11, and policy reference. It signs PCR 11 only for the `enter-initrd` phase. [systemd-cryptenroll](https://www.freedesktop.org/software/systemd/man/262/systemd-cryptenroll.html)
+Select `unlock=tpm2-auto` for normal unattended operation or `unlock=tpm2-pin` for attended boot. After the Btrfs filesystem identity, add `token_a=INDEX,TOKEN_SHA256,HEADER_SHA256` and `token_b=INDEX,TOKEN_SHA256,HEADER_SHA256` to the storage selection. The digests cover the exact `cryptsetup token export` and `cryptsetup luksHeaderBackup` outputs. Pass the selection with `--storage`, the private backups with `--tpm-header-a` and `--tpm-header-b`, and the RSA PCR signing key with `--pcr-key`. The assembler checks one TPM keyslot and one independent recovery keyslot per member, the unlock profile, SHA-256 PCR bank, direct PCRs 7, 12 and 13, signed PCR 11, and policy reference. It signs PCR 11 only for the `enter-initrd` phase. The initramfs checks the entire private header copy before using the selected token. [systemd-cryptenroll](https://www.freedesktop.org/software/systemd/man/262/systemd-cryptenroll.html) · [cryptsetup header backup](https://man7.org/linux/man-pages/man8/cryptsetup-luksHeaderBackup.8.html)
 
 The PIN-less profile requires authenticated LUKS2 storage and a protected Hypervisor epoch on every release, including fallback and recovery. Use a fresh PCR signing key reserved for `fvca-host-storage-auto-v1` and a Secure Boot authority scoped to boot paths that enforce that epoch. The signed initramfs verifies a private copy of each LUKS2 header, then presents only the selected token to cryptsetup, with no input or network service. Attended enrollment uses `--tpm2-with-pin=yes`, Argon2id PIN hardening, and the separate `fvca-host-storage` policy purpose. Changing profiles requires a separately authorized enrollment and verification of historical unlock paths.
 
@@ -824,7 +826,8 @@ for member in a b; do
     --tpm2-pcrs=7:sha256+12:sha256+13:sha256 --tpm2-public-key=pcr-public.pem \
     --tpm2-public-key-pcrs=11 --tpm2-public-key-policyref=fvca-host-storage-auto-v1
   cryptsetup token export --token-id=0 "$partition" > "token-${member}.json"
-  sha256sum "token-${member}.json"
+  cryptsetup luksHeaderBackup "$partition" --header-backup-file "member-${member}.header"
+  sha256sum "token-${member}.json" "member-${member}.header"
 done
 ```
 
