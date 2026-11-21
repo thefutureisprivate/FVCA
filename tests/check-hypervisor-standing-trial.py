@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from uuid import UUID
 
 
-INSTALL = b"""#!/bin/bash
+MOUNT = b"""#!/bin/bash
 set -Eeuo pipefail
 export PATH=/usr/bin
 trap 'echo FVCA_TRIAL_FIXTURE_FAILED; poweroff -f' ERR
@@ -29,15 +29,27 @@ for module in dm_crypt dm_integrity authenc hmac xts; do modprobe "$module"; don
 umask 077
 for side in a b; do
     [[ $(</sys/block/vd$side/serial) == fvca-trial-$side ]]
-    cryptsetup open --type luks2 --key-file=/storage.key "/dev/vd${side}1" "fvca-trial-$side"
+    key=/storage.key
+    if [[ -f /$side.key ]]; then key=/$side.key; fi
+    cryptsetup open --type luks2 --key-file="$key" "/dev/vd${side}1" "fvca-trial-$side"
 done
 mount -t btrfs -o device=/dev/mapper/fvca-trial-b /dev/mapper/fvca-trial-a /mnt
 [[ -d /sys/fs/btrfs/$filesystem_uuid ]]
+"""
+FINISH = b"""sync
+umount /mnt
+echo FVCA_TRIAL_FIXTURE_INSTALLED
+poweroff -f
+"""
+INSTALL = b"""
 mkdir -m 0700 /mnt/boot-trials
-if [[ -f /invalid-envelope ]]; then
+if [[ -f /online ]]; then
     cp /envelope /mnt/boot-trials/test-trial
-    cp /invalid-envelope /mnt/boot-trials/test-invalid-trial
-    chmod 0600 /mnt/boot-trials/test-{trial,invalid-trial}
+    chmod 0600 /mnt/boot-trials/test-trial
+    if [[ -f /invalid-envelope ]]; then
+        cp /invalid-envelope /mnt/boot-trials/test-invalid-trial
+        chmod 0600 /mnt/boot-trials/test-invalid-trial
+    fi
 else
     cp /envelope /mnt/boot-trials/pending-trial
     chmod 0600 /mnt/boot-trials/pending-trial
@@ -49,14 +61,37 @@ if [[ -b /dev/vdc ]]; then
     cp --sparse=always /dev/vdc /mnt/vms/service-guest/data.raw
     chmod 0600 /mnt/vms/service-guest/data.raw
 fi
-sync
-umount /mnt
-echo FVCA_TRIAL_FIXTURE_INSTALLED
-poweroff -f
+"""
+READBACK = rb"""
+. /readback-expected
+shopt -s nullglob
+records=(/mnt/boot-trials/"$transaction".forced-stop-*)
+if [[ $expected == 1 ]]; then
+    [[ ${#records[@]} == 2 ]]
+    [[ ${records[1]} == "${records[0]}.intent" ]]
+    [[ $(<"${records[0]}") == "$(<"${records[1]}")"$'\nachieved_consistency=crash-consistent' ]]
+    [[ $(<"${records[0]}") == *$'\nsecurity_deadline='"$deadline"$'\n'* ]]
+    [[ $(<"${records[0]}") == *$'\nrequested_consistency=crash-consistent\n'* ]]
+    cat "${records[0]}"
+else
+    [[ ${#records[@]} == 0 ]]
+    [[ -s /mnt/vms/data-attachment ]]
+fi
+echo FVCA_SECURITY_DRAIN_READBACK_OK
 """
 
 
-def install(args, output, members, envelope, seed=None):
+def install(args, output, members, envelope, seed=None, *, live=False):
+    online = args.online_handoff and seed is not None
+    files = {"envelope": envelope}
+    if online or live:
+        files["online"] = b""
+    if online:
+        files["invalid-envelope"] = bytes([envelope[0] ^ 1]) + envelope[1:]
+    maintenance(args, output, members, INSTALL, files, seed)
+
+
+def maintenance(args, output, members, script, files, seed=None):
     with tempfile.TemporaryDirectory(prefix="fvca-trial-fixture-") as work:
         root = Path(work)
         archive = root / "archive"
@@ -65,11 +100,10 @@ def install(args, output, members, envelope, seed=None):
             subprocess.run(["cpio", "--quiet", "-id", "--no-absolute-filenames", "--no-preserve-owner"],
                            cwd=archive, input=source.read(), check=True)
         init = archive / "init"
-        init.write_bytes(INSTALL)
+        init.write_bytes(MOUNT + script + FINISH)
         init.chmod(0o755)
-        (archive / "envelope").write_bytes(envelope)
-        if args.online_handoff and seed is not None:
-            (archive / "invalid-envelope").write_bytes(bytes([envelope[0] ^ 1]) + envelope[1:])
+        for name, contents in files.items():
+            (archive / name).write_bytes(contents)
         listing = b"".join(os.fsencode(path.relative_to(archive)) + b"\0" for path in sorted(archive.rglob("*")))
         payload = subprocess.run(["cpio", "--quiet", "-o", "-0", "-H", "newc", "--owner=0:0"],
                                  cwd=archive, input=listing, stdout=subprocess.PIPE, check=True).stdout
@@ -139,26 +173,32 @@ def qualify(args):
     tx = str(args.transaction)
     args.output.mkdir(mode=0o700)
 
-    for label, key, expiry, stable_core, refusal in (
+    cases = (
         ("wrong-signature", args.wrong_key, ts + 1800, args.core,
          b"boot trial requires an independently signed approval"),
         ("expired", args.sign_key, ts - 1, args.core, b"standing trial is outside its signed validity interval"),
         ("different-stable", args.sign_key, ts + 1800, "a" * 64,
          b"standing trial differs from the running stable composition"),
         ("approved", args.sign_key, ts + 1800, args.core, None),
-    ):
+    )
+    if args.security_deadline:
+        cases = tuple((label, args.sign_key, ts + 1800, args.core, None)
+                      for label in ("deadline-due", "deadline-early", "clean-only"))
+    for label, key, expiry, stable_core, refusal in cases:
         output = args.output / label
         output.mkdir(mode=0o700)
+        deadline = {"deadline-due": ts - 1, "deadline-early": ts + 900}.get(label)
+        directive = "" if deadline is None else f"force_stop_after={deadline}\n"
         with tempfile.TemporaryDirectory(prefix="disposable-", dir=output) as work:
             work = Path(work)
-            variables = output / "vars.fd"
+            variables = work / "vars.fd"
             trial["prepare_vars"](args.variables, variables, first, second)
             body = work / "payload"
             body.write_text(
                 f"FVCA-HYPERVISOR-STANDING-TRIAL-2\nnot_before={ts-60}\nexpires={expiry}\n"
                 f"stable_epoch=1\ncandidate_epoch=2\nepoch_policy_sha256={args.epoch_policy}\n"
                 f"stable_core={stable_core}\nstable_runtime={args.runtime}\nstable_guest_bundle={args.guest}\n"
-                f"{binding}FVCA-HYPERVISOR-TRIAL-2\ntransaction={tx}\n"
+                f"{binding}{directive}FVCA-HYPERVISOR-TRIAL-2\ntransaction={tx}\n"
                 f"stable=000a,{first[1]['uuid'].lower()}\ncandidate=000b,{second[1]['uuid'].lower()}\n"
                 f"{esp}"
                 f"candidate_core={args.core}\ncandidate_runtime={args.runtime}\nguest_bundle={args.guest}\n",
@@ -171,10 +211,10 @@ def qualify(args):
             for member in members:
                 subprocess.run(["cp", "--reflink=auto", "--sparse=always", args.members / member.name, member], check=True)
             install(args, output / "install.log", members, envelope,
-                    args.seed if refusal is None else None)
+                    args.seed if refusal is None else None, live=args.security_deadline)
             options = SimpleNamespace(disk=stable, runtime=candidate, guest=False, output=output, variables=variables,
                                       nvme_boot=True, persistent_boot=True, boot_sector_size=4096,
-                                      no_default_devices=True, memory_mib=4096, trial_watchdog=True)
+                                      no_default_devices=True, memory_mib=8192, vcpus=4, trial_watchdog=True)
 
             def override():
                 entry = trial["Edk2VarStore"](variables).get_varlist().get("BootNext")
@@ -186,7 +226,8 @@ def qualify(args):
                     with storage["software_tpm"](args.tpm_state) as socket:
                         prompts, log = storage["boot"](options, f"{phase}-{retry}", None, *members,
                                                         firmware=args.firmware, tpm_socket=socket,
-                                                        firmware_timeout=35, timeout=260 if args.online_handoff else 115,
+                                                        firmware_timeout=35,
+                                                        timeout=260 if args.online_handoff or args.security_deadline else 115,
                                                         ready_marker=marker,
                                                         allow_reboot=allow_reboot)
                     if b"Kernel command line:" in log or override() != before:
@@ -204,18 +245,31 @@ def qualify(args):
             if refusal is not None:
                 log = boot("stable-refusal", b"FVCA_TRIAL_REFUSED " + refusal)
                 assert armed not in log and reboot_requested not in log and override() is None
+            elif args.security_deadline and label != "deadline-due":
+                timeout = b"libvirt did not confirm an orderly Guest shutdown"
+                log = boot("drain-refusal", timeout)
+                require_sequence(log, (b"FVCA_SERVICE_GUEST_READY", timeout), output)
+                assert b"FVCA_HYPERVISOR_GUEST_FORCED_STOP" not in log
+                assert b"FVCA_SERVICE_GUEST_STOPPED" not in log
+                assert armed not in log and reboot_requested not in log and override() is None
+                assert b"reboot: Restarting system" not in log
             else:
                 healthy = f"FVCA_TRIAL_HEALTH_RECORDED {tx}".encode()
                 log = boot("automatic-trial", healthy, allow_reboot=True)
-                if args.online_handoff:
+                if args.online_handoff or args.security_deadline:
                     live_log, live_reset, log = log.partition(b"reboot: Restarting system")
                     assert live_reset and armed not in live_log and reboot_requested not in live_log, output
                     drained = f"FVCA_HYPERVISOR_TRIAL_DRAINED {tx}".encode()
-                    markers = (b"FVCA_SERVICE_GUEST_READY", b"FVCA_ONLINE_TRIAL_INVALID_REFUSED",
-                               b"FVCA_ONLINE_TRIAL_CAPTURE_DEFERRED", b"FVCA_SERVICE_GUEST_STOPPED",
-                               drained, b"FVCA_SERVICE_GUEST_READY",
-                               b"FVCA_HYPERVISOR_ACTIVATION_RECOVERED", b"FVCA_SERVICE_GUEST_STOPPED",
-                               drained)
+                    if args.security_deadline:
+                        forced = f"FVCA_HYPERVISOR_GUEST_FORCED_STOP {tx} crash-consistent".encode()
+                        markers = (b"FVCA_SERVICE_GUEST_READY", b"FVCA_GUEST_ATTACHMENT_RECLAIMED", forced, drained)
+                        assert b"FVCA_SERVICE_GUEST_STOPPED" not in live_log
+                    else:
+                        markers = (b"FVCA_SERVICE_GUEST_READY", b"FVCA_ONLINE_TRIAL_INVALID_REFUSED",
+                                   b"FVCA_ONLINE_TRIAL_CAPTURE_DEFERRED", b"FVCA_SERVICE_GUEST_STOPPED",
+                                   drained, b"FVCA_SERVICE_GUEST_READY",
+                                   b"FVCA_HYPERVISOR_ACTIVATION_RECOVERED", b"FVCA_SERVICE_GUEST_STOPPED",
+                                   drained)
                     require_sequence(live_log, markers, output)
                 stable_log, reset, candidate_log = log.partition(b"reboot: Restarting system")
                 assert reset and reset not in candidate_log, output
@@ -234,20 +288,35 @@ def qualify(args):
                 assert override() is None
                 log = boot("stable-replay", f"FVCA_TRIAL_HEALTH_AVAILABLE {tx}".encode())
                 assert armed not in log and reboot_requested not in log and override() is None
+            if args.security_deadline:
+                expected = f"transaction={tx}\nexpected={int(label == 'deadline-due')}\ndeadline={deadline or 0}\n"
+                readback = output / "consistency-readback.log"
+                maintenance(args, readback, members, READBACK, {"readback-expected": expected.encode()})
+                assert b"FVCA_SECURITY_DRAIN_READBACK_OK" in readback.read_bytes()
         print(f"{label} passed", flush=True)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    for value in ("fixture", "members", "maintenance-initrd", "seed", "kernel", "firmware", "variables",
-                  "tpm-state", "sign-key", "wrong-key", "output"):
+    for value in ("fixture", "members", "maintenance-initrd", "kernel", "firmware", "variables",
+                  "tpm-state", "sign-key", "output"):
         parser.add_argument(f"--{value}", type=lambda path: Path(path).absolute(), required=True)
+    parser.add_argument("--seed", type=lambda path: Path(path).absolute())
+    parser.add_argument("--wrong-key", type=lambda path: Path(path).absolute())
     for value in ("epoch-policy", "core", "runtime", "guest"):
         parser.add_argument(f"--{value}", required=True)
     parser.add_argument("--transaction", type=UUID, required=True)
     parser.add_argument("--delivered-envelope", type=lambda path: Path(path).absolute(),
                         help="use the delivered packet for the approved boot case")
-    parser.add_argument("--online-handoff", action="store_true",
-                        help="start with a running Guest using a stable UKI with the online-trial lab unit")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--online-handoff", action="store_true",
+                      help="start with a running Guest using a stable UKI with the online-trial lab unit")
+    mode.add_argument("--security-deadline", action="store_true",
+                      help="qualify the due, future, and clean-only disposition with Guest shutdown RPC blocked")
     os.umask(0o077)
-    qualify(parser.parse_args())
+    args = parser.parse_args()
+    if args.security_deadline and args.delivered_envelope is not None:
+        parser.error("the security-deadline cases sign a fresh approval individually")
+    if not args.security_deadline and (args.seed is None or args.wrong_key is None):
+        parser.error("the standard standing trial matrix requires --seed and --wrong-key")
+    qualify(args)

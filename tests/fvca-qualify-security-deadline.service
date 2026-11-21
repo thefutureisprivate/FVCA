@@ -1,0 +1,14 @@
+[Unit]
+Description=Deliver a disposable standing trial to the running Hypervisor
+After=fvca-base-ready.service
+ConditionPathExists=/run/fvca/host-data/boot-trials/test-trial
+ConditionPathExists=!/run/fvca/host-data/boot-trials/pending-trial
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:init_t:s0
+UMask=0077
+ExecStart=/usr/bin/cp /run/fvca/host-data/boot-trials/test-trial /run/fvca/host-data/boot-trials/pending-trial
+ExecStart=/usr/bin/systemctl --no-block start fvca-activate-hypervisor-trial.service
+StandardOutput=journal+console
+StandardError=journal+console
