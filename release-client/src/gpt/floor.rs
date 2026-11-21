@@ -12,7 +12,9 @@ use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use super::{Artifact, ReleaseEpoch, ReviewedDisk, check_sector, require_distinct_disks, reviewed};
+use super::{
+    Artifact, Disk, Layout, ReleaseEpoch, ReviewedDisk, check_sector, require_distinct_disks, reviewed,
+};
 use crate::{MANIFEST_BYTES, Result, Role, install, invalid, state, valid_digest};
 
 const MAX_APPROVAL_SECONDS: i64 = 24 * 60 * 60;
@@ -283,10 +285,7 @@ pub fn verify_floor(
             invalid("TPM floor advancement requires the two reviewed NVMe namespaces").into(),
         );
     }
-    for (slot, (disk, layout)) in [
-        (&approved.primary, &primary),
-        (&approved.recovery, &recovery),
-    ] {
+    let verify = |slot: &ApprovedSlot, (disk, layout): &(Disk, Layout<8>)| {
         let staged = state_dir.join("staged").join(&slot.manifest_sha256);
         install::verify(&staged, Role::Hypervisor, slot.epoch, &slot.manifest_sha256)?;
         Artifact::open(&staged, approved.sector_size)?.verify_installed(
@@ -298,12 +297,16 @@ pub fn verify_floor(
                 number: slot.epoch,
                 policy: &approved.epoch_policy_sha256,
                 auto_pcr_key: None,
+                storage_policy: None,
                 require_trial: false,
                 trial: None,
                 trial_key: None,
             },
-        )?;
-    }
+        )
+    };
+    let stable_loader = verify(&approved.primary, &primary)?;
+    let recovery_loader = verify(&approved.recovery, &recovery)?;
+    stable_loader.require_storage_pair(&recovery_loader, [&primary.1, &recovery.1])?;
     let approval_digest = hex::encode(Sha256::digest(&raw));
     // Both disk leases and the state lease remain live through the TPM readback.
     if let Some((increment_authority, policy_reference)) = increment {

@@ -13,6 +13,7 @@ import selectors
 import shutil
 import subprocess
 import time
+from uuid import uuid4
 
 from tuf.api.metadata import TargetFile
 
@@ -108,6 +109,7 @@ def qualify(args):
         ("wrong-candidate-epoch", following + 2, args.next_boot, args.next_runtime),
         ("wrong-recovery-epoch", following + 1, args.active_boot, args.active_runtime),
         ("wrong-policy", following + 4, args.wrong_policy_boot, args.next_runtime),
+        ("wrong-storage", following, args.wrong_storage_boot, args.next_runtime),
         ("missing-epoch", following, args.missing_epoch_boot, args.next_runtime),
     )
     for label, epoch, slot, runtime in releases:
@@ -177,6 +179,17 @@ def qualify(args):
     other_policy = ("a" if args.epoch_policy_sha256.startswith("b") else "b") * 64
     run("wrong-enrolled-policy", "next", review | {"epoch_policy_sha256": other_policy}, refusal=policy_error)
     run("wrong-policy", "wrong-policy", review, refusal=policy_error)
+    run("wrong-storage", "wrong-storage", review, refusal=b"different signed Host storage enrollments")
+    wrong_data = clone(inactive, root / "wrong-data-partition.raw")
+    try:
+        subprocess.run(["sfdisk", "--sector-size", str(SECTOR), "--part-uuid", wrong_data, "8", str(uuid4())],
+                       stdout=subprocess.DEVNULL, check=True)
+        previous = sparse_fingerprint(wrong_data)
+        run("wrong-data-partition", "next", review | {"inactive": inspect(wrong_data)},
+            refusal=b"signed Host storage partitions differ from the reviewed NVMe data partitions")
+        assert sparse_fingerprint(wrong_data) == previous
+    finally:
+        wrong_data.unlink()
     run("missing-epoch", "missing-epoch", review, refusal=b"expected one epoch and TPM policy")
     broken = clone(active, root / "damaged-recovery.raw")
     with broken.open("r+b") as stream:
@@ -236,7 +249,8 @@ def qualify(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("client", "active", "inactive", "active-boot", "next-boot", "active-runtime", "next-runtime",
-                 "wrong-runtime", "wrong-policy-boot", "missing-epoch-boot", "guest", "boot-certificate", "output"):
+                 "wrong-runtime", "wrong-policy-boot", "wrong-storage-boot", "missing-epoch-boot",
+                 "guest", "boot-certificate", "output"):
         parser.add_argument(f"--{name}", type=lambda path: Path(path).absolute(), required=True)
     parser.add_argument("--active-epoch", type=int, required=True)
     parser.add_argument("--next-epoch", type=int, required=True)

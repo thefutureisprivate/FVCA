@@ -10,6 +10,7 @@ from pathlib import Path
 import runpy
 import subprocess
 import time
+from uuid import uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -96,6 +97,16 @@ def qualify(args):
         altered = deepcopy(plan)
         altered["recovery"]["disk"]["path"] = str(copied)
         run("damaged-recovery", altered, failure=b"installed Hypervisor payload differs")
+    finally:
+        copied.unlink()
+
+    copied = gpt["clone"](args.installer / "inactive.raw", args.output / "wrong-data-partition.raw")
+    try:
+        subprocess.run(["sfdisk", "--sector-size", "4096", "--part-uuid", copied, "8", str(uuid4())],
+                       stdout=subprocess.DEVNULL, check=True)
+        altered = plan | {"recovery": recovery | {"disk": disk_record(copied)}}
+        run("wrong-data-partition", altered,
+            failure=b"signed Host storage partitions differ from the reviewed NVMe data partitions")
     finally:
         copied.unlink()
 

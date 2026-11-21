@@ -166,6 +166,7 @@ def qualify(args):
         "boot_certificate_sha256": tuf["sha256"](args.certificate),
         "epoch_policy_sha256": (original / "epoch-policy-fingerprint").read_text().strip(),
         "storage_pcr_key_fingerprint": (original / "storage-pcr-fingerprint").read_text().strip(),
+        "storage_policy_sha256": (original / "storage-policy-sha256").read_text().strip(),
         "a": inspect(active), "b": inspect(inactive),
     }
     budget = sum(choice["max_release_bytes"] for choice in resolutions.values())
@@ -228,7 +229,13 @@ def qualify(args):
         run("pcr-authority-refusal", live | {"revision": 3, "hypervisor_gpt": wrong}, env,
             refusal=b"lacks the enrolled PIN-less PCR authorization")
     assert gpt["sparse_fingerprint"](inactive) == original_inactive
-    live = live | {"revision": 4}
+    installed_policy = disk_policy["storage_policy_sha256"]
+    with software_tpm(args.floor_one) as env:
+        wrong = disk_policy | {"storage_policy_sha256": ("a" if installed_policy.startswith("b") else "b") * 64}
+        run("storage-enrollment-refusal", live | {"revision": 4, "hypervisor_gpt": wrong}, env,
+            refusal=b"signed Host storage enrollment differs from standing authorization")
+    assert gpt["sparse_fingerprint"](inactive) == original_inactive
+    live = live | {"revision": 5}
 
     with software_tpm(args.floor_one) as env, selectors.DefaultSelector() as poll, subprocess.Popen(
         command(live), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -274,10 +281,10 @@ def qualify(args):
         assert not inbox.exists()
         with software_tpm(args.floor_one) as env:
             other = CryptoSigner.generate_ed25519().public_key.keyval["public"]
-            run("delivery-signature-refusal", live | {"revision": 5, "trial_key_ed25519": other}, env,
+            run("delivery-signature-refusal", live | {"revision": 6, "trial_key_ed25519": other}, env,
                 operation=deliver, refusal=b"invalid independent standing trial signature")
             assert not inbox.exists()
-            live = live | {"revision": 6}
+            live = live | {"revision": 7}
             inbox.parent.mkdir(mode=0o700)
             occupied = b"disposable competing inbox record"
             inbox.write_bytes(occupied)

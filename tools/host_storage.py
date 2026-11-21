@@ -17,6 +17,8 @@ from runtime_boot import run
 
 AUTHENTICATED = "luks2-xts-hmac-sha256"
 SUPPORT = "usr/lib/fvca/host-storage-support-v5"
+BOOT_BINDING_SUPPORT = "usr/lib/fvca/host-storage-boot-binding-v1"
+BOOT_ARGUMENT = "fvca.host_storage"
 PCR_POLICY_REFS = {"tpm2-auto": "fvca-host-storage-auto-v1", "tpm2-pin": "fvca-host-storage"}
 DATA_TYPE = "ca7d7ccb-63ed-4c53-861c-1742536059cc"
 DATA_PARTITION = {"host_data": DATA_TYPE}
@@ -38,6 +40,10 @@ class Selection:
     protection: str
     members: tuple[Member, Member]
     filesystem: str
+
+    def boot_argument(self):
+        digest = hashlib.sha256(self.raw).hexdigest()
+        return f"{BOOT_ARGUMENT}={digest}," + ",".join(member.partition for member in self.members)
 
 
 def selection(path):

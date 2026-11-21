@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use fvca_initrd_bootstrap::btrfs::{self, Pool};
 use fvca_initrd_bootstrap::storage_integrity::{self, sole_backing};
 use fvca_initrd_bootstrap::{find_partition, identity, invalid, run, sys_block, verify_superblock};
+use fvca_trial_authorization::host_storage;
 
 use super::hash;
 
@@ -188,13 +189,29 @@ pub(super) struct VerifiedStorage {
     pub automatic: bool,
 }
 
-pub(super) fn activate_if_selected(protected_epoch: bool) -> io::Result<Option<VerifiedStorage>> {
+pub(super) fn activate_if_selected(
+    cmdline: &str,
+    protected_epoch: bool,
+) -> io::Result<Option<VerifiedStorage>> {
+    let binding = host_storage::binding(cmdline)?;
     let policy = match fs::read_to_string(POLICY) {
         Ok(policy) => policy,
-        Err(error) if error.kind() == io::ErrorKind::NotFound && !protected_epoch => return Ok(None),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound && !protected_epoch && binding.is_none() =>
+        {
+            return Ok(None);
+        }
         Err(error) => return Err(error),
     };
     let selection = selection(&policy)?;
+    let policy_sha256 = tpm::sha256(policy.as_bytes())?;
+    if !binding.is_some_and(|binding| {
+        binding.digest == policy_sha256
+            && binding.partitions.each_ref().map(String::as_str)
+                == selection.members.each_ref().map(|member| member.partition)
+    }) {
+        return Err(invalid("signed Host storage selection differs from the UKI binding"));
+    }
     if protected_epoch && (!selection.authenticated || selection.tpm.is_none()) {
         return Err(invalid("a protected Hypervisor epoch requires authenticated TPM-bound Host storage"));
     }
@@ -205,7 +222,7 @@ pub(super) fn activate_if_selected(protected_epoch: bool) -> io::Result<Option<V
     let verified_storage = if selection.authenticated {
         Some(VerifiedStorage {
             filesystem: selection.filesystem.to_owned(),
-            policy_sha256: tpm::sha256(policy.as_bytes())?,
+            policy_sha256,
             automatic: protected_epoch && selection.tpm.as_ref().is_some_and(|tpm| tpm.mode == tpm::Mode::Auto),
         })
     } else {

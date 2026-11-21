@@ -507,7 +507,7 @@ def assemble(args, work):
         if marker.is_symlink() or not marker.is_file() or marker.stat().st_size != 0:
             raise ValueError("the signed VM runtime lacks confined management services")
     if storage is not None:
-        required += (host_storage.SUPPORT, "usr/bin/dmsetup",
+        required += (host_storage.SUPPORT, host_storage.BOOT_BINDING_SUPPORT, "usr/bin/dmsetup",
                      "usr/lib/udev/rules.d/12-fvca-host-storage.rules",
                      "usr/lib/fvca/storage-scrub-enrollment-v2")
     if auto:
@@ -634,12 +634,13 @@ def assemble(args, work):
     if any(arg.partition("=")[0] in (EPOCH_ARGUMENT, TRIAL_ARGUMENT, TRIAL_KEY_ARGUMENT, TRIAL_WATCHDOG_ARGUMENT,
                                     GUEST_CONFIG_ARGUMENT, GUEST_CONFIG_KEY_ARGUMENT, MANAGEMENT_ARGUMENT,
                                     MANAGEMENT_ADDRESS_ARGUMENT, HOST_NETWORK_ARGUMENT, HOST_WORKLOAD_ARGUMENT,
-                                    WORKLOAD_NETWORK_ARGUMENT)
+                                    WORKLOAD_NETWORK_ARGUMENT, host_storage.BOOT_ARGUMENT)
            for arg in cmdline.split()):
-        raise ValueError("shared core already configures a Hypervisor epoch, trial, Guest configuration or management")
+        raise ValueError("shared core already supplies a Hypervisor deployment binding")
+    storage_arguments = (storage.boot_argument(),) if storage is not None else ()
     cmdline = " ".join((add_kernel_policy(cmdline, HOST_KERNEL_OPTIONS), *ROLE_BOOT_OPTIONS, *epoch_arguments, *trial_arguments,
                         *trial_key_arguments, *watchdog_arguments, *resource_arguments, *configuration_key_arguments,
-                        *management_arguments, *network_arguments, *workload_arguments))
+                        *management_arguments, *network_arguments, *workload_arguments, *storage_arguments))
     immutable = None
     if ids is None:
         disk, _ = write_disk(args, work, offset, cmdline, uname, composition, uki_options=pcr_options)

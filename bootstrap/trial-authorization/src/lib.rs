@@ -14,6 +14,7 @@ pub mod firmware;
 pub mod guest;
 pub mod guest_config;
 pub mod host_network;
+pub mod host_storage;
 pub mod host_workload;
 pub mod workload_network;
 

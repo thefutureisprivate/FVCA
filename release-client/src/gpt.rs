@@ -16,8 +16,8 @@ use std::process::Command;
 
 use fvca_trial_authorization::guest_config::Policy as GuestPolicy;
 use fvca_trial_authorization::{
-    KEY_ARGUMENT, PEER_PARTITIONS, Standing, WATCHDOG_ARGUMENT, host_network, host_workload,
-    key_marker, watchdog_seconds,
+    KEY_ARGUMENT, PEER_PARTITIONS, Standing, WATCHDOG_ARGUMENT, host_network, host_storage,
+    host_workload, key_marker, watchdog_seconds,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -80,6 +80,7 @@ pub(crate) struct StandingSite {
     boot_certificate_sha256: String,
     epoch_policy_sha256: String,
     storage_pcr_key_fingerprint: String,
+    storage_policy_sha256: String,
     a: ReviewedDisk,
     b: ReviewedDisk,
 }
@@ -163,6 +164,7 @@ struct ReleaseEpoch<'a> {
     number: u64,
     policy: &'a str,
     auto_pcr_key: Option<&'a str>,
+    storage_policy: Option<&'a str>,
     require_trial: bool,
     trial: Option<&'a Standing<'a>>,
     trial_key: Option<&'a [u8]>,
@@ -175,9 +177,27 @@ struct VerifiedLoader {
     management_enrollment: Option<ManagementBinding>,
     host_network: Option<String>,
     host_workload: Option<String>,
+    host_storage: host_storage::Binding,
 }
 
 impl VerifiedLoader {
+    fn require_storage_pair(&self, peer: &Self, disks: [&Layout<8>; 2]) -> Result<()> {
+        if self.host_storage != peer.host_storage {
+            return Err(
+                invalid("the two boot paths carry different signed Host storage enrollments").into(),
+            );
+        }
+        let actual = disks.map(|layout| layout.regions[SLOT.len()].uuid.as_str());
+        let [first, second] = self.host_storage.partitions.each_ref().map(String::as_str);
+        if actual != [first, second] && actual != [second, first] {
+            return Err(invalid(
+                "signed Host storage partitions differ from the reviewed NVMe data partitions",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     fn require_host_configuration(
         &self,
         candidate: &Self,
@@ -227,6 +247,12 @@ impl VerifiedLoader {
             }
             let args = state::read(Path::new("/proc/cmdline"), 32 * 1024)?;
             let args = std::str::from_utf8(&args)?;
+            if host_storage::binding(args)?.as_ref() != Some(&self.host_storage) {
+                return Err(invalid(
+                    "the installed stable UKI differs from the running Host storage enrollment",
+                )
+                .into());
+            }
             if host_network::binding(args)? != self.host_network.as_deref() {
                 return Err(invalid(
                     "the installed stable UKI differs from the running Host uplink",
@@ -341,6 +367,7 @@ type BootBindings = (
     Option<ManagementBinding>,
     Option<String>,
     Option<String>,
+    host_storage::Binding,
 );
 
 fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<BootBindings> {
@@ -371,6 +398,13 @@ fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<BootBindings>
     }
     if let Some(fingerprint) = expected.auto_pcr_key {
         verify_auto_profile(pcrsig.as_deref(), fingerprint)?;
+    }
+    let storage = host_storage::binding(&cmdline)?
+        .ok_or_else(|| invalid("protected Hypervisor UKI lacks its signed Host storage enrollment"))?;
+    if expected.storage_policy.is_some_and(|digest| storage.digest != digest) {
+        return Err(
+            invalid("signed Host storage enrollment differs from standing authorization").into(),
+        );
     }
     if expected.require_trial {
         let mut markers = cmdline
@@ -422,6 +456,7 @@ fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<BootBindings>
             .map(|(digest, address)| (digest.to_owned(), address)),
         host_network::binding(&cmdline)?.map(str::to_owned),
         host_workload::binding(&cmdline)?.map(str::to_owned),
+        storage,
     ))
 }
 
@@ -469,7 +504,7 @@ fn loader(
         &[Path::new("--cert"), &fd_path(cert), &efi],
     )?;
     let signed = state::open_regular(&efi)?;
-    let (guest_configuration, management_enrollment, host_network, host_workload) =
+    let (guest_configuration, management_enrollment, host_network, host_workload, host_storage) =
         verify_epoch(&signed, epoch)?;
     let bytes = signed.metadata()?.len();
     let hash = digest(&signed, Extent { start: 0, bytes })?;
@@ -487,6 +522,7 @@ fn loader(
         management_enrollment,
         host_network,
         host_workload,
+        host_storage,
     })
 }
 
@@ -742,6 +778,7 @@ impl StandingSite {
                 number: epochs.1,
                 policy: &self.epoch_policy_sha256,
                 auto_pcr_key: Some(&self.storage_pcr_key_fingerprint),
+                storage_policy: Some(&self.storage_policy_sha256),
                 require_trial: true,
                 trial: Some(approval),
                 trial_key: Some(trial_key),
@@ -826,6 +863,7 @@ impl StandingSite {
                 number: active.1,
                 policy: &self.epoch_policy_sha256,
                 auto_pcr_key: Some(&self.storage_pcr_key_fingerprint),
+                storage_policy: Some(&self.storage_policy_sha256),
                 require_trial: false,
                 trial: None,
                 trial_key: Some(trial_key),
@@ -840,11 +878,13 @@ impl StandingSite {
                 number: selected.epoch,
                 policy: &self.epoch_policy_sha256,
                 auto_pcr_key: Some(&self.storage_pcr_key_fingerprint),
+                storage_policy: Some(&self.storage_policy_sha256),
                 require_trial: true,
                 trial: Some(approval),
                 trial_key: Some(trial_key),
             },
         )?;
+        stable_loader.require_storage_pair(&candidate_loader, [&stable_layout, &inactive_layout])?;
         stable_loader.require_host_configuration(&candidate_loader, running, guest_change)?;
         self.require_floor(active.1, selected.epoch)
     }
@@ -871,9 +911,10 @@ impl StandingSite {
         let (stable, recovery) = self.slots(active.0);
         if !valid_digest(&self.boot_certificate_sha256)
             || !valid_digest(&self.storage_pcr_key_fingerprint)
+            || !valid_digest(&self.storage_policy_sha256)
         {
             return Err(invalid(
-                "standing installation requires pinned boot and storage PCR authorities",
+                "standing installation requires pinned boot, storage PCR and enrollment policies",
             )
             .into());
         }
@@ -955,11 +996,15 @@ fn install_reviewed(
     let auto_pcr_key = standing
         .as_ref()
         .map(|authority| authority.site.storage_pcr_key_fingerprint.as_str());
+    let storage_policy = standing
+        .as_ref()
+        .map(|authority| authority.site.storage_policy_sha256.as_str());
     let live = standing.as_ref().and_then(|check| check.live.as_ref());
     let active_epoch = ReleaseEpoch {
         number: plan.active_epoch,
         policy: &plan.epoch_policy_sha256,
         auto_pcr_key,
+        storage_policy,
         require_trial: false,
         trial: None,
         trial_key: live.map(|trial| trial.trial_key),
@@ -968,6 +1013,7 @@ fn install_reviewed(
         number: selected.epoch,
         policy: &plan.epoch_policy_sha256,
         auto_pcr_key,
+        storage_policy,
         require_trial: standing.is_some(),
         trial: live.map(|trial| trial.approval),
         trial_key: live.map(|trial| trial.trial_key),
@@ -1021,6 +1067,7 @@ fn install_reviewed(
         scratch.path(),
         &next_epoch,
     )?;
+    stable_loader.require_storage_pair(&candidate_loader, [&active_layout, &inactive_layout])?;
     if standing.is_some() {
         stable_loader.require_host_configuration(
             &candidate_loader,
@@ -1111,6 +1158,13 @@ mod tests {
             revision,
             sha256: nibble.repeat(64),
         };
+        let storage = || host_storage::Binding {
+            digest: "a".repeat(64),
+            partitions: [
+                "641cc360-a531-45f8-ac75-31ccd7eafae1".into(),
+                "4acfd676-937a-4f34-93d3-cceba42fb9dc".into(),
+            ],
+        };
         let stable = VerifiedLoader {
             sha256: [1; 32],
             guest_configuration: GuestPolicy {
@@ -1120,6 +1174,7 @@ mod tests {
             management_enrollment: None,
             host_network: Some("f".repeat(64)),
             host_workload: Some("d".repeat(64)),
+            host_storage: storage(),
         };
         let candidate = |binding, authority| VerifiedLoader {
             sha256: [2; 32],
@@ -1127,6 +1182,7 @@ mod tests {
             management_enrollment: None,
             host_network: Some("f".repeat(64)),
             host_workload: Some("d".repeat(64)),
+            host_storage: storage(),
         };
         let enrolled = Some([3; 32]);
         let unchanged = candidate(Some(binding(9, "a")), enrolled);

@@ -114,7 +114,7 @@ fn activate() -> io::Result<()> {
     host_network::activate(&cmdline)?;
     host_workload::activate(&cmdline)?;
     runtime::install_development_probe("fvca-vm-runtime-probe.service", PROBE)?;
-    let storage = storage::activate_if_selected(protected_epoch)?;
+    let storage = storage::activate_if_selected(&cmdline, protected_epoch)?;
     let esp = slot.as_ref().map(|slot| slot.esp.as_str());
     let enroll_firmware = |recovery| {
         if let (Some(esp), Some(epoch), Some(storage)) =
