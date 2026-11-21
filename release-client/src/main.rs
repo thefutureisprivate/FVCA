@@ -484,6 +484,11 @@ fn run() -> Result<()> {
     {
         return gpt::verify_floor(state, approval, signature, authority, certificate, None);
     }
+    if let [option, state, approval, signature, authority, certificate] = operands.as_slice()
+        && option.as_os_str() == "--install-repaired-hypervisor-slot"
+    {
+        return gpt::install_repaired(state, approval, signature, authority, certificate);
+    }
     if let [
         option,
         state,
@@ -571,7 +576,7 @@ fn runtime() -> io::Result<tokio::runtime::Runtime> {
 }
 
 fn usage() -> io::Error {
-    let instructions = "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --discover-os-release TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE STANDING_POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY [--prepare-inactive-gpt | --deliver-prepared-trial | --activate-prepared-trial]\n       fvca-release-client --stage-host-firmware TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY [OBSERVATION | --live]\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE\n       fvca-release-client --verify-hypervisor-floor-approval PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE\n       fvca-release-client --advance-hypervisor-floor PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE INCREMENT_TPM_PUBLIC POLICY_REFERENCE\n       fvca-release-client --issue-boot-challenge TRUSTED_REFERENCE NEW_CHALLENGE\n       fvca-release-client --collect-boot-quote NONCE_HEX\n       fvca-release-client --appraise-boot-quote TRUSTED_REFERENCE PENDING_CHALLENGE EVIDENCE";
+    let instructions = "usage: fvca-release-client TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE SELECTION_JSON [--initialize-slots SLOTS | --prepare-inactive SLOTS ACTIVE_RECORD | --write-inactive-gpt PLAN]\n       fvca-release-client --discover-os-release TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE STANDING_POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY [--prepare-inactive-gpt | --deliver-prepared-trial | --activate-prepared-trial]\n       fvca-release-client --stage-host-firmware TRUSTED_ROOT DEPOT_CONFIG PRIVATE_STATE POLICY SIGNATURE OWNER_ED25519_PUBLIC_KEY [OBSERVATION | --live]\n       fvca-release-client --inspect-hypervisor-gpt DISK SECTOR_SIZE\n       fvca-release-client --install-repaired-hypervisor-slot PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE\n       fvca-release-client --verify-hypervisor-floor-approval PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE\n       fvca-release-client --advance-hypervisor-floor PRIVATE_STATE APPROVAL SIGNATURE ED25519_PUBLIC_KEY SECURE_BOOT_CERTIFICATE INCREMENT_TPM_PUBLIC POLICY_REFERENCE\n       fvca-release-client --issue-boot-challenge TRUSTED_REFERENCE NEW_CHALLENGE\n       fvca-release-client --collect-boot-quote NONCE_HEX\n       fvca-release-client --appraise-boot-quote TRUSTED_REFERENCE PENDING_CHALLENGE EVIDENCE";
     #[cfg(not(feature = "appliance"))]
     {
         invalid(&format!(

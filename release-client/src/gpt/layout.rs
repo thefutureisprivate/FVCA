@@ -189,6 +189,7 @@ impl Disk {
     pub(super) fn claim_partitions<const N: usize>(
         &self,
         regions: &[Region; N],
+        writable: bool,
     ) -> Result<[File; N]> {
         let disk = sys_block(self.file.metadata()?.rdev())?;
         let mut partitions = Vec::with_capacity(N);
@@ -201,7 +202,7 @@ impl Disk {
             }
             let file = OpenOptions::new()
                 .read(true)
-                .write(true)
+                .write(writable)
                 .custom_flags((DEVICE_FLAGS | OFlags::EXCL).bits() as i32)
                 .open(path)?;
             let opened = file.metadata()?;

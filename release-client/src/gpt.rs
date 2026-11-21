@@ -2,9 +2,11 @@
 
 mod floor;
 mod layout;
+mod repaired;
 mod uki;
 
 pub use floor::verify_floor;
+pub use repaired::install_repaired;
 
 use std::collections::HashSet;
 use std::fs::{self, File, Permissions};
@@ -128,7 +130,9 @@ impl<'a> WritableSlot<'a> {
         // The eighth partition contains Host data. Never open it for writing.
         let partitions = disk
             .physical
-            .then(|| disk.claim_partitions(layout.regions.first_chunk().expect("payload regions")))
+            .then(|| {
+                disk.claim_partitions(layout.regions.first_chunk().expect("payload regions"), true)
+            })
             .transpose()?;
         Ok(Self {
             disk,
@@ -163,11 +167,26 @@ impl<'a> WritableSlot<'a> {
 struct ReleaseEpoch<'a> {
     number: u64,
     policy: &'a str,
-    auto_pcr_key: Option<&'a str>,
+    storage_pcr: Option<(&'a str, StorageUnlock)>,
     storage_policy: Option<&'a str>,
-    require_trial: bool,
+    boot: BootRoute,
     trial: Option<&'a Standing<'a>>,
     trial_key: Option<&'a [u8]>,
+}
+
+#[derive(Clone, Copy)]
+enum BootRoute {
+    Either,
+    Trial,
+    Ordinary,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+enum StorageUnlock {
+    #[serde(rename = "tpm2-auto")]
+    Automatic,
+    #[serde(rename = "tpm2-pin")]
+    Attended,
 }
 
 #[derive(PartialEq, Eq)]
@@ -396,8 +415,8 @@ fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<BootBindings>
         )
         .into());
     }
-    if let Some(fingerprint) = expected.auto_pcr_key {
-        verify_auto_profile(pcrsig.as_deref(), fingerprint)?;
+    if let Some((fingerprint, unlock)) = expected.storage_pcr {
+        verify_pcr_profile(pcrsig.as_deref(), fingerprint, unlock)?;
     }
     let storage = host_storage::binding(&cmdline)?
         .ok_or_else(|| invalid("protected Hypervisor UKI lacks its signed Host storage enrollment"))?;
@@ -406,7 +425,17 @@ fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<BootBindings>
             invalid("signed Host storage enrollment differs from standing authorization").into(),
         );
     }
-    if expected.require_trial {
+    if matches!(expected.boot, BootRoute::Ordinary)
+        && cmdline.split_ascii_whitespace().any(|argument| {
+            matches!(
+                argument.split('=').next(),
+                Some(TRIAL_ARGUMENT | WATCHDOG_ARGUMENT)
+            )
+        })
+    {
+        return Err(invalid("repaired boot paths require ordinary Hypervisor loaders").into());
+    }
+    if matches!(expected.boot, BootRoute::Trial) {
         let mut markers = cmdline
             .split_ascii_whitespace()
             .filter(|arg| arg.split('=').next() == Some(TRIAL_ARGUMENT));
@@ -460,14 +489,24 @@ fn verify_epoch(efi: &File, expected: &ReleaseEpoch<'_>) -> Result<BootBindings>
     ))
 }
 
-fn verify_auto_profile(pcrsig: Option<&str>, fingerprint: &str) -> Result<()> {
-    let invalid_policy = || invalid("Hypervisor UKI lacks the enrolled PIN-less PCR authorization");
+fn verify_pcr_profile(pcrsig: Option<&str>, fingerprint: &str, unlock: StorageUnlock) -> Result<()> {
+    let (purpose, message) = match unlock {
+        StorageUnlock::Automatic => (
+            "fvca-host-storage-auto-v1",
+            "Hypervisor UKI lacks the enrolled PIN-less PCR authorization",
+        ),
+        StorageUnlock::Attended => (
+            "fvca-host-storage",
+            "Hypervisor UKI lacks the enrolled PIN-bound PCR authorization",
+        ),
+    };
+    let invalid_policy = || invalid(message);
     let raw = pcrsig.ok_or_else(invalid_policy)?;
     let policy: StoragePcrPolicy = serde_json::from_str(raw).map_err(|_| invalid_policy())?;
     let [bank] = policy.sha256;
     if bank.pcrs != [11]
         || bank.pkfp != fingerprint
-        || bank.purpose != "fvca-host-storage-auto-v1"
+        || bank.purpose != purpose
         || !valid_digest(&bank.pol)
         || bank.sig.is_empty()
     {
@@ -777,9 +816,9 @@ impl StandingSite {
             &ReleaseEpoch {
                 number: epochs.1,
                 policy: &self.epoch_policy_sha256,
-                auto_pcr_key: Some(&self.storage_pcr_key_fingerprint),
+                storage_pcr: Some((&self.storage_pcr_key_fingerprint, StorageUnlock::Automatic)),
                 storage_policy: Some(&self.storage_policy_sha256),
-                require_trial: true,
+                boot: BootRoute::Trial,
                 trial: Some(approval),
                 trial_key: Some(trial_key),
             },
@@ -862,9 +901,9 @@ impl StandingSite {
             &ReleaseEpoch {
                 number: active.1,
                 policy: &self.epoch_policy_sha256,
-                auto_pcr_key: Some(&self.storage_pcr_key_fingerprint),
+                storage_pcr: Some((&self.storage_pcr_key_fingerprint, StorageUnlock::Automatic)),
                 storage_policy: Some(&self.storage_policy_sha256),
-                require_trial: false,
+                boot: BootRoute::Either,
                 trial: None,
                 trial_key: Some(trial_key),
             },
@@ -877,9 +916,9 @@ impl StandingSite {
             &ReleaseEpoch {
                 number: selected.epoch,
                 policy: &self.epoch_policy_sha256,
-                auto_pcr_key: Some(&self.storage_pcr_key_fingerprint),
+                storage_pcr: Some((&self.storage_pcr_key_fingerprint, StorageUnlock::Automatic)),
                 storage_policy: Some(&self.storage_policy_sha256),
-                require_trial: true,
+                boot: BootRoute::Trial,
                 trial: Some(approval),
                 trial_key: Some(trial_key),
             },
@@ -993,9 +1032,12 @@ fn install_reviewed(
         }
         Ok(())
     };
-    let auto_pcr_key = standing
-        .as_ref()
-        .map(|authority| authority.site.storage_pcr_key_fingerprint.as_str());
+    let storage_pcr = standing.as_ref().map(|authority| {
+        (
+            authority.site.storage_pcr_key_fingerprint.as_str(),
+            StorageUnlock::Automatic,
+        )
+    });
     let storage_policy = standing
         .as_ref()
         .map(|authority| authority.site.storage_policy_sha256.as_str());
@@ -1003,18 +1045,22 @@ fn install_reviewed(
     let active_epoch = ReleaseEpoch {
         number: plan.active_epoch,
         policy: &plan.epoch_policy_sha256,
-        auto_pcr_key,
+        storage_pcr,
         storage_policy,
-        require_trial: false,
+        boot: BootRoute::Either,
         trial: None,
         trial_key: live.map(|trial| trial.trial_key),
     };
     let next_epoch = ReleaseEpoch {
         number: selected.epoch,
         policy: &plan.epoch_policy_sha256,
-        auto_pcr_key,
+        storage_pcr,
         storage_policy,
-        require_trial: standing.is_some(),
+        boot: if standing.is_some() {
+            BootRoute::Trial
+        } else {
+            BootRoute::Either
+        },
         trial: live.map(|trial| trial.approval),
         trial_key: live.map(|trial| trial.trial_key),
     };
@@ -1077,7 +1123,33 @@ fn install_reviewed(
     }
 
     let target = WritableSlot::claim(&inactive, &inactive_layout)?;
-    if inactive_layout.fingerprint(&inactive, sector)? != plan.inactive.gpt_sha256 {
+    install_payload(
+        &target,
+        &candidate,
+        sector,
+        &plan.inactive.gpt_sha256,
+        authorize,
+        events,
+    )?;
+    writeln!(
+        events,
+        "FVCA_HYPERVISOR_SLOT_INSTALLED {} {} {}",
+        selected.epoch, inactive_layout.id, selected.manifest_sha256
+    )?;
+    Ok(())
+}
+
+// Keep the target unbootable until every immutable payload has been written,
+// flushed and read back. The caller keeps the other disk and storage leased.
+fn install_payload(
+    target: &WritableSlot<'_>,
+    candidate: &Artifact,
+    sector: u64,
+    reviewed_gpt: &str,
+    authorize: impl Fn() -> Result<()>,
+    events: &mut impl Write,
+) -> Result<()> {
+    if target.layout.fingerprint(target.disk, sector)? != reviewed_gpt {
         return Err(invalid("inactive GPT changed while claiming its partitions").into());
     }
     let mut already_installed = true;
@@ -1099,7 +1171,7 @@ fn install_reviewed(
         writeln!(
             events,
             "FVCA_HYPERVISOR_ESP_INVALIDATED {}",
-            inactive_layout.id
+            target.layout.id
         )?;
         events.flush()?;
 
@@ -1119,7 +1191,7 @@ fn install_reviewed(
             candidate.write(esp, extent, 0)?;
             flush_for_readback(esp)?;
             if !candidate.matches(esp, extent, 0)?
-                || inactive_layout.fingerprint(&inactive, sector)? != plan.inactive.gpt_sha256
+                || target.layout.fingerprint(target.disk, sector)? != reviewed_gpt
             {
                 return Err(invalid(
                     "inactive EFI or GPT failed its post-write verification",
@@ -1139,11 +1211,6 @@ fn install_reviewed(
     } else {
         target.flush()?;
     }
-    writeln!(
-        events,
-        "FVCA_HYPERVISOR_SLOT_INSTALLED {} {} {}",
-        selected.epoch, inactive_layout.id, selected.manifest_sha256
-    )?;
     Ok(())
 }
 

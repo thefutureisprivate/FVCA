@@ -13,7 +13,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use super::{
-    Artifact, Disk, Layout, ReleaseEpoch, ReviewedDisk, check_sector, require_distinct_disks, reviewed,
+    Artifact, BootRoute, Disk, Layout, ReleaseEpoch, ReviewedDisk, check_sector,
+    require_distinct_disks, reviewed,
 };
 use crate::{MANIFEST_BYTES, Result, Role, install, invalid, state, valid_digest};
 
@@ -296,9 +297,9 @@ pub fn verify_floor(
             &ReleaseEpoch {
                 number: slot.epoch,
                 policy: &approved.epoch_policy_sha256,
-                auto_pcr_key: None,
+                storage_pcr: None,
                 storage_policy: None,
-                require_trial: false,
+                boot: BootRoute::Either,
                 trial: None,
                 trial_key: None,
             },

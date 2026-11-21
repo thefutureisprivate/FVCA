@@ -806,7 +806,53 @@ python3 tools/compose-host-recovery.py \
 
 The signed operation checks both raw identities and live header digests before it permits writable dm-integrity journal replay on the selected members. It verifies the authenticated mappings, checks the missing device and candidate capacity, and runs Btrfs device replacement in an isolated maintenance mount. If power is lost during copying, reboot the same authorized pair under a valid replacement authorization. The kernel can resume the committed operation when the matching temporary Btrfs target and surviving member are present. The recovery image verifies that state before enabling the resume.
 
-The completed recovery converts only temporary SINGLE allocations to RAID1, verifies both members and all allocation profiles, and runs bandwidth-limited scrubs on both. It reports `FVCA_HOST_MIRROR_REPLACED` after the pool is synchronized and unmounted. Use a separately approved normal Hypervisor boot image and the reviewed repaired storage selection to return the appliance to service. Keep the failed member's prior authorization and any historical copies subject to the storage retirement policy. [Btrfs device replacement](https://btrfs.readthedocs.io/en/latest/btrfs-replace.html) · [Btrfs balance filters](https://btrfs.readthedocs.io/en/latest/btrfs-balance.html)
+The completed recovery converts only temporary SINGLE allocations to RAID1, verifies both members and all allocation profiles, and runs bandwidth-limited scrubs on both. It reports `FVCA_HOST_MIRROR_REPLACED` after the pool is synchronized and unmounted. Retain the repair evidence for review before installing the repaired boot pair. Keep the failed member's prior authorization and any historical copies subject to the storage retirement policy. [Btrfs device replacement](https://btrfs.readthedocs.io/en/latest/btrfs-replace.html) · [Btrfs balance filters](https://btrfs.readthedocs.io/en/latest/btrfs-balance.html)
+
+### Install the Hypervisor boot pair after mirror repair
+
+Keep trusted recovery media available throughout. Run the release client from trusted maintenance media on the appliance with both NVMe namespaces offline and the appliance TPM available. The replacement needs the approved eight-partition layout and its repaired LUKS2 data member. Inspect both disks with `--inspect-hypervisor-gpt`. Stage the original survivor release and both new slot-specific releases through the verified release intake in the same private state directory. Compose the two new ordinary UKIs for the reviewed repaired storage selection with the existing epoch policy, TPM unlock profile, and storage PCR authority.
+
+Have the independent approval authority review the authenticated mirror-repair evidence and sign a `prepare-replacement` document. The following example shows the signed fields. Use verified digests, live floor, and epoch values for the appliance, and set the UTC Unix timestamps for a window of at most 24 hours.
+
+```json
+{
+  "schema": "fvca-hypervisor-repaired-slot-v1",
+  "phase": "prepare-replacement",
+  "valid_from": 1800000000,
+  "expires": 1800003600,
+  "sector_size": 4096,
+  "secure_boot_certificate_sha256": "CERTIFICATE_SHA256",
+  "epoch_policy_sha256": "EPOCH_POLICY_SHA256",
+  "floor": 17,
+  "unlock": "tpm2-auto",
+  "storage_pcr_key_fingerprint": "STORAGE_PCR_KEY_FINGERPRINT",
+  "previous_storage_policy_sha256": "PREVIOUS_STORAGE_SELECTION_SHA256",
+  "repaired_storage_policy_sha256": "REPAIRED_STORAGE_SELECTION_SHA256",
+  "mirror_repair_evidence_sha256": "APPROVED_MIRROR_REPAIR_EVIDENCE_SHA256",
+  "previous_survivor": {"epoch": 17, "manifest_sha256": "PREVIOUS_RELEASE_MANIFEST_SHA256"},
+  "survivor": {
+    "disk": {"path": "/dev/nvme0n1", "gpt_sha256": "SURVIVOR_GPT_SHA256"},
+    "release": {"epoch": 18, "manifest_sha256": "REPAIRED_SURVIVOR_MANIFEST_SHA256"}
+  },
+  "replacement": {
+    "disk": {"path": "/dev/nvme1n1", "gpt_sha256": "REPLACEMENT_GPT_SHA256"},
+    "release": {"epoch": 18, "manifest_sha256": "REPLACEMENT_RELEASE_MANIFEST_SHA256"}
+  }
+}
+```
+
+Provide the exact signed JSON, the raw 64-byte Ed25519 signature, the independent authority's trusted raw 32-byte public key and the pinned Secure Boot certificate.
+
+```sh
+fvca-release-client --install-repaired-hypervisor-slot /path/to/private-state \
+  approval.json approval.sig approval-authority.pub host-boot.crt
+```
+
+The first approval verifies the installed survivor and updates only the replacement boot partitions. Boot the replacement through the approved Secure Boot path and capture evidence that it activated the repaired authenticated Btrfs mirror. Have the independent authority verify that evidence against the installed release and the reviewed disk identities. Return to maintenance media and repeat the command with a freshly signed `complete-pair` approval that adds `replacement_boot_evidence_sha256`. The installer requires that signed reference and verifies the installed replacement against its approved artifacts before writing the survivor. Keep the approvals, repair record and boot evidence in protected custody.
+
+Each phase preserves both partition tables and both LUKS2 data partitions. If a write is interrupted, return to the maintenance media and repeat the same authorized phase. The installer removes its work files on exit and reclaims files left by a crash on the next authorized attempt. Each phase reads the live TPM floor and leaves it unchanged. Verify the pair before following the separate floor advancement procedure.
+
+`tests/check-hypervisor-repaired-install.py` exercises both phases with a release client built with `swtpm-test`. Supply software TPM states at floors 1 and 2 and signed 4096-byte-sector fixture images. The fixture directory contains `survivor.raw` with the installed epoch-1 slot, `replacement.raw` with an empty ESP, the `boot-previous.raw`, `boot-survivor.raw` and `boot-replacement.raw` boot artifacts, and the shared `vm-runtime.raw` and `guest-boot.raw` artifacts. Include `boot.crt`, `epoch-policy-fingerprint`, `storage-pcr-fingerprint`, `previous-storage-policy-sha256`, `repaired-storage-policy-sha256` and `unlock-profile`. The fixture checks signed approval, readback and interrupted writes with synthetic partition contents. Use the Hypervisor boot and Host storage tests to qualify actual unlock and mirror recovery.
 
 ### Select the Host TPM unlock profile
 
