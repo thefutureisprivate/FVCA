@@ -65,12 +65,25 @@ def export_tree(root, root_hash, destination, manifest):
     (destination / "packages.json").write_bytes(package_manifest)
 
 
+def export_initrd(work, destination):
+    initrd = work / "initrd"
+    subprocess.run(
+        ["ukify", f"--section=.initrd:binary@{initrd}", "inspect", work / "boot.efi"],
+        check=True, stdout=subprocess.DEVNULL,
+    )
+    if not initrd.stat().st_size:
+        raise ValueError("the verified UKI has an empty initramfs")
+    with initrd.open("rb") as source, destination.open("xb") as output:
+        shutil.copyfileobj(source, output)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image", type=lambda value: Path(value).resolve())
     parser.add_argument("boot_certificate", type=Path)
     parser.add_argument("--verity-certificate", type=Path, help="defaults to the boot certificate")
     parser.add_argument("--extract-root", type=Path, help="prepare a new runtime build input directory")
+    parser.add_argument("--extract-initrd", type=Path, help="write the verified UKI's initramfs to a new file")
     parser.add_argument("--direct-boot", action="store_true", help="verify the signed Service Guest direct-boot options")
     args = parser.parse_args()
     required_tools = ["mcopy", "openssl", "sbverify", "sfdisk", "ukify", "veritysetup"]
@@ -87,6 +100,8 @@ def main():
                                work, direct_boot=args.direct_boot)
             if args.extract_root:
                 export_tree(work / "root", root_hash, args.extract_root, args.image.with_suffix(".manifest"))
+            if args.extract_initrd:
+                export_initrd(work, args.extract_initrd)
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
         print(f"FVCA image verification failed: {error}", file=sys.stderr)
         return 1
