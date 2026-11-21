@@ -1,5 +1,7 @@
 //! Discover exact OS compositions under standing owner and qualification authority.
 
+#[cfg(not(feature = "appliance"))]
+pub(super) mod author;
 mod guest;
 mod observation;
 
@@ -129,7 +131,7 @@ struct Active {
     manifest_sha256: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Head {
     schema: String,
@@ -250,6 +252,26 @@ impl Policy {
             return Err(invalid("invalid or expired standing OS update policy").into());
         }
         self.maintenance.timezone()
+    }
+
+    fn authorities(&self, owner: &[u8]) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+        let qualification = hex::decode(&self.qualification_key_ed25519)?;
+        let trial = self
+            .trial_key_ed25519
+            .as_ref()
+            .map(hex::decode)
+            .transpose()?;
+        if qualification == owner
+            || trial
+                .as_ref()
+                .is_some_and(|key| *key == owner || *key == qualification)
+        {
+            return Err(invalid(
+                "owner, qualification and trial authorities must use distinct keys",
+            )
+            .into());
+        }
+        Ok((qualification, trial))
     }
 }
 
@@ -552,21 +574,7 @@ pub async fn discover(
     if matches!(operation, Operation::ScheduleGuest(_)) && policy.role != Role::ServiceGuest {
         return Err(invalid("scheduled Guest updates require a Service Guest policy").into());
     }
-    let qualification = hex::decode(&policy.qualification_key_ed25519)?;
-    let trial_key = policy
-        .trial_key_ed25519
-        .as_ref()
-        .map(hex::decode)
-        .transpose()?;
-    if qualification == owner
-        || trial_key
-            .as_ref()
-            .is_some_and(|key| *key == owner || *key == qualification)
-    {
-        return Err(
-            invalid("owner, qualification and trial authorities must use distinct keys").into(),
-        );
-    }
+    let (qualification, trial_key) = policy.authorities(&owner)?;
     let initial_root = state::read(trusted_root, METADATA_BYTES)?;
     let config = state::read(config, CONFIG_BYTES)?;
     if digest(&initial_root) != policy.tuf_root_sha256

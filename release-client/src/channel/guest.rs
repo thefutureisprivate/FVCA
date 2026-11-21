@@ -73,7 +73,7 @@ struct Running {
     approval_sha256: Option<String>,
 }
 
-fn signed<'a>(key: &[u8], envelope: &'a [u8]) -> Result<boot::Trial<'a>> {
+pub(super) fn signed<'a>(key: &[u8], envelope: &'a [u8]) -> Result<boot::Trial<'a>> {
     let (proof, body) = envelope
         .split_first_chunk::<64>()
         .ok_or_else(|| invalid("truncated Guest trial envelope"))?;

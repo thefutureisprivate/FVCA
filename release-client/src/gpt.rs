@@ -55,6 +55,16 @@ const MAX_ESP: u64 = 4 * 1024 * 1024 * 1024;
 const EPOCH_ARGUMENT: &str = "fvca.hypervisor_epoch";
 const TRIAL_ARGUMENT: &str = "fvca.hypervisor_trial";
 
+#[cfg(not(feature = "appliance"))]
+pub(crate) fn require_guest_trial_root(file: &File, root: &str) -> Result<()> {
+    let layout = Layout::read(file, file.metadata()?.len(), 512, DDI)?;
+    let actual = format!("{}{}", layout.regions[0].uuid, layout.regions[1].uuid).replace('-', "");
+    if actual != root {
+        return Err(invalid("packed Guest verity root differs from the qualified trial").into());
+    }
+    Ok(())
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReviewedDisk {
@@ -534,22 +544,13 @@ impl Artifact {
         stable: &Layout<8>,
         inactive: &Layout<8>,
     ) -> Result<()> {
-        let authorized = &approval.authorization;
-        if authorized.trial.stable.esp != stable.regions[0].uuid
-            || authorized.trial.candidate.esp != inactive.regions[0].uuid
-            || authorized.bytes != inactive.regions[0].extent.bytes
-            || authorized.digest != hex::encode(self.digests[0])
-            || !inactive.regions[1..PEER_PARTITIONS]
-                .iter()
-                .map(|region| region.uuid.as_str())
-                .eq(approval.payloads.as_flattened().iter().copied())
-        {
+        if approval.authorization.trial.stable.esp != stable.regions[0].uuid {
             return Err(invalid(
                 "trial approval differs from the reviewed EFI partitions or selected ESP bytes",
             )
             .into());
         }
-        Ok(())
+        require_trial_esp(inactive, &self.digests[0], approval)
     }
 
     fn matches(&self, target: &File, installed: Extent, index: usize) -> io::Result<bool> {
@@ -604,6 +605,29 @@ impl Artifact {
             },
         )
     }
+}
+
+fn require_trial_esp<const N: usize>(
+    layout: &Layout<N>,
+    esp_digest: &[u8; 32],
+    approval: &Standing<'_>,
+) -> Result<()> {
+    let authorized = &approval.authorization;
+    let esp = &layout.regions[0];
+    if authorized.trial.candidate.esp != esp.uuid
+        || authorized.bytes != esp.extent.bytes
+        || authorized.digest != hex::encode(esp_digest)
+        || !layout.regions[1..PEER_PARTITIONS]
+            .iter()
+            .map(|region| region.uuid.as_str())
+            .eq(approval.payloads.as_flattened().iter().copied())
+    {
+        return Err(invalid(
+            "trial approval differs from the reviewed EFI partitions or selected ESP bytes",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 pub fn inspect(path: &Path, sector: u64) -> Result<()> {
@@ -677,7 +701,11 @@ impl StandingSite {
         if !self.boot_certificate.is_absolute() {
             return Err(invalid("reviewed Secure Boot certificate path must be absolute").into());
         }
-        let bytes = state::read(&self.boot_certificate, MANIFEST_BYTES)?;
+        self.pin_certificate(&self.boot_certificate, scratch)
+    }
+
+    fn pin_certificate(&self, source: &Path, scratch: &Path) -> Result<File> {
+        let bytes = state::read(source, MANIFEST_BYTES)?;
         if hex::encode(Sha256::digest(&bytes)) != self.boot_certificate_sha256 {
             return Err(invalid(
                 "Secure Boot certificate differs from standing installation policy",
@@ -687,6 +715,48 @@ impl StandingSite {
         let certificate = scratch.join("secure-boot.pem");
         fs::write(&certificate, bytes)?;
         Ok(state::open_regular(&certificate)?)
+    }
+
+    #[cfg(not(feature = "appliance"))]
+    pub(crate) fn verify_channel_candidate(
+        &self,
+        boot: &File,
+        certificate: &Path,
+        epochs: (u64, u64),
+        approval: &Standing<'_>,
+        trial_key: &[u8],
+        guest_change: Option<&guest_configuration::Grant>,
+    ) -> Result<()> {
+        self.require_trial_epochs(epochs.0, epochs.1, approval)?;
+        let layout = Layout::read(boot, boot.metadata()?.len(), self.sector_size, SLOT)?;
+        let esp = layout.regions[0].extent;
+        require_trial_esp(&layout, &digest(boot, esp)?, approval)?;
+        let scratch = tempfile::tempdir()?;
+        let cert = self.pin_certificate(certificate, scratch.path())?;
+        let checked = loader(
+            boot,
+            esp,
+            &cert,
+            scratch.path(),
+            &ReleaseEpoch {
+                number: epochs.1,
+                policy: &self.epoch_policy_sha256,
+                auto_pcr_key: Some(&self.storage_pcr_key_fingerprint),
+                require_trial: true,
+                trial: Some(approval),
+                trial_key: Some(trial_key),
+            },
+        )?;
+        if let Some(grant) = guest_change
+            && (checked.guest_configuration.binding.as_ref() != Some(&grant.change.next)
+                || checked.guest_configuration.authority != Some(grant.authority))
+        {
+            return Err(invalid(
+                "candidate UKI differs from the independently approved Guest configuration",
+            )
+            .into());
+        }
+        Ok(())
     }
 
     fn require_trial_epochs(

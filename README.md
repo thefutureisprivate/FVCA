@@ -259,6 +259,22 @@ Use a private release state directory for each role. The trusted boot controller
 
 Publish the selection as TUF targets `fvca-os-ROLE-CHANNEL.json` and `fvca-os-ROLE-CHANNEL.sig`. The policy's independent qualification key signs the exact channel JSON bytes after reviewing the release and its evidence. Use distinct owner, qualification, and TUF keys. The qualification authority allocates increasing sequence numbers within each role across its channels. The release digest covers the full role manifest, which binds every payload and the qualification evidence. [The Update Framework specification](https://theupdateframework.github.io/specification/latest/)
 
+#### Author the channel off-node
+
+Use the release client built without the `appliance` feature. Create a `0700` trusted scope directory on the review workstation with `policy.json`, `policy.sig`, `owner.public`, the pinned `trusted-root.json`, and an authenticated copy of the site's `active-os-release.json`. For a Host trial, include `secure-boot.pem` matching the certificate digest in the standing policy and `running-context`, copied from `/run/fvca/running-trial-context` on the verified active Host. Include the site's pinned raw Ed25519 `promotion.public` and `guest-configuration.public` when their approvals are supplied. Obtain these scope files independently of the release submission.
+
+Write the requested sequence, validity and exact approved candidate digest in `request.json`. The request's `release` is either `null` for a withdrawal or an object with `manifest_sha256` and `activation`. The tool derives the role, channel, compatibility and epoch from the authenticated scope and prepared release. Place the separately signed envelopes in the approvals directory using the role's `boot-trial.bin` or `guest-trial.bin`, with `boot-promotion.bin` and `guest-configuration-change.bin` when applicable. Use `-` for the release and approvals arguments when withdrawing a head.
+
+```sh
+fvca-release-client --prepare-os-channel trusted-scope request.json prepared-release approvals > head.json
+openssl pkeyutl -sign -rawin -inkey qualification.key -in head.json -out head.sig
+fvca-release-client --pack-os-channel trusted-scope request.json prepared-release approvals head.sig new-channel
+```
+
+Review the exact draft before signing it with the independent qualification key. The second command using `fvca-release-client` checks that signature against the standing policy and rechecks the release and approvals. It puts the head, detached signature, and authorized envelopes in `new-channel/targets/` with the consistent-snapshot filenames. Use `new-channel/target-records.json` alongside the prepared release records when authorizing the new TUF targets metadata.
+
+#### Channel head format
+
 ```json
 {
   "schema": "fvca-os-channel-v1",

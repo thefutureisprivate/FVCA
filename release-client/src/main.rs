@@ -344,6 +344,30 @@ fn run() -> Result<()> {
         .map(PathBuf::from)
         .collect::<Vec<_>>();
     match operands.as_slice() {
+        #[cfg(not(feature = "appliance"))]
+        [option, scope, request, package, approvals]
+            if option.as_os_str() == "--prepare-os-channel" =>
+        {
+            return channel::author::execute(scope, request, package, approvals, None);
+        }
+        #[cfg(not(feature = "appliance"))]
+        [
+            option,
+            scope,
+            request,
+            package,
+            approvals,
+            signature,
+            output,
+        ] if option.as_os_str() == "--pack-os-channel" => {
+            return channel::author::execute(
+                scope,
+                request,
+                package,
+                approvals,
+                Some((signature, output)),
+            );
+        }
         [option, reference, destination] if option.as_os_str() == "--issue-boot-challenge" => {
             return attestation::issue(reference, destination);
         }
@@ -551,7 +575,7 @@ fn usage() -> io::Error {
     #[cfg(not(feature = "appliance"))]
     {
         invalid(&format!(
-            "{instructions}\n       fvca-release-client --appraise-remote-boot TRUSTED_REFERENCE TRUSTED_ENROLLMENT TLS_CA TLS_SERVER_NAME OPERATOR_KEY"
+            "{instructions}\n       fvca-release-client --appraise-remote-boot TRUSTED_REFERENCE TRUSTED_ENROLLMENT TLS_CA TLS_SERVER_NAME OPERATOR_KEY\n       fvca-release-client --prepare-os-channel TRUSTED_SCOPE REQUEST PREPARED_RELEASE APPROVALS\n       fvca-release-client --pack-os-channel TRUSTED_SCOPE REQUEST PREPARED_RELEASE APPROVALS QUALIFICATION_SIGNATURE OUTPUT"
         ))
     }
     #[cfg(feature = "appliance")]
